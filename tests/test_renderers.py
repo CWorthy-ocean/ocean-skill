@@ -937,7 +937,7 @@ def test_units_go_on_each_panels_own_colorbar_not_its_title(skill_item):
     labels = {}
     for cax, parents in _colorbar_axes(fig):
         labels[parents[0].get_title()] = cax.get_ylabel() or cax.get_xlabel()
-    assert labels["bias"] == "[mmol m-3]"
+    assert labels["bias"] == "[mmol/m³]"
     assert labels["corr"] == "", "a correlation has no units to print"
     assert all("mmol" not in title for title in labels), "and no title repeats them"
 

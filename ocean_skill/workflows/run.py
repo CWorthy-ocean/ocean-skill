@@ -1056,6 +1056,8 @@ def run_suite(
 
         pdf_path = (report_dir / "report.pdf") if suite.pdf else None
         pooled_records: list[dict[str, Any]] = []
+        # where the records since the last ``section:`` divider begin
+        section_start = 0
 
         from ocean_skill.workflows.report import PdfReport
 
@@ -1075,6 +1077,7 @@ def run_suite(
                     # one did.
                     print(f"== section: {page.title} ==")
                     report.section(i, page.title, page.kwargs["text"])
+                    section_start = len(pooled_records)
                     continue
                 print(f"== page {i}/{n}: {page.title} ==")
                 if page.problem:
@@ -1096,7 +1099,15 @@ def run_suite(
                 )
                 with _PeakMemory() as mem, watch as strict_hits:
                     try:
-                        results = _pages.build(page, pooled_records=pooled_records)
+                        results = _pages.build(
+                            page,
+                            pooled_records=(
+                                pooled_records[section_start:]
+                                if page.kind == "summary"
+                                and page.kwargs.get("scope") == "section"
+                                else pooled_records
+                            ),
+                        )
                         error = None
                     except Exception as exc:
                         error = exc
@@ -1104,8 +1115,13 @@ def run_suite(
                     if error is None:
                         # inside the watch: layout warnings (tight/constrained layout)
                         # fire when the figure is rendered, which is here, not in build
-                        for suffix, fig in results:
-                            report.emit(fig, outputs.slug(page.title) + suffix)
+                        for k, (suffix, fig) in enumerate(results):
+                            # the caption goes under the page's first figure only
+                            report.emit(
+                                fig,
+                                outputs.slug(page.title) + suffix,
+                                caption=page.caption if k == 0 else None,
+                            )
                 page.elapsed = time.perf_counter() - t0
                 page.peak_mb = mem.peak_mb
                 if error is not None:
@@ -1135,6 +1151,12 @@ def run_suite(
                         )
                     )
                 pooled_records.extend(page.metrics_records)
+                if page.summary_table is not None:
+                    table_dir = report_dir / "metrics"
+                    table_dir.mkdir(exist_ok=True)
+                    page.summary_table.to_csv(
+                        table_dir / f"{suite.name}_{outputs.slug(page.title)}.csv"
+                    )
 
             metrics_csv = None
             if pooled_records:

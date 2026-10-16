@@ -133,12 +133,17 @@ def test_an_item_key_outranks_the_array_attribute():
     assert statistic_of({"field": var, "statistic": "std"}) == "std"
 
 
-def test_units_text_only_rewrites_a_spread():
+def test_units_text_spells_every_statistic_the_same_way():
     assert units_text("delta_degC^2", "var") == "°C²"
     assert units_text("(mg/m^3)^2", "var") == "(mg/m³)²"
-    assert units_text("mg/m^3", "mean") == "mg/m^3"  # a level keeps its spelling
-    assert units_text("mg/m^3", None) == "mg/m^3"
+    # a level goes through display() too, so one unit reads one way
+    assert units_text("mg/m^3", "mean") == "mg/m³"
+    assert units_text("mg/m^3", None) == "mg/m³"
+    assert units_text("degrees_celsius", None) == "°C"
+    assert units_text("degree_Celsius", "mean") == "°C"
+    assert units_text("mmol m-3", "max") == "mmol/m³"
     assert units_text(None, "var") == ""
+    assert units_text("", None) == ""
 
 
 # --- static renderer ------------------------------------------------------------------
@@ -161,7 +166,7 @@ def test_static_plain_chlorophyll_is_still_log_and_keeps_its_label():
     fig = render(_facet_spec(_map("mg/m^3", None, CHLOROPHYLL)))
     (mesh,) = _meshes(fig)
     assert isinstance(mesh.norm, mcolors.LogNorm)
-    assert _bar_labels(fig) == ["[mg/m^3]"]
+    assert _bar_labels(fig) == ["[mg/m³]"]
 
 
 def test_static_difference_of_variances_is_diverging_linear_and_labelled_alike():
@@ -206,7 +211,7 @@ def test_holoviews_plain_chlorophyll_is_still_log_and_keeps_its_label():
     )
     opts = _hv_mesh_opts(obj)
     assert opts["logz"] is True
-    assert opts["clabel"] == "mg/m^3"
+    assert opts["clabel"] == "mg/m³"
 
 
 def test_holoviews_row_of_variances_has_no_log_scale_and_a_readable_difference_label():
@@ -254,7 +259,7 @@ def test_holoviews_hover_of_a_plain_field_keeps_its_units():
         _facet_spec(_map("mg/m^3", None, CHLOROPHYLL)), renderer="holoviews"
     )
     (vdim,) = _hv_vdims(obj)
-    assert vdim.unit == "mg/m^3"
+    assert vdim.unit == "mg/m³"
 
 
 def test_holoviews_row_hover_reads_readable_units_on_every_panel_and_mutates_nothing():
@@ -443,10 +448,10 @@ def test_a_plain_field_keeps_its_units_on_every_summary_label():
 
     plain = _spread_comparisons("mg/m^3", None)
     fig = target(plain, normalize=False, legend_style=None)
-    assert fig.axes[0].get_ylabel() == "bias [mg/m^3]"
-    assert "[mg/m^3]" in fig.axes[0].get_xlabel()
+    assert fig.axes[0].get_ylabel() == "bias [mg/m³]"
+    assert "[mg/m³]" in fig.axes[0].get_xlabel()
     fig = taylor(plain, normalize=False, legend_style=None)
-    assert fig.axes[0].axis["left"].label.get_text() == "Standard deviation [mg/m^3]"
+    assert fig.axes[0].axis["left"].label.get_text() == "Standard deviation [mg/m³]"
 
     spec = PlotSpec(
         family="target",
@@ -454,7 +459,7 @@ def test_a_plain_field_keeps_its_units_on_every_summary_label():
         options={"normalize": False},
     )
     kwargs = render(spec, renderer="holoviews").opts.get().kwargs
-    assert kwargs["ylabel"] == "bias [mg/m^3]"
+    assert kwargs["ylabel"] == "bias [mg/m³]"
 
 
 def test_metric_items_carry_the_statistic_of_each_comparison():

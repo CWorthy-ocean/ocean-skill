@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 __all__ = [
     "COMPARE_DRAWS",
+    "SUMMARY_KINDS",
+    "SUMMARY_SCOPES",
     "PageConfig",
     "RefreshConfig",
     "RefreshSourceConfig",
@@ -36,6 +38,54 @@ _PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
 #: default) is the per-family ``.plot()``; the rest each draw the whole set as one
 #: figure.
 COMPARE_DRAWS = ("plot", "metrics_series", "target", "taylor")
+
+
+#: What a ``summary:`` page's ``kind:`` may name: the overviews
+#: :func:`ocean_skill.comparison.summary` draws, and ``table`` (the pooled metrics as
+#: a table figure). A page may give one, or a list -- one figure each.
+SUMMARY_KINDS = ("both", "taylor", "target", "portrait", "table")
+
+#: Which compare pages a ``summary:`` pools: ``all`` of those drawn so far (the
+#: default) or only ``section`` -- those since the last ``section:`` divider.
+SUMMARY_SCOPES = ("all", "section")
+
+#: The ``kind:`` of a ``summary:`` page that gives none.
+DEFAULT_SUMMARY_KINDS = ("both", "table")
+
+
+def summary_kinds(title: str, summary: dict[str, Any]) -> list[str]:
+    """Return a ``summary:`` page's ``kind:`` as a list, raising on anything unknown.
+
+    The one check of a summary page's ``kind:`` and ``scope:``, called at load time
+    (before ``{placeholders}`` are filled) and again after they are, by
+    :func:`ocean_skill.workflows.pages.expand`. A missing ``kind:`` is
+    :data:`DEFAULT_SUMMARY_KINDS`.
+    """
+    kind = summary.get("kind", list(DEFAULT_SUMMARY_KINDS))
+    kinds = [kind] if isinstance(kind, str) else kind
+    if not isinstance(kinds, list) or not kinds:
+        raise ValueError(
+            f"page {title!r}: summary: kind: must be one kind or a non-empty list "
+            f"of them, from {list(SUMMARY_KINDS)} -- got {kind!r}"
+        )
+    for k in kinds:
+        if k not in SUMMARY_KINDS:
+            raise ValueError(
+                f"page {title!r}: summary: kind: {k!r} is not a known kind -- "
+                f"choose from {list(SUMMARY_KINDS)}"
+            )
+    if len(set(kinds)) != len(kinds):
+        raise ValueError(
+            f"page {title!r}: summary: kind: {kinds} names a kind twice -- each "
+            "kind is one figure"
+        )
+    scope = summary.get("scope", "all")
+    if scope not in SUMMARY_SCOPES:
+        raise ValueError(
+            f"page {title!r}: summary: scope: {scope!r} is not a known scope -- "
+            f"choose from {list(SUMMARY_SCOPES)}"
+        )
+    return kinds
 
 
 def check_draw(title: str, draw: str, contours: Any) -> None:
@@ -199,6 +249,10 @@ class PageConfig(BaseModel):
     .STEP_REGISTRY`) rather than a hardcoded list here, so the two can never drift
     apart. ``field:``-only for now.
 
+    ``caption`` is a line or paragraph of text drawn under the page's figure in
+    ``report.pdf`` (and recorded in ``manifest.json``): any page that draws a figure,
+    but not a ``section:`` divider, whose own text is its ``section:`` string.
+
     ``contours`` overlays contour lines on a ``field:``/``compare:`` page's figure --
     ``true`` for the plotted object's own, or a mapping of overrides for a second
     object (see :func:`ocean_skill.workflows.pages.expand`, which checks its value
@@ -219,6 +273,7 @@ class PageConfig(BaseModel):
     then: list[str | dict[str, Any]] | None = None
     contours: Any = None
     draw: str | None = None
+    caption: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_kind(self) -> PageConfig:
@@ -257,6 +312,7 @@ class PageConfig(BaseModel):
             ("for_each", self.for_each is not None),
             ("then", self.then is not None),
             ("plot", bool(self.plot)),
+            ("caption", self.caption is not None),
         ):
             if present:
                 raise ValueError(
@@ -307,6 +363,14 @@ class PageConfig(BaseModel):
                 f"page {self.title!r}: contours: is only supported on field: and "
                 f"compare: pages (this page is {self.kind}:)"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _summary_kind_and_scope_are_known(self) -> PageConfig:
+        if self.summary is not None and "{" not in repr(
+            (self.summary.get("kind"), self.summary.get("scope"))
+        ):
+            summary_kinds(self.title, self.summary)
         return self
 
     @model_validator(mode="after")

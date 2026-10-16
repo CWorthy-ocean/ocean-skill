@@ -67,7 +67,7 @@ RUN_WINDOW = ("2011-01-01", "2011-04-30")
 
 #: Land that touches the open boundaries (the north-west corner). Off: the real PACMED
 #: boundaries are open ocean along their whole length. A test turns it on to show that a
-#: boundary row with land cells in it cannot be compared (see the test file's xfail).
+#: boundary row with land cells in it still compares (land is just missing data).
 BOUNDARY_LAND = False
 #: The land/ocean patterns: an island, a coastal bump and an inlet.
 _NORTH_SHELF_LAT = 48.0

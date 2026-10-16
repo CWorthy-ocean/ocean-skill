@@ -26,7 +26,13 @@ import numpy as np
 from ocean_skill import _stacklevel
 from ocean_skill.colormaps import cmaps_for, is_log, norm_for
 from ocean_skill.plot import _titles
-from ocean_skill.plot._colorbar import colorbar_ticks, difference_limit, round_limits
+from ocean_skill.plot._colorbar import (
+    ROBUST_FRACTION,
+    colorbar_ticks,
+    difference_limit,
+    resolve_diff_quantile,
+    round_limits,
+)
 from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
@@ -34,6 +40,7 @@ from ocean_skill.plot.coastline import (
     normalize_coastline_resolution,
 )
 from ocean_skill.plot.registry import register_renderer
+from ocean_skill.plot.spec import UnusableOptions
 from ocean_skill.plot.typography import (
     FACET_PANEL_W_FRACTION,
     MIN_PT,
@@ -126,7 +133,7 @@ def _limits(
     elif robust is False or robust is None:
         lo, hi = float(np.min(vals)), float(np.max(vals))
     else:
-        q = 0.8 if robust is True else float(robust)
+        q = ROBUST_FRACTION if robust is True else float(robust)
         if not 0.0 < q < 1.0:
             raise ValueError(
                 f"robust={robust!r} is not True/False or a central fraction in (0, 1) "
@@ -730,6 +737,37 @@ def _align_colorbars(fig, renderer=None) -> None:
             cax.set_position([near + gap[False] / fig_w, lo, width, hi - lo])
 
 
+def _level_row_gaps(fig, axes) -> None:
+    """Space a stacked grid's rows evenly, whatever each row's decorations were.
+
+    Constrained layout reserves room around every row for whatever sticks out of it, and
+    a colorbar's extension arrows do: a row whose bars have arrows is given a few more
+    pixels than one whose bars are closed, so the gaps between rows come out unequal
+    for a reason nothing on the page explains. Once the layout has settled, the first
+    and last rows are kept where they are and every row between is moved to the evenly
+    spaced position, together with its colorbars. The layout engine is stood down, as
+    :func:`_align_colorbars` does next and for the same reason (a later draw would
+    recompute the positions and undo this).
+
+    ``axes`` is the 2-D grid of panel axes, one row per entry; a grid of fewer than
+    three rows has no inner row to move and is left alone.
+    """
+    rows = [list(np.atleast_1d(row).ravel()) for row in axes]
+    if len(rows) < 3:
+        return
+    fig.canvas.draw()
+    tops = [max(ax.get_position().y1 for ax in row) for row in rows]
+    first, last = tops[0], tops[-1]
+    fig.set_layout_engine("none")
+    for i, row in enumerate(rows[1:-1], start=1):
+        dy = (first + (last - first) * i / (len(rows) - 1)) - tops[i]
+        members = set(row)
+        for ax in fig.axes:
+            parents = getattr(ax, "_osk_cbar_parents", None)
+            if ax in members or (parents and members.intersection(parents)):
+                ax.set_position(ax.get_position(original=True).translated(0.0, dy))
+
+
 def _add_row_label(ax, text: str, row_label_kwargs: dict[str, Any]) -> None:
     """Write a rotated label at the left edge of the row ``ax`` starts.
 
@@ -744,6 +782,30 @@ def _add_row_label(ax, text: str, row_label_kwargs: dict[str, Any]) -> None:
     ax._osk_row_label = ax.text(
         -0.18, 0.5, text, transform=ax.transAxes, **row_label_kwargs
     )
+    label = ax._osk_row_label
+    plain = label.get_tightbbox
+
+    def tightbbox(renderer=None):
+        """Count the label's width in the layout, but not its overhang in height.
+
+        ``Axes.get_tightbbox`` counts every child text, so a label longer than its
+        row (rotated, "chlorophyll a std of monthly means" is ~1.5in of type against
+        a ~0.9in panel) had its overhang reserved above and below the axes by
+        constrained_layout, crushing the maps to slivers. Its room on the left is
+        still reserved; its length is brought within the row by
+        :func:`_wrap_row_labels`.
+        """
+        from matplotlib.transforms import Bbox
+
+        box = plain(renderer)
+        if box is None or renderer is None:
+            return box
+        rows = ax.get_window_extent(renderer)
+        return Bbox.from_extents(
+            box.x0, max(box.y0, rows.y0), box.x1, min(box.y1, rows.y1)
+        )
+
+    label.get_tightbbox = tightbbox
 
 
 def _basemap(
@@ -1015,6 +1077,7 @@ def _draw_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -1044,6 +1107,11 @@ def _draw_row(
     from the figure's geometry, merged with the fixed style choices. Passed in rather
     than recomputed because the sizes belong to the whole figure, and a row cannot see
     how many other rows are sharing the page with it.
+
+    ``diff_quantile`` is the share of ``|difference|`` the difference panel's symmetric
+    range spans (default the 98th percentile; ``robust`` sets it too when this is
+    ``None`` -- see :func:`~ocean_skill.plot._colorbar.resolve_diff_quantile`); it is
+    ignored once ``div_norm`` is given.
 
     ``statistic`` is the reduction the row's fields are the result of, if they are one
     (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
@@ -1085,7 +1153,7 @@ def _draw_row(
             r,
         )
     if div_norm is None:
-        dmax = difference_limit(d)
+        dmax = difference_limit(d, resolve_diff_quantile(diff_quantile, robust))
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     resolved_titles = _titles.resolve_titles([tl, rl, "difference"], titles)
@@ -1156,6 +1224,7 @@ def _draw_section_row(
     scale: dict[str, float],
     defaults: dict[str, dict[str, Any]],
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -1196,6 +1265,9 @@ def _draw_section_row(
     The x label is read off ``geometry`` (this row's own), never assumed: in a stacked
     grid one row can run along a transect (kilometres) and the next along a meridian
     (degrees of latitude), and nothing here links their x axes.
+
+    ``diff_quantile`` is :func:`_draw_row`'s: the share of ``|difference|`` the
+    difference panel's symmetric range spans, ignored once ``div_norm`` is given.
 
     ``statistic`` is the reduction the row's fields are the result of, if they are one
     (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
@@ -1250,7 +1322,7 @@ def _draw_section_row(
             r,
         )
     if div_norm is None:
-        dmax = difference_limit(d)
+        dmax = difference_limit(d, resolve_diff_quantile(diff_quantile, robust))
         div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), d)
 
     # A secondary axis's tick labels are not something matplotlib clears a title for, so
@@ -2686,6 +2758,7 @@ def field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -2779,7 +2852,11 @@ def field_row(
     otherwise crush the rest of the map against one end of the bar.
 
     ``vmin``/``vmax`` pin the test/reference colour scale as in :func:`field_facet`;
-    the difference panel keeps its own.
+    the difference panel keeps its own, symmetric about zero and spanning
+    ``diff_quantile`` of ``|difference|`` -- a fraction, 0.98 (the 98th percentile) by
+    default. With ``robust`` set and no ``diff_quantile`` the difference panel follows
+    ``robust`` too (``True`` is 0.8, ``robust=q`` is ``q``); ``diff_quantile=1`` spans
+    the largest difference.
     """
     import matplotlib.pyplot as plt
 
@@ -2796,10 +2873,12 @@ def field_row(
         default_horizontal=True,  # one row: bars below, panels get the full cell width
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
+    explicit_size = figsize is not None
+    canvas = resolve_canvas(size, zoom)
     figsize = figsize or auto_figsize(
         aspect,
         nrows=1,
-        canvas=resolve_canvas(size, zoom),
+        canvas=canvas,
         font_scale=font_scale,
         horizontal_colorbar=horizontal,
     )
@@ -2834,6 +2913,7 @@ def field_row(
         coastline_resolution=coastline_resolution,
         land=land,
         robust=robust,
+        diff_quantile=diff_quantile,
         vmin=vmin,
         vmax=vmax,
         titles=titles,
@@ -2864,7 +2944,7 @@ def field_row(
             title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
         )
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
-    _fit_left_margin(fig)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
     if align_colorbars:
         _align_colorbars(fig)
     # after alignment, which is what finally decides how long each colorbar is
@@ -2873,7 +2953,7 @@ def field_row(
         # a shrunken row label is a *narrower* one, and its placement was measured
         # against the old width — re-place it against what is actually drawn now
         _clear_row_labels(fig)
-    _warn_if_cramped(fig, canvas=resolve_canvas(size, zoom), nrows=1)
+    _warn_if_cramped(fig, canvas=canvas, nrows=1)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -2921,6 +3001,7 @@ def _clear_row_labels(fig, renderer=None) -> None:
     if renderer is None:
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
+    _wrap_row_labels(fig, renderer)
     for ax in fig.axes:
         label = getattr(ax, "_osk_row_label", None)
         if label is None:
@@ -2951,7 +3032,43 @@ def _clear_row_labels(fig, renderer=None) -> None:
         label.set_position((x_axes, 0.5))
 
 
-def _fit_left_margin(fig, *, passes: int = 3) -> None:
+def _wrap_row_labels(fig, renderer) -> None:
+    """Break a row label that is longer than its row onto more lines.
+
+    A row label runs up the left edge, so its *height* is its length and the panel's
+    height is its budget. A long one ("chlorophyll a std of monthly means") overruns
+    that budget before any shrinking can help -- the type is already at its floor -- and
+    spilled into the next row's label. Splitting it at word boundaries into as many
+    balanced lines as the overrun calls for keeps it beside the row it names, trading
+    length for the width the left margin (:func:`_fit_left_margin`) already measures.
+
+    Runs from :func:`_clear_row_labels`, i.e. after the layout, when the panel's height
+    is known. A label the caller wrote with its own line breaks, or whose size they
+    pinned, is theirs and left alone; one that still does not fit on a single word's
+    length is left to :func:`_fit_text_widths` to shrink.
+    """
+    import math
+    import textwrap
+
+    for ax in fig.axes:
+        label = getattr(ax, "_osk_row_label", None)
+        if label is None or getattr(label, "_osk_size_pinned", False):
+            continue
+        text = label.get_text()
+        if not text or "\n" in text or " " not in text.strip():
+            continue
+        limit = ax.get_window_extent(renderer).height * _TEXT_FIT_FRACTION
+        length = label.get_window_extent(renderer).height
+        if limit <= 0 or length <= limit:
+            continue
+        lines = min(math.ceil(length / limit), 3, len(text.split()))
+        # wrap a little under an even share so the last line is not a stray word
+        width = math.ceil(len(text) / lines * 1.1)
+        wrapped = textwrap.wrap(text, width=width, break_long_words=False)
+        label.set_text("\n".join(wrapped))
+
+
+def _fit_left_margin(fig, *, passes: int = 3) -> bool:
     """Place the row labels, then widen the left margin until nothing spills off-canvas.
 
     Whether the left margin is wide enough is not something the layout engine can be
@@ -2973,8 +3090,13 @@ def _fit_left_margin(fig, *, passes: int = 3) -> None:
     the row labels first, since they are positioned relative to the latitude labels
     and so move with the axes; two passes normally converge, and ``passes`` bounds it
     either way.
+
+    Returns whether the layout the figure ends with may differ from the one it was
+    handed: a row label was placed (which the layout counts the width of) or the margin
+    had to be pushed in.
     """
     engine = fig.get_layout_engine()
+    moved = any(getattr(ax, "_osk_row_label", None) is not None for ax in fig.axes)
     for _ in range(passes):
         fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
@@ -2986,14 +3108,16 @@ def _fit_left_margin(fig, *, passes: int = 3) -> None:
         ]
         pad_px = _LEFT_MARGIN_PAD * fig.dpi / 72.0
         if not lefts or min(lefts) >= pad_px:
-            return
+            return moved
         if engine is None or not hasattr(engine, "get"):
-            return  # no constrained layout to push on; leave the figure as drawn
+            return moved  # no constrained layout to push on; leave the figure as drawn
         rect = tuple(engine.get().get("rect", (0, 0, 1, 1)))
         gutter = (pad_px - min(lefts)) / (fig.get_size_inches()[0] * fig.dpi)
         # rect is (left, bottom, width, height): take the space off the width too, or
         # the right-hand colorbar labels walk off the other edge instead.
         engine.set(rect=(rect[0] + gutter, rect[1], rect[2] - gutter, rect[3]))
+        moved = True
+    return moved
 
 
 #: Share of its own box one line of text may fill before :func:`_fit_text_widths`
@@ -3063,9 +3187,19 @@ def _fit_text_widths(fig, renderer=None) -> None:
             horizontal = ax._osk_cbar_horizontal
             label = (ax.xaxis if horizontal else ax.yaxis).label
             limit = (box.width if horizontal else box.height) * _TEXT_FIT_FRACTION
-            _shrink_to_fit(
-                label, limit, renderer, along="width" if horizontal else "height"
-            )
+            along = "width" if horizontal else "height"
+            if (
+                not horizontal
+                and not getattr(label, "_osk_size_pinned", False)
+                and label.get_text().count(" [") == 1
+                and getattr(label.get_window_extent(renderer), along) > limit
+            ):
+                # a rotated label longer than its bar runs into the next row's bar
+                # label; stacking the units under the words halves its length before
+                # any shrinking, which only has to deal with what is left
+                words, units = label.get_text().split(" [")
+                label.set_text(f"{words}\n[{units}")
+            _shrink_to_fit(label, limit, renderer, along=along)
             continue
         _shrink_to_fit(ax.title, box.width * _TEXT_FIT_FRACTION, renderer)
         # axis labels run along their own axis; the y label is rotated, so its height
@@ -3202,6 +3336,197 @@ def _warn_if_cramped(
     )
 
 
+#: Fraction of a figure's height the next :func:`_fill_canvas` pass must be able to gain
+#: or shed before it is worth another draw. Below this the panels already fill their
+#: cells for every practical purpose.
+_FILL_TOLERANCE = 0.015
+#: How much surplus height (in) a settled figure may keep: the fill stops within
+#: :data:`_FILL_TOLERANCE` of a height that still wants to grow, but leaves at most this
+#: much above the panels, so an aspect-locked map never sits letterboxed in its cell.
+_FILL_SLACK_IN = 0.01
+
+
+def _stack_long_bar_labels(fig, renderer) -> bool:
+    """Put a vertical bar's units under its words, while the layout can still make room.
+
+    :func:`_fit_text_widths` does this for a label longer than its bar, but it runs once
+    the layout is stood down: the second line is then a few more points of width that
+    nothing reserved, and on the rightmost bar they land past the canvas edge. Done here
+    -- while constrained layout is live, with the bar's length taken as the panels it
+    spans, which is what :func:`_align_colorbars` will make it -- the layout has the
+    final width to work with. Measures the figure as last drawn; returns whether any
+    label changed (the caller redraws).
+    """
+    changed = False
+    for cax in fig.axes:
+        parents = getattr(cax, "_osk_cbar_parents", None)
+        if not parents or cax._osk_cbar_horizontal:
+            continue
+        label = cax.yaxis.label
+        if getattr(label, "_osk_size_pinned", False):
+            continue
+        if label.get_text().count(" [") != 1:
+            continue
+        boxes = [p.get_window_extent(renderer) for p in parents]
+        span = max(b.y1 for b in boxes) - min(b.y0 for b in boxes)
+        length = span * cax._osk_cbar_shrink
+        if label.get_window_extent(renderer).height > length * _TEXT_FIT_FRACTION:
+            words, units = label.get_text().split(" [")
+            label.set_text(f"{words}\n[{units}")
+            changed = True
+    return changed
+
+
+def _fill_canvas(
+    fig,
+    *,
+    canvas: Canvas | None = None,
+    design_aspect: float | None = None,
+    resize: bool = True,
+    passes: int = 6,
+) -> bool:
+    """Make the figure exactly as tall as its panels want, so they fill the width.
+
+    The figure *width* is the fixed thing (a report page is 8.5in wide); its height is
+    only an estimate made before any text was measured (:func:`row_height` and
+    friends). Constrained layout then divides the width evenly among the columns, and
+    a map panel is aspect-locked, so when the estimate is short each panel is limited
+    by its height and sits centred in a wider cell: the unused width reappears as wide
+    gutters between the columns (a 4-row compare grid came out 1.95in-wide maps in
+    cells 2.3in wide). When the estimate is tall, the surplus is blank space between
+    the rows.
+
+    So this measures the settled layout and resizes the figure's height until the
+    panels take their whole cell width: each panel wants ``cell_width / aspect`` of
+    height but has ``cell_height``, and the difference, summed over the rows, is how
+    much taller (or shorter) the figure has to be. Only the height moves, in at most
+    ``passes`` draws, so the figure width and type are untouched and nothing is
+    rearranged; text, colorbars and gutters keep the room they needed.
+
+    ``design_aspect`` is for panels that are *not* aspect-locked (sections, whose
+    shape is a design choice, see :data:`~ocean_skill.plot.typography.SECTION_ASPECT`):
+    they fill their cell either way, so instead the figure is grown until each is at
+    least that wide for its height -- never shrunk, since a section has no "right"
+    height to give back.
+
+    A capped canvas (``canvas.max_height``, the report page) bounds the growth by the
+    same allowance :func:`~ocean_skill.plot.typography.row_height` holds back for the
+    suptitle, so a grid that cannot fit simply keeps the largest panels the page allows.
+    ``resize=False`` (a caller who fixed the size) leaves the height alone and only
+    stacks the bar labels that need it (:func:`_stack_long_bar_labels`).
+
+    Returns whether anything changed. The caller re-places whatever was positioned
+    against the old geometry (:func:`_fit_left_margin`, :func:`_clear_row_labels`).
+    """
+    cap = None
+    if canvas is not None and canvas.max_height is not None:
+        cap = canvas.max_height - SUPTITLE_ALLOWANCE
+    changed = False
+    #: ``(height, wanted change in height)`` for every height tried, and the tightest
+    #: heights found so far that wanted to grow (``lo``) and to shrink (``hi``)
+    tried: list[tuple[float, float]] = []
+    lo = hi = None
+    last_side = None
+    for _ in range(passes):
+        fig.canvas.draw()
+        width, height = fig.get_size_inches()
+        wanted = 0.0
+        panels = [
+            ax
+            for ax in fig.axes
+            if ax.get_visible()
+            and not getattr(ax, "_osk_cbar_parents", None)
+            and ax.get_subplotspec() is not None
+        ]
+        deltas = []
+        for ax in panels if resize else []:
+            cell = ax.get_position(original=True)
+            drawn = ax.get_position()
+            if drawn.width <= 0 or drawn.height <= 0:
+                continue
+            cell_w, cell_h = cell.width * width, cell.height * height
+            if design_aspect is not None:
+                # a free axes fills its cell: ask for the shape it was designed to have
+                deltas.append(max(cell_w / design_aspect - cell_h, 0.0))
+            else:
+                aspect = drawn.width * width / (drawn.height * height)
+                deltas.append(cell_w / aspect - cell_h)
+        if deltas:
+            rows = len({ax.get_subplotspec().rowspan.start for ax in panels})
+            wanted = min(deltas) * rows
+            if cap is not None:
+                wanted = min(wanted, max(cap - height, 0.0))
+        tried.append((height, wanted))
+        if -_FILL_SLACK_IN < wanted < _FILL_TOLERANCE * height:
+            # the height is settled, so the bars are their final length: only now is a
+            # label longer than its bar really too long (a bar grows with the figure)
+            if not _stack_long_bar_labels(fig, fig.canvas.get_renderer()):
+                return changed
+            changed = True
+            continue
+        changed = True
+        # A bar's thickness grows with the figure, and so the cells narrow as it grows:
+        # near the height where the maps stop being height-limited the answer swings by
+        # more than the step asked for. Step by the measured want until it has changed
+        # sign, then interpolate inside the bracket, which cannot overshoot (halving the
+        # end that keeps being retained -- the Illinois rule -- so it does not stall).
+        side = "above" if wanted > 0 else "below"
+        if side == "above":
+            lo = (height, wanted)
+        else:
+            hi = (height, wanted)
+        if lo is not None and hi is not None:
+            if side == last_side:
+                if side == "above":
+                    hi = (hi[0], hi[1] / 2.0)
+                else:
+                    lo = (lo[0], lo[1] / 2.0)
+            target = lo[0] + lo[1] * (hi[0] - lo[0]) / (lo[1] - hi[1])
+        else:
+            target = height + wanted
+        last_side = side
+        fig.set_size_inches(width, target)
+    # out of passes: keep the best height seen rather than the last one tried
+    best = min((h for h, d in tried), key=lambda h: abs(dict(tried)[h]), default=None)
+    if best is not None and not np.isclose(best, fig.get_size_inches()[1]):
+        fig.set_size_inches(width, best)
+    return changed
+
+
+def _settle_layout(
+    fig,
+    *,
+    explicit_size: bool,
+    canvas: Canvas | None,
+    design_aspect: float | None = None,
+    margin: bool = True,
+) -> None:
+    """Size the figure to its panels (:func:`_fill_canvas`), then fit the left margin.
+
+    The two feed each other -- the row labels :func:`_fit_left_margin` places and wraps
+    change how wide the cells are, and the cell width is what :func:`_fill_canvas`
+    sizes the height from -- so after the margin is fitted the figure is measured again,
+    and re-fitted if that moved it (a figure that has converged costs one more draw).
+    A caller who passed ``figsize=`` (or ``row_height=``) asked for that size, so it is
+    theirs and only the margin is fitted; every other figure is sized by the package and
+    is free to settle.
+    """
+
+    def fill() -> bool:
+        return _fill_canvas(
+            fig, canvas=canvas, design_aspect=design_aspect, resize=not explicit_size
+        )
+
+    fill()
+    if not margin:
+        return
+    moved = _fit_left_margin(fig)
+    for _ in range(2):
+        if not (moved and fill()):
+            break
+        moved = _fit_left_margin(fig)
+
+
 def _map_aspect(comparisons, reference_name: str) -> float:
     """Return the maps' true-shape width / height — see :func:`_aspect_of`.
 
@@ -3254,6 +3579,7 @@ def _shared_norms(
     robust: bool | float = False,
     vmin: float | None = None,
     vmax: float | None = None,
+    diff_quantile: float | None = None,
 ):
     """Return one ``(seq_norm, div_norm)`` computed across *every* row.
 
@@ -3289,7 +3615,7 @@ def _shared_norms(
         [np.asarray(c["aligned"]["difference"]).ravel() for c in comparisons]
     )
     finite = all_d[np.isfinite(all_d)]
-    dmax = difference_limit(finite)
+    dmax = difference_limit(finite, resolve_diff_quantile(diff_quantile, robust))
     div_norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), finite)
     return seq_norm, div_norm
 
@@ -3316,6 +3642,8 @@ def field_grid(
     metrics_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
     shared_limits: bool = False,
+    panels: str = "all",
+    ncols: int | None = None,
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
@@ -3328,6 +3656,7 @@ def field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -3353,6 +3682,12 @@ def field_grid(
     a many-row grid keeps every panel at full height and simply gets longer, which is
     what you want in a notebook. ``zoom`` multiplies whichever canvas you chose.
 
+    The canvas fixes the figure's *width*; its height is then settled against the drawn
+    layout (:func:`_fill_canvas`), so the maps -- which are aspect-locked -- take their
+    whole column rather than sitting in a wider cell with a gutter either side. Only the
+    height moves, within the canvas' cap, and not when ``figsize`` or ``row_height``
+    pinned it. The same holds for the other stacked and gridded families.
+
     Font sizes are derived from the figure's geometry rather than fixed, so a grid of
     eight rows gets smaller panel type than a grid of two without being asked, while its
     suptitle — which labels the whole figure, not one row — does not shrink with the
@@ -3371,7 +3706,20 @@ def field_grid(
     ``shared_limits=True``, the whole grid's) sequential colour scale spans the
     full data range by default, or the 10th–90th percentile with ``robust=True``.
     ``vmin``/``vmax`` pin the test/reference scale of every row alike (with or without
-    ``shared_limits``) as in :func:`field_facet`; each difference panel keeps its own.
+    ``shared_limits``) as in :func:`field_facet`; each difference panel keeps its own,
+    symmetric about zero and spanning ``diff_quantile`` of ``|difference|`` -- a
+    fraction, 0.98 (the 98th percentile) by default; with ``robust`` set and no
+    ``diff_quantile`` the difference panels follow ``robust`` too (``True`` is 0.8,
+    ``robust=q`` is ``q``), and ``diff_quantile=1`` spans the largest difference.
+
+    ``panels="difference"`` draws only each comparison's difference panel instead of
+    its ``test | reference | difference`` row: one panel per comparison, titled by its
+    own label (``titles=`` overrides), wrapped into ``ncols`` columns (default: the
+    shape the maps' aspect calls for -- ``ncols=4`` for rows of years against columns
+    of seasons) and **all on one symmetric colour scale with one colorbar**, which
+    ``diff_quantile`` (pooled over every panel) sets. The comparisons should share
+    units; mixed variables warn. ``ncols=`` is meaningful only here. The default,
+    ``panels="all"``, is the stacked rows described above.
 
     ``shared_axis_labels=True`` (the default) draws grid lines on every panel but
     only labels the leftmost column's latitude axis and the bottom row's longitude
@@ -3411,6 +3759,35 @@ def field_grid(
     import matplotlib.pyplot as plt
 
     _warn_if_interactive_only(rasterize, hover, tiles)
+    _check_panels(panels, ncols)
+    if panels == "difference":
+        return _difference_grid(
+            comparisons,
+            sections=False,
+            ncols=ncols,
+            title=title,
+            mark=mark,
+            save=save,
+            domain=domain,
+            figsize=figsize,
+            colorbar_kwargs=colorbar_kwargs,
+            colorbar_label_clipped=colorbar_label_clipped,
+            title_kwargs=title_kwargs,
+            gridline_kwargs=gridline_kwargs,
+            tick_label_kwargs=tick_label_kwargs,
+            suptitle_kwargs=suptitle_kwargs,
+            shared_axis_labels=shared_axis_labels,
+            align_colorbars=align_colorbars,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            fit_text=fit_text,
+            coastline_resolution=coastline_resolution,
+            land=land,
+            robust=robust,
+            diff_quantile=diff_quantile,
+            titles=titles,
+        )
 
     if title is None:
         title = grid_suptitle(comparisons)
@@ -3427,6 +3804,7 @@ def field_grid(
         default_horizontal=False,
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
+    explicit_size = figsize is not None or row_height is not None
     row_h = row_height or _row_height(
         comparisons,
         reference_name,
@@ -3466,6 +3844,7 @@ def field_grid(
             robust=robust,
             vmin=vmin,
             vmax=vmax,
+            diff_quantile=diff_quantile,
         )
 
     row_labels = [
@@ -3501,6 +3880,7 @@ def field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            diff_quantile=diff_quantile,
             vmin=vmin,
             vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
@@ -3531,7 +3911,8 @@ def field_grid(
             title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
         )
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
-    _fit_left_margin(fig)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
+    _level_row_gaps(fig, axes)
     if align_colorbars:
         _align_colorbars(fig)
     # after alignment, which is what finally decides how long each colorbar is
@@ -3541,6 +3922,242 @@ def field_grid(
         # against the old width — re-place it against what is actually drawn now
         _clear_row_labels(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=n)
+    if save:
+        save = Path(save).expanduser()
+        save.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save, dpi=150, bbox_inches="tight")
+    return fig
+
+
+def _check_panels(panels: str, ncols: int | None) -> None:
+    """Refuse a ``panels=``/``ncols=`` pair a comparison grid cannot draw."""
+    if panels not in ("all", "difference"):
+        raise ValueError(
+            f'panels must be "all" (test | reference | difference per row) or '
+            f'"difference" (the difference panels only); got {panels!r}.'
+        )
+    if panels == "all" and ncols is not None:
+        raise ValueError(
+            'ncols= wraps the difference panels of panels="difference" into columns; '
+            "a test | reference | difference grid is always three columns wide. "
+            'Pass panels="difference", or drop ncols=.'
+        )
+
+
+def _difference_grid(
+    items: list[dict[str, Any]],
+    *,
+    sections: bool,
+    ncols: int | None = None,
+    title: str | None = None,
+    mark: str = "pcolormesh",
+    save: str | Path | None = None,
+    domain: Any = None,
+    figsize: tuple[float, float] | None = None,
+    colorbar_kwargs: dict[str, Any] | None = None,
+    colorbar_label_clipped: bool = False,
+    title_kwargs: dict[str, Any] | None = None,
+    gridline_kwargs: dict[str, Any] | None = None,
+    tick_label_kwargs: dict[str, Any] | None = None,
+    suptitle_kwargs: dict[str, Any] | None = None,
+    shared_axis_labels: bool = True,
+    align_colorbars: bool = True,
+    font_scale: float = 1.0,
+    size: str | Canvas | tuple[float, float | None] | float | None = None,
+    zoom: float = 1.0,
+    fit_text: bool = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
+    robust: bool | float = False,
+    diff_quantile: float | None = None,
+    titles: Sequence[str | None] | None = None,
+    section_x: str = "auto",
+    fill_levels: Any = None,
+):
+    """Draw only the difference panel of each comparison, on one shared colorbar.
+
+    The ``panels="difference"`` figure of :func:`field_grid` (maps) and
+    :func:`section_row_grid` (``sections=True``): one panel per item -- its
+    ``test − reference`` -- wrapped into ``ncols`` columns (``None``: the shape
+    :func:`~ocean_skill.plot.typography.facet_layout` picks for the panels' aspect),
+    each titled by its comparison's own label (``titles=`` overrides). Every panel is
+    on **one**
+    symmetric scale and one colorbar -- the point of putting them side by side is to
+    compare them, which separate scales would defeat -- spanning ``diff_quantile`` of
+    ``|difference|`` pooled over all the panels (see
+    :func:`~ocean_skill.plot._colorbar.resolve_diff_quantile`). The panels have to share
+    units; a set mixing variables warns, as ``shared_limits=True`` does. Only the
+    differences are drawn: no metrics box, and a section's contour/cast overlays are
+    left off.
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.pyplot as plt
+
+    from ocean_skill.plot.typography import SECTION_ASPECT, facet_figsize, facet_layout
+
+    n = len(items)
+    if title is None:
+        title = grid_suptitle(items)
+    if sections:
+        from ocean_skill.plot.section import difference_fill_levels, prepare_section_row
+
+        prepared = [prepare_section_row(item["aligned"], section_x) for item in items]
+        diffs = [values["difference"] for values, _ in prepared]
+        aspect = SECTION_ASPECT
+    else:
+        diffs = [item["aligned"]["difference"] for item in items]
+        aspect = _aspect_of(diffs[0])
+    canvas = resolve_canvas(size, zoom)
+
+    names = {item.get("standard_name") for item in items}
+    if len(names) > 1:
+        import warnings
+
+        warnings.warn(
+            f"panels='difference' puts every comparison on one color scale, but they "
+            f"are different variables ({sorted(nm for nm in names if nm)}); their "
+            "ranges/units differ, so the shared bar won't mean the same thing on "
+            "every panel.",
+            stacklevel=_stacklevel.find(),
+        )
+    standard_name = items[0].get("standard_name")
+    statistic = statistic_of(items[0])
+    _, div = cmaps_for(standard_name, statistic=statistic)
+    finite = np.concatenate([np.asarray(d, dtype="float64").ravel() for d in diffs])
+    finite = finite[np.isfinite(finite)]
+    dmax = difference_limit(finite, resolve_diff_quantile(diff_quantile, robust))
+    norm = _with_range(mcolors.Normalize(vmin=-dmax, vmax=dmax), finite)
+
+    if ncols is None:
+        ncols, nrows = facet_layout(n, aspect, canvas=canvas)
+    else:
+        ncols = max(int(ncols), 1)
+        nrows = -(-n // ncols)
+    horizontal = (
+        colorbar_is_horizontal(
+            aspect,
+            default_horizontal=True,
+            requested=(colorbar_kwargs or {}).get("orientation"),
+        )
+        if n == 1
+        else ncols > nrows
+    )
+    explicit_size = figsize is not None
+    figsize = figsize or facet_figsize(
+        aspect,
+        nrows=nrows,
+        ncols=ncols,
+        title_every_row=True,
+        canvas=canvas,
+        font_scale=font_scale,
+    )
+    scale = type_scale(
+        figsize,
+        ncols=ncols,
+        nrows=nrows,
+        font_scale=font_scale,
+        figure_ncols=REFERENCE_GRID[0],
+    )
+    defaults = _style_defaults(scale, horizontal_colorbar=horizontal)
+    defaults["colorbar_kwargs"] = {
+        **defaults["colorbar_kwargs"],
+        "aspect": FACET_COLORBAR_ASPECT,
+    }
+    merged_title = _merged(defaults["title_kwargs"], title_kwargs)
+    title_pinned = _pinned(title_kwargs, "title_kwargs")
+
+    resolved = _titles.resolve_titles(
+        [item.get("row_label") or item.get("label") or "difference" for item in items],
+        titles,
+    )
+    subplot_kw = (
+        {}
+        if sections
+        else {"projection": _map_projection(*(item["aligned"] for item in items))}
+    )
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=figsize,
+        subplot_kw=subplot_kw,
+        constrained_layout=True,
+        squeeze=False,
+    )
+    flat = list(axes.ravel())
+    ims = []
+    for i in range(n):
+        ax = flat[i]
+        col = i % ncols
+        if sections:
+            values, geometry = prepared[i]
+            im = _draw_section(
+                ax,
+                values["difference"],
+                geometry,
+                cmap=div,
+                norm=norm,
+                mark=mark,
+                scale=scale,
+                ylabel=not shared_axis_labels or col == 0,
+                fill_levels=difference_fill_levels(fill_levels),
+            )
+            if shared_axis_labels and col != 0:
+                ax.tick_params(axis="y", labelleft=False)
+            ax.set_title(resolved[i], **merged_title)
+        else:
+            im = _draw_map(
+                ax,
+                diffs[i],
+                label=resolved[i],
+                cmap=div,
+                norm=norm,
+                mark=mark,
+                domain=domain,
+                gridline_kwargs=_merged(defaults["gridline_kwargs"], gridline_kwargs),
+                tick_label_kwargs=_merged(
+                    defaults["tick_label_kwargs"], tick_label_kwargs
+                ),
+                title_kwargs=merged_title,
+                # "is there a panel below me?", not "am I in the last row?": the last
+                # row is ragged when n does not fill the grid
+                left_labels=(col == 0) if shared_axis_labels else None,
+                bottom_labels=(i + ncols >= n) if shared_axis_labels else None,
+                coastline_resolution=coastline_resolution,
+                land=land,
+            )
+        ax.title._osk_size_pinned = title_pinned
+        ims.append(im)
+    # cells past the last panel carry no panel -- hidden rather than deleted, which
+    # keeps the drawn panels on the grid they were sized for
+    for ax in flat[n:]:
+        ax.set_visible(False)
+
+    units = items[0].get("units")
+    _draw_colorbar(
+        fig,
+        ims[0],
+        flat[:n],
+        f"test − reference [{units_text(units, statistic)}]" if units else "",
+        colorbar_kwargs,
+        defaults["colorbar_kwargs"],
+        label_clipped=colorbar_label_clipped,
+    )
+    if title:
+        sup = fig.suptitle(
+            title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+        )
+        sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _settle_layout(
+        fig,
+        explicit_size=explicit_size,
+        canvas=canvas,
+        design_aspect=aspect if sections else None,
+    )
+    if align_colorbars:
+        _align_colorbars(fig)
+    if fit_text:
+        _fit_text_widths(fig)
+    _centre_suptitle(fig)
     if save:
         save = Path(save).expanduser()
         save.parent.mkdir(parents=True, exist_ok=True)
@@ -4102,6 +4719,7 @@ def field_facet(
     else:
         horizontal = False if per_row_bars else ncols > nrows
 
+    explicit_size = figsize is not None
     figsize = figsize or facet_figsize(
         aspect,
         nrows=nrows,
@@ -4271,7 +4889,7 @@ def field_facet(
 
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
-    _fit_left_margin(fig)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
     # alignment first, then the fit: see _fit_text_widths, whose whole point is that it
     # measures each label against the box it will *end up* in
     if align_colorbars:
@@ -4759,6 +5377,29 @@ def _draw_casts(
         top.spines["top"].set_visible(False)
 
 
+def boundary_corners(values, x_name: str) -> list[float]:
+    """Kilometres along a section at which it turns a domain-boundary corner.
+
+    Read from the ``boundary_corner_km`` attribute of the section's x coordinate
+    ``x_name`` (or of the field itself), which a transect that follows the boundary
+    strip carries. Only an x axis in kilometres has them: a section drawn against
+    longitude or latitude has no kilometre to place them at. Only corners inside the
+    drawn extent count. Empty when there are none. Shared with the interactive renderer
+    so both draw the same lines.
+    """
+    coord = values[x_name]
+    raw = coord.attrs.get("boundary_corner_km")
+    if raw is None:
+        raw = values.attrs.get("boundary_corner_km")
+    if raw is None or str(coord.attrs.get("units", "km")) != "km":
+        return []
+    x = np.asarray(coord, dtype="float64")
+    if not np.isfinite(x).any():
+        return []
+    lo, hi = float(np.nanmin(x)), float(np.nanmax(x))
+    return [km for km in (float(k) for k in np.atleast_1d(raw)) if lo <= km <= hi]
+
+
 def _draw_section(
     ax,
     values,
@@ -4812,6 +5453,10 @@ def _draw_section(
     seafloor has its no-data cells white (:data:`~ocean_skill.plot.section.WATER_COLOR`,
     open water the casts did not reach) rather than the ``0.85`` grey, which would read
     as a second kind of rock next to the shaded seafloor.
+
+    A section whose along coordinate carries ``boundary_corner_km`` (a transect that
+    follows a domain boundary: the kilometres at which it turns a corner) gets a thin
+    dotted vertical line at each -- see :func:`boundary_corners`.
     """
     from ocean_skill.plot.section import WATER_COLOR
 
@@ -4840,6 +5485,8 @@ def _draw_section(
     if casts:
         _draw_casts(ax, casts, cast_kwargs, fontsize=scale["tick_label"])
     ax.set_xlim(xlim)  # the seafloor may run past the data; the data sets the extent
+    for km in boundary_corners(values, geometry.x_name):
+        ax.axvline(km, color="0.25", lw=0.6, ls=":", zorder=3, gid="boundary_corner")
     if overlay is not None and len(levels):
         _draw_overlay(
             ax,
@@ -6592,6 +7239,7 @@ def time_depth_row_grid(
         default_horizontal=False,  # stacked rows: bars beside, height is scarce
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
+    explicit_size = figsize is not None
     figsize = figsize or auto_figsize(
         SECTION_ASPECT,
         nrows=n,
@@ -6687,7 +7335,9 @@ def time_depth_row_grid(
             title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
         )
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
-    _fit_left_margin(fig)
+    _settle_layout(
+        fig, explicit_size=explicit_size, canvas=canvas, design_aspect=SECTION_ASPECT
+    )
     if align_colorbars:
         _align_colorbars(fig)
     if fit_text:
@@ -6718,6 +7368,8 @@ def field_map_grid(
     gridline_kwargs: dict[str, Any] | None = None,
     tick_label_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
+    row_label_kwargs: dict[str, Any] | None = None,
+    colorbars: str = "panel",
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
@@ -6764,18 +7416,33 @@ def field_map_grid(
     the two facets already fix the grid's shape (there is no ``nrows=`` here to combine
     it with, unlike :func:`time_depth_grid`; the unfaceted grid is always ncols-driven).
 
-    Each panel is titled by its own **variable** (:func:`field_title`) unfaceted -- the
-    inverse of :func:`field_facet`, where the panels say *when* and the variable rides
-    in the suptitle, because here the panels are exactly what differs and the suptitle
-    is whatever the whole set shares instead (``title`` defaults to
-    :func:`grid_suptitle`, which composes only the depth/time/region every item has in
-    common, dropping the variable since the items' ``standard_name``s differ by
-    construction). Faceted, the same variable/source identity instead classifies the
-    same way :func:`time_depth_grid`'s own faceted titling does: whichever reads the
-    same down every column (or across every row) names only that column's (row's) own
-    first drawn panel, and anything left stays on every drawn panel -- see
-    :func:`~ocean_skill.plot._facets.facet_grid_titles`. ``title``/the suptitle is
-    unaffected either way.
+    Each panel is titled, unfaceted, by whatever tells it from the others -- its
+    **variable** (:func:`field_title`) for a set of variables, its **statistic** for one
+    variable fanned over aggregates (``"mean"``, ``"std of monthly means"``), its level
+    or source likewise (:func:`~ocean_skill.plot._titles.map_panel_titles`): the inverse
+    of :func:`field_facet`, where the panels say *when* and the variable rides in the
+    suptitle, because here the panels are exactly what differs and the suptitle is
+    whatever the whole set shares instead (``title`` defaults to :func:`grid_suptitle`,
+    which composes only the variable/depth/time/region every item has in common).
+    Faceted, the same identity instead classifies the same way :func:`time_depth_grid`'s
+    own faceted titling does: whichever reads the same down every column (or across
+    every row) names only that column's (row's) own first drawn panel, and anything left
+    stays on every drawn panel -- see
+    :func:`~ocean_skill.plot._facets.facet_grid_titles`.
+    ``title``/the suptitle is unaffected either way.
+
+    ``rows=``/``cols=`` (and ``shared_limits=``) also take ``"depth"`` and
+    ``"statistic"`` -- the level a map was cut at and the aggregate that made it, as a
+    :class:`~ocean_skill.field.FieldSet` fanned over both carries them. Naming one
+    implies the other, and that pair is drawn as a report draws it: each *column*
+    titled once, across the top (the statistic, say), each *row* named down the left
+    edge
+    (``row_label_kwargs`` styles it) rather than repeated on every panel.
+    ``colorbars="column"`` then draws one colorbar per column, spanning its panels,
+    instead of one per panel -- meaningful only when every panel of a column is on the
+    same scale (``shared_limits="statistic"`` for the pair above, or ``"depth"`` for
+    the transpose) and refused otherwise. A :class:`~ocean_skill.field.FieldSet` whose
+    maps factor cleanly into levels and statistics asks for exactly this.
 
     Every other parameter means what it means in :func:`field_facet`/:func:`skill_map`,
     including ``robust`` (see :func:`_limits`) -- each panel's (or, with
@@ -6808,8 +7475,15 @@ def field_map_grid(
     _warn_if_interactive_only(rasterize, hover, tiles)
     if not items:
         raise ValueError("field_map_grid needs at least one field, got none")
+    if colorbars not in ("panel", "column"):
+        raise ValueError(f'colorbars must be "panel" or "column"; got {colorbars!r}.')
 
     faceted = rows is not None or cols is not None
+    if colorbars == "column" and not faceted:
+        raise ValueError(
+            'colorbars="column" draws a bar per column of a faceted grid -- pass '
+            'rows= and/or cols= (e.g. rows="depth", cols="statistic").'
+        )
     if faceted and ncols is not None:
         raise ValueError(
             f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- ncols= "
@@ -6823,14 +7497,17 @@ def field_map_grid(
         title = grid_suptitle(items)
 
     if faceted:
-        cells, row_values, col_values, _, _ = resolve_facets(
-            items, rows, cols, family="a set of maps"
+        cells, row_values, col_values, eff_rows, eff_cols = resolve_facets(
+            items, rows, cols, family="a set of maps", extended=True
         )
+        # a depth-by-statistic grid is titled by its margins (see the docstring)
+        margins = {eff_rows, eff_cols} == {"depth", "statistic"}
         cell_items: list[dict[str, Any] | None] = one_item_cells(
             cells, row_values, col_values, family="a set of maps"
         )
         nrows, ncols = len(row_values), len(col_values)
     else:
+        margins = False
         if ncols is None:
             ncols, nrows = facet_layout(n, aspect, canvas=canvas)
         else:
@@ -6858,6 +7535,7 @@ def field_map_grid(
             "facet_figsize). Pass figsize= or zoom= to compensate.",
             stacklevel=_stacklevel.find(),
         )
+    explicit_size = figsize is not None
     figsize = figsize or facet_figsize(
         aspect,
         nrows=nrows,
@@ -6885,10 +7563,18 @@ def field_map_grid(
     # FACET_COLORBAR_ASPECT is deliberately not applied: it exists for one bar
     # refitted across a whole row, and each bar here spans exactly one panel --
     # which is what the grid default already describes.
+    if colorbars == "column":
+        # one bar refitted across a column of panels comes out as many times fatter as
+        # there are rows -- see FACET_COLORBAR_ASPECT
+        defaults["colorbar_kwargs"] = {
+            **defaults["colorbar_kwargs"],
+            "aspect": FACET_COLORBAR_ASPECT,
+        }
     merged_title = _merged(defaults["title_kwargs"], title_kwargs)
     merged_gridline = _merged(defaults["gridline_kwargs"], gridline_kwargs)
     merged_tick = _merged(defaults["tick_label_kwargs"], tick_label_kwargs)
     merged_suptitle = _merged(defaults["suptitle_kwargs"], suptitle_kwargs)
+    merged_row_label = _merged(defaults["row_label_kwargs"], row_label_kwargs)
     title_pinned = _pinned(title_kwargs, "title_kwargs")
 
     fig, axes = plt.subplots(
@@ -6901,23 +7587,29 @@ def field_map_grid(
     )
     flat = list(axes.ravel())
 
-    if faceted:
+    if margins:
+        # every column named once across the top; the rows are named down the left edge
+        cell_titles = [
+            str(col_values[i % ncols]) if i < ncols and item is not None else ""
+            for i, item in enumerate(cell_items)
+        ]
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    elif faceted:
         components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
         for i, item in drawn:
-            components[i] = (
-                field_title(item.get("standard_name")),
-                item.get("label") or "",
-            )
+            components[i] = _titles.map_title_parts(item)
         _, cell_titles = facet_grid_titles(components, nrows, ncols)
         resolved_full = _titles.resolve_titles(cell_titles, titles)
     else:
-        drawn_titles = [field_title(item.get("standard_name")) for _, item in drawn]
+        drawn_titles = _titles.map_panel_titles([item for _, item in drawn])
         resolved_drawn = _titles.resolve_titles(drawn_titles, titles)
         resolved_full = [""] * len(cell_items)
         for (i, _), t in zip(drawn, resolved_drawn, strict=True):
             resolved_full[i] = t
 
-    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    limit_groups = resolve_limit_groups(
+        [item for _, item in drawn], shared_limits, extended=True
+    )
     panel_scale: dict[int, tuple[Any, Any]] = {}
     if limit_groups is not None:
         drawn_indices = [i for i, _ in drawn]
@@ -6947,7 +7639,41 @@ def field_map_grid(
             for i in group_indices:
                 panel_scale[i] = (cmap, norm)
 
+    def _bar_label(item):
+        return (
+            f"[{units_text(item['units'], statistic_of(item))}]"
+            if item.get("units")
+            else ""
+        )
+
+    column_bars: list[list[int]] = []
+    if colorbars == "column":
+        if limit_groups is None:
+            raise ValueError(
+                'colorbars="column" needs every panel of a column on one scale -- '
+                'pass shared_limits="statistic" (or "depth" for the transpose).'
+            )
+        drawn_indices = [i for i, _ in drawn]
+        group_of = {
+            drawn_indices[g]: n for n, group in enumerate(limit_groups) for g in group
+        }
+        for c in range(ncols):
+            members = [
+                i for i in range(c, len(cell_items), ncols) if cell_items[i] is not None
+            ]
+            if len({group_of[i] for i in members}) > 1:
+                raise ValueError(
+                    f"colorbars='column' but the panels of column {c + 1} are not all "
+                    f"on one scale (shared_limits={shared_limits!r}), so one bar "
+                    "cannot describe them -- group them with shared_limits= "
+                    "(\"statistic\" for "
+                    "a depth-by-statistic grid)."
+                )
+            if members:
+                column_bars.append(members)
+
     total_cells = nrows * ncols
+    ims: dict[int, Any] = {}
     for index, item in drawn:
         ax = flat[index]
         field = item["field"]
@@ -7001,16 +7727,30 @@ def field_map_grid(
             land=land,
         )
         ax.title._osk_size_pinned = title_pinned
-        bar_label = (
-            f"[{units_text(item['units'], statistic_of(item))}]"
-            if item.get("units")
-            else ""
-        )
+        ims[index] = im
+        if margins and index % ncols == 0:
+            _add_row_label(ax, str(row_values[index // ncols]), merged_row_label)
+            ax._osk_row_label._osk_size_pinned = _pinned(
+                row_label_kwargs, "row_label_kwargs"
+            )
+        if colorbars == "column":
+            continue
         _draw_colorbar(
             fig,
             im,
             ax,
-            bar_label,
+            _bar_label(item),
+            colorbar_kwargs,
+            defaults["colorbar_kwargs"],
+            label_clipped=colorbar_label_clipped,
+        )
+
+    for members in column_bars:
+        _draw_colorbar(
+            fig,
+            ims[members[0]],
+            [flat[i] for i in members],
+            _bar_label(cell_items[members[0]]),
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
             label_clipped=colorbar_label_clipped,
@@ -7028,10 +7768,13 @@ def field_map_grid(
     if title:
         sup = fig.suptitle(title, **merged_suptitle)
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas, margin=margins)
     if align_colorbars:
         _align_colorbars(fig)
     if fit_text:
         _fit_text_widths(fig)
+    if margins:
+        _clear_row_labels(fig)
     _warn_if_cramped(fig, ncols, canvas=canvas, nrows=nrows)
     if save:
         save = Path(save).expanduser()
@@ -7069,6 +7812,7 @@ def section_row(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -7091,7 +7835,8 @@ def section_row(
     :func:`series`. Test and reference share one colour scale (the full range of
     the pair by default, or its 10th-90th percentile with ``robust=True``;
     ``vmin``/``vmax`` pin it as in :func:`field_facet`); the
-    difference panel uses a diverging map centred on zero; metrics go in the
+    difference panel uses a diverging map centred on zero, spanning ``diff_quantile`` of
+    ``|difference|`` (see :func:`field_row`); metrics go in the
     difference panel's corner box — all exactly as
     :func:`field_row` draws a gridded comparison, just against depth and
     along-path distance instead of longitude and latitude.
@@ -7216,6 +7961,7 @@ def section_row(
         scale=scale,
         defaults=defaults,
         robust=robust,
+        diff_quantile=diff_quantile,
         vmin=vmin,
         vmax=vmax,
         titles=titles,
@@ -7302,6 +8048,8 @@ def section_row_grid(
     metrics_kwargs: dict[str, Any] | None = None,
     suptitle_kwargs: dict[str, Any] | None = None,
     shared_limits: bool = False,
+    panels: str = "all",
+    ncols: int | None = None,
     shared_axis_labels: bool = True,
     align_colorbars: bool = True,
     font_scale: float = 1.0,
@@ -7311,6 +8059,7 @@ def section_row_grid(
     rasterize: bool | str | None = None,
     hover: bool | None = None,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
@@ -7342,7 +8091,14 @@ def section_row_grid(
     does in :func:`field_grid` -- meaningful only when every row is the same variable,
     and warns if the rows' ``standard_name``s actually differ. ``vmin``/``vmax`` pin
     every row's test/reference scale as in :func:`field_facet`; each difference panel
-    keeps its own.
+    keeps its own, symmetric about zero and spanning ``diff_quantile`` of
+    ``|difference|`` (0.98 by default; ``robust`` sets it when it is ``None`` -- see
+    :func:`field_grid`).
+
+    ``panels="difference"`` draws only each section's difference panel, one per
+    comparison, wrapped into ``ncols`` columns on one symmetric colour scale and one
+    colorbar -- see :func:`field_grid`. Each panel is titled by its comparison's label;
+    contour overlays and cast marks are left off.
 
     **Rows do not share an x axis.** What runs along x is each row's own: kilometres
     along a transect for one row, degrees of latitude along a meridional slab for the
@@ -7402,6 +8158,32 @@ def section_row_grid(
     from ocean_skill.plot.typography import SECTION_ASPECT
 
     _warn_if_interactive_only(rasterize, hover)
+    _check_panels(panels, ncols)
+    if panels == "difference":
+        return _difference_grid(
+            items,
+            sections=True,
+            ncols=ncols,
+            title=title,
+            mark=mark,
+            save=save,
+            figsize=figsize,
+            colorbar_kwargs=colorbar_kwargs,
+            colorbar_label_clipped=colorbar_label_clipped,
+            title_kwargs=title_kwargs,
+            suptitle_kwargs=suptitle_kwargs,
+            shared_axis_labels=shared_axis_labels,
+            align_colorbars=align_colorbars,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            fit_text=fit_text,
+            robust=robust,
+            diff_quantile=diff_quantile,
+            titles=titles,
+            section_x=section_x,
+            fill_levels=fill_levels,
+        )
     _check_section_contours(
         any(item.get("contour") is not None for item in items),
         mark=mark,
@@ -7463,6 +8245,7 @@ def section_row_grid(
         default_horizontal=False,  # stacked rows: bars beside, height is scarce
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
+    explicit_size = figsize is not None
     figsize = figsize or auto_figsize(
         SECTION_ASPECT,
         nrows=n,
@@ -7502,6 +8285,7 @@ def section_row_grid(
             robust=robust,
             vmin=vmin,
             vmax=vmax,
+            diff_quantile=diff_quantile,
         )
 
     row_labels = [
@@ -7535,6 +8319,7 @@ def section_row_grid(
             scale=scale,
             defaults=defaults,
             robust=robust,
+            diff_quantile=diff_quantile,
             vmin=vmin,
             vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
@@ -7573,7 +8358,9 @@ def section_row_grid(
             title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
         )
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
-    _fit_left_margin(fig)
+    _settle_layout(
+        fig, explicit_size=explicit_size, canvas=canvas, design_aspect=SECTION_ASPECT
+    )
     if align_colorbars:
         _align_colorbars(fig)
     if fit_text:
@@ -7858,6 +8645,7 @@ def skill_map(
             "facet_figsize), so the maps may be squeezed. Pass figsize= or zoom=.",
             stacklevel=_stacklevel.find(),
         )
+    explicit_size = figsize is not None
     figsize = figsize or facet_figsize(
         aspect,
         nrows=nrows,
@@ -8070,7 +8858,7 @@ def skill_map(
             title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs)
         )
         sup._osk_size_pinned = _pinned(suptitle_kwargs, "suptitle_kwargs")
-    _fit_left_margin(fig)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
     if align_colorbars:
         _align_colorbars(fig)
     if fit_text:
@@ -8091,7 +8879,7 @@ def _units_label(da) -> str:
     :func:`field_facet` every panel here has a bar of its own and a title copy would
     say it twice.
     """
-    units = str(da.attrs.get("units", "") or "")
+    units = units_text(da.attrs.get("units"))
     return f"[{units}]" if units else ""
 
 
@@ -8375,10 +9163,12 @@ def field_movie(
         default_horizontal=True,
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
+    explicit_size = figsize is not None
+    canvas = resolve_canvas(size, zoom)
     figsize = figsize or auto_figsize(
         aspect,
         nrows=1,
-        canvas=resolve_canvas(size, zoom),
+        canvas=canvas,
         font_scale=font_scale,
         horizontal_colorbar=horizontal,
     )
@@ -8473,7 +9263,9 @@ def field_movie(
 
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
-    _fit_left_margin(fig)
+    # sized once, here: every frame is drawn into this one layout, which is therefore
+    # the row field_row draws (see the movie test of that name)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
     # alignment first, then the fit — see _fit_text_widths. It matters more here than
     # on a still: every frame is drawn into this one layout, so a label clipped by
     # measuring it against a pre-alignment bar is clipped for the whole movie.
@@ -8615,11 +9407,13 @@ def facet_movie(
     # horizontal bar beneath it, a tall one a vertical bar beside it. Same rule
     # field_facet applies to its grid, which for a single cell *is* the map.
     horizontal = aspect > 1.0
+    explicit_size = figsize is not None
+    canvas = resolve_canvas(size, zoom)
     figsize = figsize or facet_figsize(
         aspect,
         nrows=1,
         ncols=1,
-        canvas=resolve_canvas(size, zoom),
+        canvas=canvas,
         font_scale=font_scale,
     )
     scale = type_scale(
@@ -8706,7 +9500,7 @@ def facet_movie(
 
     if title:
         fig.suptitle(title, **_merged(defaults["suptitle_kwargs"], suptitle_kwargs))
-    _fit_left_margin(fig)
+    _settle_layout(fig, explicit_size=explicit_size, canvas=canvas)
     # alignment first, then the fit — see _fit_text_widths and the note in field_movie
     _align_colorbars(fig)
     _fit_text_widths(fig)
@@ -9217,11 +10011,12 @@ def _check_options(fn, opts, *, name: str | None = None) -> None:
         else:
             lines.append(f"  {key!r} is not an option of {shown}()")
     accepted = ", ".join(sorted(k for k in params if not k.startswith("_")))
-    raise TypeError(
+    raise UnusableOptions(
         f"{shown}() got {len(unknown)} unusable option"
         f"{'' if len(unknown) == 1 else 's'}:\n"
         + "\n".join(lines)
-        + f"\n\n{shown}() accepts: {accepted}"
+        + f"\n\n{shown}() accepts: {accepted}",
+        tuple(sorted(unknown)),
     )
 
 
@@ -9300,7 +10095,10 @@ def _render(spec, **kwargs: Any):
         _check_options(section_grid if len(spec.items) > 1 else section, opts)
     elif family == "section_row":
         _check_options(
-            section_row_grid if len(spec.items) > 1 else section_row, opts
+            section_row_grid
+            if len(spec.items) > 1 or opts.get("panels") == "difference"
+            else section_row,
+            opts,
         )
     elif family == "cross":
         _check_options(cross, opts)
@@ -9393,7 +10191,8 @@ def _render(spec, **kwargs: Any):
             **opts,
         )
     if family == "section_row":
-        if len(spec.items) > 1:
+        # a lone comparison asking for panels="difference" is a one-panel grid
+        if len(spec.items) > 1 or opts.get("panels") == "difference":
             return section_row_grid(spec.items, **opts)
         item = spec.single
         return section_row(

@@ -670,7 +670,7 @@ def test_hover_gives_dots_depth_and_time_and_lines_depth():
     assert any("time" in t and "depth [m]" in t for t in tips)
     assert any("depth [m]" in t and "time" not in t for t in tips)
     for t in tips:
-        assert {"salinity", "temperature [degC]"} <= set(t)
+        assert {"salinity", "temperature [°C]"} <= set(t)
 
 
 # --- annotations, limits, labels ------------------------------------------------------
@@ -766,7 +766,7 @@ def test_two_axes_with_one_label_still_draw():
     assert len({d.label for d in points.kdims}) == 2
     (figure,) = _figures(out).values()
     assert figure.xaxis[0].axis_label == figure.yaxis[0].axis_label
-    assert figure.xaxis[0].axis_label == "temperature [degC]"
+    assert figure.xaxis[0].axis_label == "temperature [°C]"
 
 
 def test_a_ragged_last_row_labels_the_panel_above_the_gap():

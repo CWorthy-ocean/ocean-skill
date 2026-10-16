@@ -34,7 +34,7 @@ import numpy as np
 from ocean_skill.align import natural_convention
 from ocean_skill.colormaps import cmaps_for, variable_limits
 from ocean_skill.plot import _weighting
-from ocean_skill.plot._colorbar import difference_limit
+from ocean_skill.plot._colorbar import difference_limit, resolve_diff_quantile
 from ocean_skill.plot._statistic import statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
@@ -48,6 +48,7 @@ from ocean_skill.plot.matplotlib_renderer import (
     _lat_stretch,
     _station_values,
     _stretch_of,
+    boundary_corners,
     metric_value_text,
 )
 from ocean_skill.plot.registry import register_renderer
@@ -1424,6 +1425,13 @@ def _section_panel(
             panel = panel * layer
     for layer in lines:
         panel = panel * layer
+    # where a boundary-following transect turns a corner (the static renderer's dotted
+    # verticals); only a distance axis in km has them
+    hv = _extension()
+    for km in boundary_corners(field, mesh_opts["x"]):
+        panel = panel * hv.VLine(km).opts(
+            color="#404040", line_width=1, line_dash="dotted"
+        )
     if casts is not None:
         for layer in casts.casts:
             panel = panel * layer
@@ -1468,6 +1476,7 @@ def _field_row(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
@@ -1526,7 +1535,9 @@ def _field_row(
     (see :func:`_quadmesh`).
 
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
-    :func:`field_facet`; the difference panel keeps its own.
+    :func:`field_facet`; the difference panel keeps its own, symmetric about zero and
+    spanning ``diff_quantile`` of ``|difference|`` (default 0.98; ``robust`` sets it
+    when it is ``None``) -- see the static renderer's ``field_row``.
 
     ``titles=`` overrides the three panel titles by hand -- test, reference,
     difference, in that order -- with ``None`` at a position keeping that
@@ -1560,7 +1571,7 @@ def _field_row(
             lo = max(lo, 1e-6)
         seq_clim = (lo, hi)
     if div_clim is None:
-        dmax = difference_limit(d)
+        dmax = difference_limit(d, resolve_diff_quantile(diff_quantile, robust))
         div_clim = (-dmax, dmax)
     # the one scale both bars answer for: the row's own data unless a grid's shared
     # scale says more
@@ -1668,10 +1679,13 @@ def _field_grid(
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
     shared_limits: bool = False,
+    panels: str = "all",
+    ncols: int | None = None,
     titles=None,
     **_,
 ):
@@ -1716,6 +1730,12 @@ def _field_grid(
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
     :func:`field_facet`; the difference panel keeps its own.
 
+    ``panels="difference"`` draws only each comparison's difference panel -- one per
+    comparison, titled by its label, wrapped into ``ncols`` columns on one symmetric
+    colour range shared by all of them (``diff_quantile`` of the pooled
+    ``|difference|``) -- see the static renderer's ``field_grid``. Every interactive
+    panel carries its own colorbar, here all identical.
+
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list (row 0's test/reference/difference, then row 1's, ...), so a
     grid of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps
@@ -1723,7 +1743,31 @@ def _field_grid(
     ``ValueError`` listing the current titles.
     """
     from ocean_skill.plot import _titles
+    from ocean_skill.plot.matplotlib_renderer import _check_panels
 
+    _check_panels(panels, ncols)
+    if panels == "difference":
+        return _difference_grid(
+            items,
+            sections=False,
+            ncols=ncols,
+            title=title,
+            geo=geo,
+            shared_axes=shared_axes,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            domain=domain,
+            hover=hover,
+            rasterize=rasterize,
+            tiles=tiles,
+            coastline_resolution=coastline_resolution,
+            land=land,
+            robust=robust,
+            diff_quantile=diff_quantile,
+            colorbar_label_clipped=colorbar_label_clipped,
+            titles=titles,
+        )
     hv = _extension()
     title = _default_grid_title(items, title)
     row_labels = [labels or it.get("labels") or ("test", "reference") for it in items]
@@ -1776,7 +1820,10 @@ def _field_grid(
         )
         if log:
             lo = max(lo, 1e-6)
-        dmax = difference_limit(np.concatenate([np.asarray(d).ravel() for d in all_d]))
+        dmax = difference_limit(
+            np.concatenate([np.asarray(d).ravel() for d in all_d]),
+            resolve_diff_quantile(diff_quantile, robust),
+        )
         shared = {
             "seq_clim": (lo, hi),
             "div_clim": (-dmax, dmax),
@@ -1802,6 +1849,7 @@ def _field_grid(
             coastline_resolution=coastline_resolution,
             land=land,
             robust=robust,
+            diff_quantile=diff_quantile,
             vmin=vmin,
             vmax=vmax,
             colorbar_label_clipped=colorbar_label_clipped,
@@ -1814,6 +1862,182 @@ def _field_grid(
     for extra in rows[1:]:
         layout = layout + extra
     layout = layout.cols(3).opts(hv.opts.Layout(shared_axes=shared_axes))
+    if title:
+        layout = layout.opts(title=str(title))
+    return layout
+
+
+def _difference_grid(
+    items,
+    *,
+    sections: bool,
+    ncols: int | None = None,
+    title: str | None = None,
+    geo=True,
+    shared_axes: bool = True,
+    font_scale: float = 1.0,
+    size=None,
+    zoom: float = 1.0,
+    domain=None,
+    hover: bool = True,
+    rasterize: bool | str = "auto",
+    tiles: str | bool | None = True,
+    coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
+    land: bool | float = True,
+    robust: bool | float = False,
+    diff_quantile: float | None = None,
+    colorbar_label_clipped: bool = False,
+    titles=None,
+    mark: str | None = None,
+    fill_levels=None,
+    section_x: str = "auto",
+):
+    """Only the difference panel of each comparison, on one shared symmetric scale.
+
+    The interactive twin of the static renderer's ``_difference_grid``
+    (``panels="difference"``): one linked panel per item, titled by its label, laid out
+    ``.cols(ncols)`` (default: :func:`~ocean_skill.plot.typography.facet_layout`'s
+    choice), every panel on the one range ``diff_quantile`` of the pooled
+    ``|difference|`` spans. Each panel draws its own colorbar, all identical.
+    """
+    import warnings
+
+    from ocean_skill import _stacklevel
+    from ocean_skill.plot import _titles
+    from ocean_skill.plot.matplotlib_renderer import _aspect_of, grid_suptitle
+    from ocean_skill.plot.typography import SECTION_ASPECT, facet_layout
+
+    hv = _extension()
+    factor = _canvas_factor(size, zoom)
+    n = len(items)
+    if title is None:
+        title = grid_suptitle(items)
+    if sections:
+        from ocean_skill.plot.section import difference_fill_levels, prepare_section_row
+
+        prepared = [prepare_section_row(it["aligned"], section_x) for it in items]
+        diffs = [values["difference"] for values, _ in prepared]
+        aspect = SECTION_ASPECT
+    else:
+        diffs = [it["aligned"]["difference"] for it in items]
+        aspect = _aspect_of(diffs[0])
+    names = {it.get("standard_name") for it in items}
+    if len(names) > 1:
+        warnings.warn(
+            f"panels='difference' puts every comparison on one color scale, but they "
+            f"are different variables ({sorted(nm for nm in names if nm)}); their "
+            "ranges/units differ, so the shared bar won't mean the same thing on "
+            "every panel.",
+            stacklevel=_stacklevel.find(),
+        )
+    standard_name = items[0].get("standard_name")
+    statistic = statistic_of(items[0])
+    _, div = cmaps_for(standard_name, statistic=statistic)
+    units = f"test − reference {units_text(items[0].get('units'), statistic)}"
+    dmax = difference_limit(
+        np.concatenate([np.asarray(d).ravel() for d in diffs]),
+        resolve_diff_quantile(diff_quantile, robust),
+    )
+    clim = (-dmax, dmax)
+    data_range = _data_range(*diffs)
+    if ncols is None:
+        ncols, _nrows = facet_layout(n, aspect, canvas=resolve_canvas(size, zoom))
+    ncols = max(int(ncols), 1)
+    resolved = _titles.resolve_titles(
+        [it.get("row_label") or it.get("label") or "difference" for it in items],
+        titles,
+    )
+
+    panels = []
+    if sections:
+        mark, _style = _section_options(
+            has_contours=False,
+            mark=mark,
+            contour_levels=None,
+            contour_kwargs=None,
+            fill_levels=fill_levels,
+            section_x=section_x,
+        )
+        # linked by dimension name: panels whose x differs get their own, as the rows of
+        # _section_row_grid do
+        signatures = [
+            (g.x_name, float(np.nanmin(v["difference"][g.x_name])),
+             float(np.nanmax(v["difference"][g.x_name])))
+            for v, g in prepared
+        ]
+        distinct = list(dict.fromkeys(signatures))
+        for i, (values, geometry) in enumerate(prepared):
+            d, x_name = values["difference"], geometry.x_name
+            if len(distinct) > 1:
+                alias = f"{x_name}_{distinct.index(signatures[i])}"
+                renamed = d.rename({x_name: alias})
+                d = renamed.assign_coords(
+                    {alias: renamed[alias].assign_attrs(long_name=x_name)}
+                )
+                x_name = alias
+            panels.append(
+                _section_panel(
+                    d,
+                    mark=mark,
+                    fill_levels=difference_fill_levels(fill_levels),
+                    title=resolved[i],
+                    cmap=div,
+                    clim=clim,
+                    units=units,
+                    statistic=statistic,
+                    data_range=data_range,
+                    geo=False,
+                    x=x_name,
+                    y=geometry.y_name,
+                    aspect=SECTION_ASPECT,
+                    invert_y=True,
+                    bgcolor="#d9d9d9",
+                    axis_labels=(geometry.x_label, geometry.y_label),
+                    font_scale=font_scale,
+                    canvas_factor=factor,
+                    hover=hover,
+                    rasterize=_should_rasterize(d, rasterize),
+                    label_clipped=colorbar_label_clipped,
+                )
+            )
+    else:
+        tiles = _tiles_for(_check_tiles(tiles), *diffs)
+        coast = _offline_coastline(
+            *diffs,
+            geo=geo,
+            tiles=tiles,
+            land=land,
+            coastline_resolution=coastline_resolution,
+        )
+        for i, d in enumerate(diffs):
+            panel = _quadmesh(
+                d,
+                title=resolved[i],
+                cmap=div,
+                clim=clim,
+                data_range=data_range,
+                units=units,
+                statistic=statistic,
+                geo=geo,
+                font_scale=font_scale,
+                canvas_factor=factor,
+                hover=hover,
+                rasterize=_should_rasterize(d, rasterize),
+                tiles=tiles,
+                label_clipped=colorbar_label_clipped,
+            )
+            outline = _domain_overlay(domain, d, geo=geo, tiles=tiles)
+            for overlay in (coast, outline):
+                if overlay is not None:
+                    panel = panel * overlay
+            panels.append(panel)
+    if n == 1:
+        single = panels[0]
+        return single.opts(title=str(title)) if title else single
+    layout = panels[0]
+    for extra in panels[1:]:
+        layout = layout + extra
+    layout = layout.cols(ncols).opts(hv.opts.Layout(shared_axes=shared_axes))
     if title:
         layout = layout.opts(title=str(title))
     return layout
@@ -2971,6 +3195,7 @@ def _field_map_grid(
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
     shared_limits: bool | str = False,
+    colorbars: str = "panel",
     titles=None,
     **_,
 ):
@@ -3014,6 +3239,13 @@ def _field_map_grid(
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
     :func:`field_facet`; the difference panel keeps its own.
 
+    ``rows=``/``cols=``/``shared_limits=`` also take ``"depth"`` and ``"statistic"``, as
+    in the static renderer; a depth-by-statistic grid titles *every* panel in full
+    (``mean · 0 m``) here, since an interactive panel is read alone and bokeh has no
+    rotated row label to carry the level. ``colorbars="column"`` is accepted (and
+    checked) for parity, but changes nothing: every interactive panel carries its own
+    bar, and the bars of a column on one shared scale are identical.
+
     ``titles=`` overrides each panel's own title by hand: one string per item in
     ``items`` order (row-major, matching the panel grid) unfaceted, or -- faceted with
     ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included. ``None`` at
@@ -3028,16 +3260,20 @@ def _field_map_grid(
         resolve_facets,
         resolve_limit_groups,
     )
-    from ocean_skill.plot.matplotlib_renderer import (
-        field_title,
-        grid_suptitle,
-    )
+    from ocean_skill.plot.matplotlib_renderer import grid_suptitle
     from ocean_skill.plot.typography import facet_layout
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
 
+    if colorbars not in ("panel", "column"):
+        raise ValueError(f'colorbars must be "panel" or "column"; got {colorbars!r}.')
     faceted = rows is not None or cols is not None
+    if colorbars == "column" and not faceted:
+        raise ValueError(
+            'colorbars="column" draws a bar per column of a faceted grid -- pass '
+            'rows= and/or cols= (e.g. rows="depth", cols="statistic").'
+        )
     if faceted and ncols is not None:
         raise ValueError(
             f"rows={rows!r}/cols={cols!r} already fix this grid's shape -- ncols= "
@@ -3052,14 +3288,16 @@ def _field_map_grid(
         title = grid_suptitle(items)
 
     if faceted:
-        cells, row_values, col_values, _, _ = resolve_facets(
-            items, rows, cols, family="a set of maps"
+        cells, row_values, col_values, eff_rows, eff_cols = resolve_facets(
+            items, rows, cols, family="a set of maps", extended=True
         )
+        margins = {eff_rows, eff_cols} == {"depth", "statistic"}
         cell_items: list[dict[str, Any] | None] = one_item_cells(
             cells, row_values, col_values, family="a set of maps"
         )
         nrows, ncols = len(row_values), len(col_values)
     else:
+        margins = False
         if ncols is None:
             ncols, _nrows = facet_layout(
                 n, _aspect_of(items[0]["field"]), canvas=resolve_canvas(size, zoom)
@@ -3079,20 +3317,31 @@ def _field_map_grid(
         coastline_resolution=coastline_resolution,
     )
 
-    if faceted:
+    if margins:
+        cell_titles = [""] * len(cell_items)
+        for (i, _), t in zip(
+            drawn, _titles.map_panel_titles([item for _, item in drawn]), strict=True
+        ):
+            cell_titles[i] = t
+        resolved_full = _titles.resolve_titles(cell_titles, titles)
+    elif faceted:
         components: list[tuple[str | None, ...] | None] = [None] * len(cell_items)
         for i, item in drawn:
-            components[i] = (
-                field_title(item.get("standard_name")),
-                item.get("label") or "",
-            )
+            components[i] = _titles.map_title_parts(item)
         _, cell_titles = facet_grid_titles(components, nrows, ncols)
         resolved_full = _titles.resolve_titles(cell_titles, titles)
     else:
-        drawn_titles = [field_title(item.get("standard_name")) for _, item in drawn]
+        drawn_titles = _titles.map_panel_titles([item for _, item in drawn])
         resolved_full = _titles.resolve_titles(drawn_titles, titles)
 
-    limit_groups = resolve_limit_groups([item for _, item in drawn], shared_limits)
+    limit_groups = resolve_limit_groups(
+        [item for _, item in drawn], shared_limits, extended=True
+    )
+    if colorbars == "column" and limit_groups is None:
+        raise ValueError(
+            'colorbars="column" needs every panel of a column on one scale -- '
+            'pass shared_limits="statistic" (or "depth" for the transpose).'
+        )
     clims: dict[int, tuple[float, float]] = {}
     reaches: dict[int, tuple[float, float] | None] = {}
     if limit_groups is not None:
@@ -3197,6 +3446,7 @@ def _section_row(
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
@@ -3236,7 +3486,9 @@ def _section_row(
     only :func:`~ocean_skill.plot.section.prepare_section_row` can supply.
 
     ``vmin``/``vmax`` pin the test/reference colour scale as in the static renderer's
-    :func:`field_facet`; the difference panel keeps its own.
+    :func:`field_facet`; the difference panel keeps its own, symmetric about zero and
+    spanning ``diff_quantile`` of ``|difference|`` (default 0.98; ``robust`` sets it
+    when it is ``None``) -- see the static renderer's ``field_row``.
 
     ``robust`` means what it does in :func:`~ocean_skill.plot.matplotlib_renderer
     ._limits` — see the static renderer's ``section_row`` docstring, and is ignored
@@ -3395,7 +3647,7 @@ def _section_row(
             lo = max(lo, 1e-6)
         seq_clim = (lo, hi)
     if div_clim is None:
-        dmax = difference_limit(ld)
+        dmax = difference_limit(ld, resolve_diff_quantile(diff_quantile, robust))
         div_clim = (-dmax, dmax)
     # the one scale both bars answer for: the row's own data unless a grid's shared
     # scale says more
@@ -3496,12 +3748,15 @@ def _section_row_grid(
     metric_keys=DEFAULT_METRIC_KEYS,
     title: str | None = None,
     shared_limits: bool = False,
+    panels: str = "all",
+    ncols: int | None = None,
     font_scale: float = 1.0,
     size=None,
     zoom: float = 1.0,
     hover: bool = True,
     rasterize: bool | str = "auto",
     robust: bool | float = False,
+    diff_quantile: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     colorbar_label_clipped: bool = False,
@@ -3545,6 +3800,10 @@ def _section_row_grid(
     each other, while the three panels of one row remain linked. Depth, which every
     row agrees on, stays linked across rows when ``shared_axes=True``.
 
+    ``panels="difference"`` draws only each section's difference panel, one per
+    comparison, wrapped into ``ncols`` columns on one symmetric colour range (see
+    :func:`_field_grid`); contour overlays and cast marks are left off.
+
     ``titles=`` overrides every row's three panel titles by hand -- one flat,
     row-major list, ``3 * n`` entries; ``None`` keeps a panel's own title.
 
@@ -3561,10 +3820,32 @@ def _section_row_grid(
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import (
+        _check_panels,
         section_row_grid_title,
     )
     from ocean_skill.plot.section import prepare_section_row
 
+    _check_panels(panels, ncols)
+    if panels == "difference":
+        return _difference_grid(
+            items,
+            sections=True,
+            ncols=ncols,
+            title=title,
+            shared_axes=shared_axes,
+            font_scale=font_scale,
+            size=size,
+            zoom=zoom,
+            hover=hover,
+            rasterize=rasterize,
+            robust=robust,
+            diff_quantile=diff_quantile,
+            colorbar_label_clipped=colorbar_label_clipped,
+            titles=titles,
+            mark=mark,
+            fill_levels=fill_levels,
+            section_x=section_x,
+        )
     mark, style = _section_options(
         has_contours=any(it.get("contour") is not None for it in items),
         mark=mark,
@@ -3661,7 +3942,9 @@ def _section_row_grid(
             lo = max(lo, 1e-6)
         shared_seq_clim = (lo, hi)
         all_d_flat = np.concatenate([np.asarray(d).ravel() for d in all_d])
-        dmax = difference_limit(all_d_flat)
+        dmax = difference_limit(
+            all_d_flat, resolve_diff_quantile(diff_quantile, robust)
+        )
         shared_div_clim = (-dmax, dmax)
         shared_seq_range = _data_range(*all_t, *all_r, log=log)
         shared_div_range = _data_range(*all_d)
@@ -3679,6 +3962,7 @@ def _section_row_grid(
             hover=hover,
             rasterize=rasterize,
             robust=robust,
+            diff_quantile=diff_quantile,
             vmin=vmin,
             vmax=vmax,
             colorbar_label_clipped=colorbar_label_clipped,
@@ -4351,7 +4635,7 @@ def _skill_map(
             cmap=colors.cmap,
             clim=colors.clim(),
             data_range=colors.data_range(),
-            units=str(item["skill"][name].attrs.get("units", "") or ""),
+            units=units_text(item["skill"][name].attrs.get("units")),
             geo=geo,
             log=colors.log,
             font_scale=font_scale,
@@ -8009,7 +8293,7 @@ def render(spec, **kwargs: Any):
                 stacklevel=2,
             )
             opts.pop("domain", None)
-        if len(spec.items) > 1:
+        if len(spec.items) > 1 or opts.get("panels") == "difference":
             return _section_row_grid(spec.items, **opts)
         return _section_row(spec.single, **opts)
     if family == "cross":

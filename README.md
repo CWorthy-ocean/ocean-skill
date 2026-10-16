@@ -907,6 +907,42 @@ threshold and reference depth (0.03 kg m-3 from 10 m for density, 0.2 °C from 1
 temperature; `threshold=`/`ref_depth=` in the spec change them) are not part of the name,
 so they ride on the result's `mld_threshold`/`mld_ref_depth` attrs.
 
+**Water-column calculators** — two more registered calculators answer "where, and how
+thick" for any variable's profile, on native ROMS output and on depth-level products
+(WOA23, GLODAP) alike, so one spec serves both lanes of a comparison. Each takes a
+`variable` (any name or spec you could pass as `variable=`) and returns one number per
+water column:
+
+```python
+# depth (m, positive down) of the column's minimum -- or maximum -- of a variable
+{"calculate": "depth_of", "variable": "oxygen", "extremum": "min"}
+# summed thickness (m) of the layers where the variable is below -- or above -- a
+# threshold, in the variable's own units (oxygen is mmol m-3 here: the OMZ)
+{"calculate": "thickness", "variable": "oxygen", "below": 50}
+```
+
+The same two dicts go in a suite's `variables:` list as YAML flow maps
+(`{calculate: depth_of, variable: oxygen, extremum: min}`). `extremum` is required;
+`thickness` takes exactly one of `below` or `above` (strict `<`/`>`). Notes:
+
+- On ROMS the depth of each level is its own `z_rho`, and a layer's thickness is the
+  distance between its own two interfaces (`z_w`, built from `sigma_w`/`Cs_w`/`h`/`hc`
+  when the run carries them; otherwise estimated from the level centres, with a warning).
+  On depth-level data the levels are the vertical coordinate: a level's thickness runs
+  between the midpoints to its neighbors, the shallowest level starts at 0 m, and the
+  deepest extends half a spacing below its depth.
+- A tie for the extremum reports the shallowest level. A column with no data (land) is
+  NaN; a column with data where nothing qualifies is 0 m thick, not NaN.
+- These read the whole column themselves, so, like `mld`, they take no `depth` selection.
+  Time still works as usual: they are computed at every time step, so
+  `aggregate={"time": "mean"}` is the *mean depth of the minimum*, which is not the depth
+  of the minimum of the mean profile. For that, reduce the profile over time first and
+  take the minimum of the result.
+- `aggregate={"depth": "min"}` (or `"max"`) reduces the vertical axis whatever it is
+  called: `depth` on WOA, `s_rho` on native ROMS output (`Z` works too). A plain `mean`
+  over native levels is refused (their thicknesses are uneven, so it would not be a depth
+  mean) unless a depth-band selection has attached the cell weights.
+
 Any function can be plugged in this way, from a notebook, with no codebase change —
 `register_calculator` is public API, not an internal detail:
 

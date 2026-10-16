@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import calendar
 import html as _html
+import itertools
 import math
 import re
 from dataclasses import dataclass, field
@@ -56,6 +57,10 @@ _MISSING = "–"
 
 #: The whole-record line of a split metric (``split_all=``), in place of a level.
 _ALL = object()
+
+#: The tallest a table's rows may stack in one figure (:meth:`MetricsTable.to_figures`),
+#: in inches: what a Letter page holds under a title.
+MAX_TABLE_IN = 8.6
 
 #: The writers' file suffixes, for :meth:`MetricsTable.save`.
 _SUFFIXES = (".tex", ".md", ".html", ".csv")
@@ -543,8 +548,11 @@ class MetricsTable:
 
     # -- data -----------------------------------------------------------------------
 
-    def to_dataframe(self):
+    def to_dataframe(self, *, units: bool = False):
         """The numbers behind the table, unformatted, as a :class:`pandas.DataFrame`.
+
+        ``units=True`` adds a leading ``units`` column: each row's reference units as a
+        plot prints them (blank when dimensionless).
 
         Rows are ``(row, level)`` (``level`` is the split level -- a season -- when
         metrics are split into sub-rows) or just ``row``. Columns are metric names,
@@ -588,6 +596,10 @@ class MetricsTable:
             df.columns = [p[0] for p in paths]
         else:
             df.columns = pd.MultiIndex.from_tuples(paths)
+        if units:
+            row_units = {v["row"]: v["units"] for v in self._values}
+            key = ("units",) + ("",) * (width - 1) if width > 1 else "units"
+            df.insert(0, key, [row_units[i[0]] for i in index])
         return df
 
     def to_tidy(self):
@@ -597,6 +609,133 @@ class MetricsTable:
         df = pd.DataFrame(self._values)
         # drop the columns that carry nothing for this table
         return df.loc[:, [c for c in df.columns if (df[c] != "").any()]]
+
+    def to_figures(
+        self, *, max_rows: int | None = 24, title: str | None = "Metrics"
+    ) -> list:
+        """Draw the table as matplotlib figures of at most ``max_rows`` rows each.
+
+        Each figure is as wide as a Letter page, with the header repeated and the
+        title of every one after the first ending in ``(cont.)``; text columns wrap
+        so the table fits the width, and a long label makes its row taller rather
+        than the table wider. A figure also ends early when its rows would no longer
+        fit a Letter page. ``max_rows`` counts rows (a row that spans several lines
+        counts once); ``None`` limits only by the page. Spanning
+        cells (a table built with ``split=``) are drawn on their first line only.
+        """
+        import textwrap
+
+        import matplotlib.pyplot as plt
+        from matplotlib.table import Table
+
+        from ocean_skill.plot.typography import MIN_PT, PAGE_W
+
+        lay = self._layout
+        header = self._flat_header()
+        if header and not header[0]:
+            header[0] = "Comparison"
+        body = [[c.text if c is not None else "" for c in line] for line in lay.body]
+        aligns = [c.align for c in lay.cols]
+        starts = [*lay.row_starts, len(body)]
+        rows = [body[a:b] for a, b in itertools.pairwise(starts)]
+        if not rows:
+            raise ValueError("table has no rows to draw")
+        wrap = 34  # characters; wider text wraps onto more lines in its own row
+        width_in = PAGE_W - 0.6
+        wrapped = [
+            [
+                [
+                    textwrap.wrap(t, wrap) or [""] if a == "l" else [t]
+                    for t, a in zip(line, aligns, strict=True)
+                ]
+                for line in row
+            ]
+            for row in rows
+        ]
+        head = [textwrap.wrap(h, wrap) or [""] for h in header]
+        # one type size and column widths for every figure, so continued ones match:
+        # the size that fits the widest column contents into the page width
+        every_line = [line for row in wrapped for line in row]
+        size = 8.5
+        while True:
+            char_in = size * 0.62 / 72
+            widths = [
+                max(len(x) for cell in col for x in cell) + 3
+                for col in zip(head, *every_line, strict=True)
+            ]
+            if sum(widths) * char_in <= width_in or size <= MIN_PT:
+                break
+            size -= 0.5
+        col_in = [
+            w * char_in * min(1.0, width_in / (sum(widths) * char_in)) for w in widths
+        ]
+        line_in = size * 1.9 / 72
+        head_in = max(len(c) for c in head) * line_in + 0.06
+        row_in = [
+            [max(len(c) for c in line) * line_in + 0.06 for line in row]
+            for row in wrapped
+        ]
+        # a figure takes rows until max_rows, or what a Letter page can hold under
+        # the title, is reached (a long label makes a row tall)
+        chunks: list[list[int]] = [[]]
+        used = head_in
+        for i, row in enumerate(row_in):
+            if chunks[-1] and (
+                (max_rows and len(chunks[-1]) >= max_rows)
+                or used + sum(row) > MAX_TABLE_IN
+            ):
+                chunks.append([])
+                used = head_in
+            chunks[-1].append(i)
+            used += sum(row)
+
+        fig_list = []
+        for part, chunk in enumerate(chunks):
+            lines = [line for i in chunk for line in wrapped[i]]
+            heights = [head_in] + [h for i in chunk for h in row_in[i]]
+            title_in = 0.45 if title else 0.1
+            fig_h = title_in + sum(heights) + 0.15
+            fig = plt.figure(figsize=(PAGE_W, fig_h))
+            if title:
+                fig.suptitle(
+                    f"{title} (cont.)" if part else title,
+                    x=0.5,
+                    y=1 - 0.1 / fig_h,
+                    va="top",
+                    fontsize=size + 3,
+                )
+            ax = fig.add_axes(
+                (
+                    (PAGE_W - sum(col_in)) / 2 / PAGE_W,
+                    0.1 / fig_h,
+                    sum(col_in) / PAGE_W,
+                    sum(heights) / fig_h,
+                )
+            )
+            ax.axis("off")
+            tab = Table(ax, loc="upper left")
+            tab.auto_set_font_size(False)
+            loc = {"l": "left", "c": "center", "r": "right"}
+            for r, cells in enumerate([head, *lines]):
+                for c, text in enumerate(cells):
+                    tab.add_cell(
+                        r,
+                        c,
+                        col_in[c] / sum(col_in),
+                        heights[r] / sum(heights),
+                        text="\n".join(text),
+                        loc="center" if r == 0 else loc[aligns[c]],
+                        facecolor="0.9" if r == 0 else ("0.96" if r % 2 == 0 else "w"),
+                        edgecolor="0.75",
+                    )
+                    cell = tab[r, c]
+                    cell.set_linewidth(0.4)
+                    cell.get_text().set_fontsize(size)
+                    if r == 0:
+                        cell.get_text().set_fontweight("bold")
+            ax.add_table(tab)
+            fig_list.append(fig)
+        return fig_list
 
     def save(self, path: str | Path) -> Path:
         """Write the table to ``path``, choosing the format by suffix.

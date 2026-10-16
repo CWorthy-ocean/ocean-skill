@@ -68,6 +68,10 @@ refresh:
 
 defaults:
   test: pacmed_pyesper
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80% (difference panels too), so coastal and
+  # river-mouth extremes don't wash out the open ocean.
+  plot: {robust: true}
   depths: [surface, 100]
   # The time window for the extremum and domain-mean pages. Open-ended (no max) means
   # through the newest restart, so by default it is the whole simulation and follows the
@@ -78,6 +82,15 @@ defaults:
   snapshot_depths: [surface, 200]
 
 pages:
+  # -- model domain -----------------------------------------------------------------
+  - title: "Model domain"
+    section: ""
+
+  - title: "Bathymetry"
+    field: {variables: [h]}
+    caption: Grid depth h (m).
+    plot: {robust: false}           # the full depth range, trenches included
+
   # -- domain-wide trends ---------------------------------------------------------
   - title: "Domain-wide trends"
     section: >-
@@ -96,6 +109,9 @@ pages:
         lon: mean                              # one area-weighted whole-domain mean
         lat: mean
         # time: {resample: 3MS, reduce: mean}   # quarterly means instead of every restart
+    caption: >-
+      Area-weighted mean over the whole domain at each restart snapshot. The 100 m and
+      200 m lines cover only the water deeper than that depth.
     plot:
       title: "Domain-mean time series (area-weighted): surface, 100 m, 200 m"
       rows: variable           # one panel per variable, one shared legend for the depths
@@ -112,7 +128,10 @@ pages:
 
   # The whole window's surface field is loaded to search it, so these two pages read
   # more data than a single-snapshot page does.
-  - title: "Alkalinity minimum — time series"
+  - title: "Surface alkalinity minimum — time series"
+    caption: >-
+      The grid cell and restart with the lowest surface alkalinity in the window, and the
+      surface time series of the other variables at that one cell.
     field:
       variables: [alkalinity]
       select: {depth: surface, time: "{period}"}
@@ -120,7 +139,10 @@ pages:
       - extremum: min
       - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate], time: "{period}"}
 
-  - title: "Alkalinity maximum — time series"
+  - title: "Surface alkalinity maximum — time series"
+    caption: >-
+      The grid cell and restart with the highest surface alkalinity in the window, and the
+      surface time series of the other variables at that one cell.
     field:
       variables: [alkalinity]
       select: {depth: surface, time: "{period}"}
@@ -132,7 +154,7 @@ pages:
   - title: "Latest model snapshot"
     section: >-
       The newest restart on its own, with no observations: every variable at the surface,
-      then at 200 m, each map with its own robust color limits.
+      then at 200 m, each map with its own robust color limits (central 80%).
 
   - title: "Latest snapshot — {depth.label}"
     for_each:
@@ -141,7 +163,8 @@ pages:
       variables: [temperature, salinity, nitrate, phosphate, oxygen,
                   dissolved_inorganic_carbon, alkalinity]
       select: {depth: "{depth}", time: latest}
-    plot: {robust: true, colorbar_label_clipped: true}
+    caption: The newest restart snapshot, model only; robust color limits per map.
+    plot: {colorbar_label_clipped: true}
 
   # -- chlorophyll and mixed layer depth vs observations -------------------------------
   - title: "Chlorophyll and mixed layer depth vs observations"
@@ -162,6 +185,9 @@ pages:
            standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}
       select: {test: {depth: surface, time: latest}, reference: {}}
       times: {resample: 1D, reduce: mean}   # one comparison (row) for the snapshot day
+    caption: >-
+      Surface chlorophyll (sum of the three phytoplankton pools) in the newest restart
+      against the gap-free L4 satellite product on the same day.
 
   - title: "Mixed layer depth vs Holte & Talley — {month.name} {month.year}"
     for_each: {month: {run: {last: 1}}}   # latest month only; raise last: N for more months
@@ -173,6 +199,12 @@ pages:
         test: {time: "{month.window}"}
         reference: {month: "{month.month}"}
       aggregate: {test: {time: mean}, reference: {}}
+    caption: >-
+      Model mixed layer depth (0.03 kg/m³ sigma-theta threshold from 10 m) averaged over
+      the restarts of the latest month, against that calendar month of Holte & Talley.
+
+  - title: "Chlorophyll and mixed layer depth — metrics"
+    summary: {scope: section, kind: [table]}
 
   # -- nutrients vs WOA23 -----------------------------------------------------------
   - title: "Nutrients vs WOA23"
@@ -196,6 +228,12 @@ pages:
         test: {depth: "{depth}", time: "{month.window}"}
         reference: {depth: "{depth}"}
       aggregate: {time: mean}
+    caption: >-
+      Model mean over the restarts of the latest month against the WOA23 climatology for
+      that calendar month, at {depth.label}.
+
+  - title: "Nutrients vs WOA23 — metrics"
+    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
 
   # -- carbon vs GLODAPv2 -----------------------------------------------------------
   - title: "Carbon vs GLODAPv2"
@@ -214,6 +252,15 @@ pages:
       depths: ["{depth}"]
       select: {test: {time: "{month.window}"}, reference: {}}
       aggregate: {test: {time: mean}, reference: {}}
+    caption: >-
+      Model mean over the restarts of the latest month against the GLODAPv2.2016b mapped
+      climatology, at {depth.label}.
+
+  - title: "Carbon vs GLODAPv2 — metrics"
+    summary: {scope: section, kind: [table]}
+
+  - title: "Summary"
+    summary: {kind: both, color_by: variable}   # every comparison of the report
 
   # T-S diagrams and the zonal-velocity sections are in final-report.yaml: they are slow
   # (the T-S page took ~12 min, the velocity sections ~30 GB of memory) for a quick check.

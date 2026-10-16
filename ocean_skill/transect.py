@@ -20,6 +20,10 @@ waypoints/lines to roughly the model's own resolution
 ocean_skill.align.path_of`, the ``section`` plot family — reads either one
 identically.
 
+A **boundary strip** (``{"boundary": ["west", "south"]}``) joins the outermost
+rows/columns of the named grid sides into one section running on around the
+corners (:func:`boundary_strip`).
+
 A grid-aligned transect can also be **windowed** rather than taking the whole
 line: ``{"<dim>": <index>, "center": <index>, "half_width": <cells>}`` keeps only
 ``half_width`` cells on either side of ``center`` along the surviving axis, or
@@ -44,6 +48,7 @@ operation.
 
 from __future__ import annotations
 
+from itertools import pairwise
 from typing import Any
 
 import numpy as np
@@ -52,6 +57,7 @@ import xarray as xr
 __all__ = [
     "apply_transect",
     "as_transect",
+    "boundary_strip",
     "densify_waypoints",
     "grid_slice",
     "sample_along",
@@ -83,6 +89,17 @@ _GRID_WINDOW_KEYS = frozenset({"center", "half_width"})
 #: without reading most of the domain.
 _DEFAULT_HALF_WIDTH = 15
 
+#: ``select={"transect": {"boundary": [...]}}``: each open boundary of a ROMS grid as
+#: ``(fixed dimension, index)`` -- the outermost row/column, ``-1`` the far end -- with
+#: the axis it runs *along* (the other horizontal dimension). Two sides share a corner
+#: when their fixed dimensions differ (west/east are ``xi`` lines, south/north ``eta``).
+_BOUNDARY_SIDES = {
+    "west": ("xi_rho", 0),
+    "east": ("xi_rho", -1),
+    "south": ("eta_rho", 0),
+    "north": ("eta_rho", -1),
+}
+
 
 def as_transect(spec: Any) -> dict[str, Any]:
     """Validate and normalize a ``select={"transect": ...}`` value.
@@ -99,6 +116,8 @@ def as_transect(spec: Any) -> dict[str, Any]:
     (see :func:`_as_from_reference_transect`): ``{"kind": "from_reference",
     "method": ...}`` -- no points of its own; the path comes from whichever
     ordered collection of casts is standing in as the reference lane.
+    Boundary strip (see :func:`_as_boundary_transect`): ``{"kind": "boundary",
+    "sides": [...]}``.
     """
     if not isinstance(spec, dict) or not spec:
         raise ValueError(
@@ -108,6 +127,8 @@ def as_transect(spec: Any) -> dict[str, Any]:
         )
     if "cross" in spec:
         return _as_cross_transect(spec)
+    if "boundary" in spec:
+        return _as_boundary_transect(spec)
     if _FROM_REFERENCE_KEYS & set(spec):
         return _as_from_reference_transect(spec)
     if _ARBITRARY_PATH_KEYS & set(spec):
@@ -120,6 +141,56 @@ def as_transect(spec: Any) -> dict[str, Any]:
             "or interpolate."
         )
     return _as_grid_transect(spec)
+
+
+def _as_boundary_transect(spec: dict[str, Any]) -> dict[str, Any]:
+    """Parse the boundary-strip branch of :func:`as_transect`: ``{"boundary": [...]}``.
+
+    ``sides`` is one of ``"west"``/``"east"``/``"south"``/``"north"`` or a list of
+    them, in the order the strip is walked: each consecutive pair must share a grid
+    corner (a west side then a south one, never west then east), and the strip turns
+    the corner where they meet (:func:`boundary_strip`). Nothing else is accepted
+    beside it -- the sides are exact grid rows/columns, with nothing to interpolate.
+    """
+    extra = set(spec) - {"boundary"}
+    if extra:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: {sorted(extra)} do not apply to a "
+            "boundary strip -- it is the exact outermost row/column of each named "
+            "side, with nothing to window, space out or interpolate."
+        )
+    value = spec["boundary"]
+    sides = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(sides, list | tuple)
+        or not sides
+        or not all(isinstance(side, str) for side in sides)
+    ):
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: 'boundary' is a side or a list of "
+            f"sides, from {sorted(_BOUNDARY_SIDES)} -- e.g. {{'boundary': "
+            "['west', 'south']}."
+        )
+    unknown = [side for side in sides if side not in _BOUNDARY_SIDES]
+    if unknown:
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: {unknown} are not boundary sides -- "
+            f"choose from {sorted(_BOUNDARY_SIDES)}."
+        )
+    if len(set(sides)) != len(sides):
+        raise ValueError(
+            f"select={{'transect': {spec!r}}}: a side is named twice -- a strip "
+            "walks each boundary once."
+        )
+    for first, second in pairwise(sides):
+        if _BOUNDARY_SIDES[first][0] == _BOUNDARY_SIDES[second][0]:
+            raise ValueError(
+                f"select={{'transect': {spec!r}}}: {first!r} and {second!r} are "
+                "opposite sides of the grid and share no corner, so a strip cannot "
+                "turn from one into the other -- name them in an order where each "
+                "meets the next (e.g. ['west', 'south', 'east'])."
+            )
+    return {"kind": "boundary", "sides": list(sides)}
 
 
 def _as_half_width(half_width: Any) -> int:
@@ -807,6 +878,64 @@ def _attach_along_coord(
     return sliced
 
 
+def boundary_strip(obj, sides: list[str], *, subject: str = "the source"):
+    """Join the named open boundaries of a ROMS grid into one along-boundary section.
+
+    Each side is the grid's outermost row/column (:func:`grid_slice`), walked so the
+    strip is continuous: a side starts at the corner it shares with the previous one
+    and ends at the corner it shares with the next (the first side's direction is set
+    by the corner it shares with the second, a lone side runs in increasing index).
+    The shared corner cell is kept once, and the along coordinate is the cumulative
+    great-circle distance over the joined lon/lat, so it runs on through the corner.
+
+    The output is shaped like every other transect (:func:`_attach_along_coord`), plus
+    two attributes on the :data:`ocean_skill.align.ALONG_DIM` coordinate for a plot
+    to mark the corners with: ``boundary_sides`` (``"west,south"``, in walk order) and
+    ``boundary_corner_km`` (the along distance of each corner, one per join).
+
+    Variables on a horizontal dimension other than the one a side runs along (a
+    ``u`` on ``xi_u``, say) have no value on the strip and are dropped.
+    """
+    from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
+
+    n = len(sides)
+    pieces = []
+    for i, side in enumerate(sides):
+        dim, index = _BOUNDARY_SIDES[side]
+        if i > 0:
+            # start where the previous side's fixed row/column crosses this one
+            ascending = _BOUNDARY_SIDES[sides[i - 1]][1] == 0
+        elif n > 1:
+            # end where the next side's fixed row/column crosses this one
+            ascending = _BOUNDARY_SIDES[sides[1]][1] != 0
+        else:
+            ascending = True
+        piece = grid_slice(obj, dim, index, subject=subject)
+        if not ascending:
+            piece = piece.isel({ALONG_DIM: slice(None, None, -1)})
+        stray = [
+            name
+            for name, var in piece.variables.items()
+            if name not in piece.coords
+            and any(str(d).startswith(("eta_", "xi_")) for d in var.dims)
+        ]
+        piece = piece.drop_vars(stray)
+        if i > 0:
+            piece = piece.isel({ALONG_DIM: slice(1, None)})  # the corner, once
+        pieces.append(piece)
+
+    joined = xr.concat(
+        pieces, dim=ALONG_DIM, data_vars="minimal", coords="minimal", compat="override"
+    )
+    lon_name, lat_name = _lon_name(joined), _lat_name(joined)
+    joined = _attach_along_coord(joined, lon_name, lat_name, path_method="grid")
+    along = np.asarray(joined[ALONG_DIM])
+    corner_at = np.cumsum([piece.sizes[ALONG_DIM] for piece in pieces])[:-1] - 1
+    joined[ALONG_DIM].attrs["boundary_sides"] = ",".join(sides)
+    joined[ALONG_DIM].attrs["boundary_corner_km"] = [float(along[k]) for k in corner_at]
+    return joined
+
+
 def densify_waypoints(
     waypoints: list[list[float]], spacing_km: float
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -1217,6 +1346,8 @@ def apply_transect(obj, spec: dict[str, Any], *, subject: str = "the source"):
             "through osk.field(...), which builds the ocean_skill.field.Cross "
             "that draws them together -- not through a bare select= elsewhere."
         )
+    if parsed["kind"] == "boundary":
+        return boundary_strip(obj, parsed["sides"], subject=subject)
     if parsed["kind"] == "grid":
         return grid_slice(
             obj,

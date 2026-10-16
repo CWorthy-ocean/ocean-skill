@@ -392,7 +392,7 @@ def test_mixed_units_become_a_per_row_units_column():
     t = _plain_set().table(metrics=("bias",))
     md = t.to_markdown().splitlines()
     assert "Units" in md[0] and "bias |" in md[0] + " |"
-    assert any("umol/kg" in line and "Alk" in line for line in md)
+    assert any("µmol/kg" in line and "Alk" in line for line in md)
     assert (
         "Units" not in _plain_set().table(metrics=("bias",), units=False).to_markdown()
     )
