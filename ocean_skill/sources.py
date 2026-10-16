@@ -47,6 +47,20 @@ _READ_CACHE_MAXSIZE = 8
 #: hold must stay the full record.
 _TRUNCATE: dict[str, tuple[int, str | None, TimePins]] = {}
 
+#: In-process memo of the *truncated* result of :func:`read`, keyed on the read memo's
+#: key plus the source's :data:`_TRUNCATE` entry (``(steps, anchor, pins)`` -- all
+#: hashable, :class:`TimePins` being a frozen dataclass of tuples). Exists because
+#: cutting is not free: working out the kept steps may read the anchor source, and an
+#: ``isel`` on a dask-backed model with ~100k chunks builds a new graph every call, so
+#: a page that reads the same source a few dozen times spent minutes cutting it. Keeps
+#: the full record out of it by construction (only cut results are stored, and only
+#: while a truncation is active), and is emptied whenever :data:`_READ_CACHE` is
+#: cleared and when :func:`truncate_time` exits, so a later full or differently
+#: pinned read never meets a stale cut. Bounded like the read memo, and, like it,
+#: bypassed while :func:`ocean_skill.cache.disable` is in force.
+_TRUNCATED_CACHE: OrderedDict[tuple, Any] = OrderedDict()
+_TRUNCATED_CACHE_MAXSIZE = 32
+
 #: Slack allowed past the anchor's last time, for sources stamped slightly differently.
 _ANCHOR_TOLERANCE = "12h"  # under a daily step, so it admits no extra one
 
@@ -173,6 +187,7 @@ def truncate_time(
     finally:
         _TRUNCATE.clear()
         _TRUNCATE.update(saved)
+        _TRUNCATED_CACHE.clear()  # cut under pins that no longer apply
 
 
 def _anchor_end(anchor: str):
@@ -226,7 +241,19 @@ def _truncated(ref: SourceRef, obj):
                 f"{steps} step(s)",
                 stacklevel=2,
             )
-    return obj.isel({dim: sorted(keep)})
+    return obj.isel({dim: _as_slices(sorted(keep))})
+
+
+def _as_slices(positions: list[int]):
+    """``positions`` (sorted, distinct) as a ``slice`` if contiguous, else unchanged.
+
+    A slice of a dask-backed object keeps its chunks as they are, whereas an integer
+    list is a ``take`` that builds a far larger graph (for ~100k chunks, seconds per
+    call). Several separate runs stay a list: the cut is memoized, so it happens once.
+    """
+    if positions and positions[-1] - positions[0] == len(positions) - 1:
+        return slice(positions[0], positions[-1] + 1)
+    return positions
 
 
 def _ends(index: list[int], steps: int) -> list[int]:
@@ -328,7 +355,9 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
     :mod:`ocean_skill.cache`: :func:`ocean_skill.cache.disable` also disables this
     memo, and :func:`ocean_skill.cache.clear` also empties it -- call
     ``read.cache_clear()`` directly to do just that without touching the on-disk
-    cache. A bare ``cache=False`` passed to :func:`ocean_skill.compare`/``align()``
+    cache. Under :func:`truncate_time` the cut result is memoized too (see
+    :data:`_TRUNCATED_CACHE`), so a source is cut once per truncation, not per call.
+    A bare ``cache=False`` passed to :func:`ocean_skill.compare`/``align()``
     is a per-call flag, not :func:`ocean_skill.cache.disable`, so it still benefits
     from (and populates) this memo across one fan's comparisons.
     """
@@ -339,24 +368,41 @@ def read(source: str | SourceRef, *, qc: Any = None, **kwargs: Any):
 
     use_memo = _cache.enabled()
     key = _read_cache_key(ref, qc, kwargs) if use_memo else None
+    # a source being cut is looked up (and stored) under its own truncated key, so the
+    # cut -- which can read another source and builds a dask graph -- happens once
+    entry = _TRUNCATE.get(ref.name) if _TRUNCATE else None
+    tkey = (key, entry) if key is not None and entry is not None else None
+    if tkey is not None and tkey in _TRUNCATED_CACHE:
+        _TRUNCATED_CACHE.move_to_end(tkey)
+        return _TRUNCATED_CACHE[tkey].copy(deep=False)
+
     if key is not None and key in _READ_CACHE:
         _READ_CACHE.move_to_end(key)
-        return _truncated(ref, _READ_CACHE[key].copy(deep=False))
+        obj = _READ_CACHE[key]
+    else:
+        obj = _read_uncached(ref, meta, qc, kwargs)
+        if key is not None:
+            _READ_CACHE[key] = obj
+            _READ_CACHE.move_to_end(key)
+            while len(_READ_CACHE) > _READ_CACHE_MAXSIZE:
+                _READ_CACHE.popitem(last=False)
 
-    obj = _read_uncached(ref, meta, qc, kwargs)
-
-    if key is not None:
-        _READ_CACHE[key] = obj
-        _READ_CACHE.move_to_end(key)
-        while len(_READ_CACHE) > _READ_CACHE_MAXSIZE:
-            _READ_CACHE.popitem(last=False)
-        return _truncated(ref, _READ_CACHE[key].copy(deep=False))
-    return _truncated(ref, obj)
+    if key is None:  # memo disabled (or no stat-able catalog file): nothing is stored
+        return _truncated(ref, obj)
+    cut = _truncated(ref, obj.copy(deep=False))
+    if tkey is not None:
+        _TRUNCATED_CACHE[tkey] = cut
+        _TRUNCATED_CACHE.move_to_end(tkey)
+        while len(_TRUNCATED_CACHE) > _TRUNCATED_CACHE_MAXSIZE:
+            _TRUNCATED_CACHE.popitem(last=False)
+        return cut.copy(deep=False)
+    return cut
 
 
 def _cache_clear() -> None:
-    """Empty the open memo, and the cast tables (:func:`casts.table`) built from it."""
+    """Empty the open memo and its truncated cuts, and the cast tables built from it."""
     _READ_CACHE.clear()
+    _TRUNCATED_CACHE.clear()
     casts._TABLES.clear()
 
 

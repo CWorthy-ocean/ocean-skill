@@ -1256,6 +1256,83 @@ def _nearest_indices(lon_2d, lat_2d, lon: float, lat: float) -> tuple[int, ...]:
     return np.unravel_index(int(np.nanargmin(distance)), distance.shape)
 
 
+def _unit_xyz(lon, lat) -> np.ndarray:
+    """Return points on the unit sphere as an ``(..., 3)`` array.
+
+    Chord length between two such points rises monotonically with great-circle
+    distance, so a Euclidean nearest-neighbour search on them picks the same cell the
+    haversine argmin would -- and it is periodic in longitude for free, so a 0-360 grid
+    and a -180-180 query (or the reverse) need no wrapping.
+    """
+    lo, la = np.deg2rad(lon), np.deg2rad(lat)
+    cos_la = np.cos(la)
+    return np.stack([cos_la * np.cos(lo), cos_la * np.sin(lo), np.sin(la)], axis=-1)
+
+
+# Chord distances this close (relative) count as tied; see _nearest_indices_many.
+_TIE_RTOL = 1e-9
+# Neighbours examined per query when resolving ties. A regular grid has at most four
+# cells equidistant from a point (a cell-corner midpoint), so four is enough there.
+_TIE_K = 4
+# Up to this many query points, a haversine per point beats building the tree: about
+# 25 ms a point against ~1 s for a tree over a 1858x962 grid.
+_TREE_MIN_POINTS = 32
+
+
+def _nearest_indices_many(
+    lon_2d, lat_2d, lons, lats
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(iy, ix)`` of the closest cell centre to each of many points.
+
+    The vectorized twin of :func:`_nearest_indices`: one k-d tree over the grid's
+    unit-sphere coordinates answers every query at once, where the per-point haversine
+    over the whole grid cost ~25 ms a point on a 1858x962 ROMS grid (minutes for a
+    boundary-strip path). Cells with a NaN longitude or latitude are left out of the
+    tree, as ``np.nanargmin`` leaves them out of the haversine search.
+
+    Ties are broken as ``np.nanargmin`` breaks them -- the lowest flat index wins --
+    so a point exactly midway between two cells snaps to the same one either way. The
+    tree returns the few nearest candidates and the smallest flat index among those
+    within a tight relative tolerance of the best is taken.
+    """
+    from scipy.spatial import cKDTree
+
+    lon_2d, lat_2d = np.broadcast_arrays(np.asarray(lon_2d), np.asarray(lat_2d))
+    lons = np.atleast_1d(np.asarray(lons, dtype="float64"))
+    lats = np.atleast_1d(np.asarray(lats, dtype="float64"))
+    shape = lon_2d.shape
+    if lons.size <= _TREE_MIN_POINTS:
+        # A few points (a mooring, a short line) are cheaper one haversine at a time
+        # than building a tree over the whole grid.
+        snapped = [
+            _nearest_indices(lon_2d, lat_2d, lo, la)
+            for lo, la in zip(lons, lats, strict=True)
+        ]
+        return (
+            np.array([s[0] for s in snapped], dtype=np.intp),
+            np.array([s[1] for s in snapped], dtype=np.intp),
+        )
+
+    flat_lon, flat_lat = lon_2d.ravel(), lat_2d.ravel()
+    valid = np.flatnonzero(np.isfinite(flat_lon) & np.isfinite(flat_lat))
+    if valid.size == 0:
+        raise ValueError("every grid cell has a missing longitude or latitude.")
+    if not (np.isfinite(lons).all() and np.isfinite(lats).all()):
+        raise ValueError("query points must have finite longitude and latitude.")
+
+    tree = cKDTree(_unit_xyz(flat_lon[valid], flat_lat[valid]))
+    k = min(_TIE_K, valid.size)
+    dist, pos = tree.query(_unit_xyz(lons, lats), k=k)
+    if k == 1:
+        dist, pos = dist[:, None], pos[:, None]
+
+    flat = valid[pos]  # (n, k) flat indices, nearest first
+    tied = dist <= dist[:, :1] * (1.0 + _TIE_RTOL) + 1e-14
+    best = np.where(tied, flat, np.iinfo(np.intp).max).min(axis=1)
+    iy, ix = np.unravel_index(best, shape)
+    return iy, ix
+
+
 def sample_at(
     obj,
     lon: float,

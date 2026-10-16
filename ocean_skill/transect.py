@@ -1086,7 +1086,7 @@ def sample_along(
         _haversine_km,
         _lat_name,
         _lon_name,
-        _nearest_indices,
+        _nearest_indices_many,
         _wrap_lon,
         harmonize_longitude,
         subset_to_bbox,
@@ -1131,18 +1131,25 @@ def sample_along(
     cell_km = _cell_km(cropped, lon_name, lat_name)
 
     if curvilinear:
-        snapped = [
-            _nearest_indices(lon_vals, lat_vals, lo, la)
-            for lo, la in zip(req_lons, req_lats, strict=True)
-        ]
-        iys = np.array([s[0] for s in snapped])
-        ixs = np.array([s[1] for s in snapped])
+        # One k-d tree query for the whole path: a per-point full-grid haversine
+        # took ~25 ms a point (minutes for a boundary strip on a ROMS grid).
+        iys, ixs = _nearest_indices_many(lon_vals, lat_vals, req_lons, req_lats)
         snapped_lon, snapped_lat = lon_vals[iys, ixs], lat_vals[iys, ixs]
     else:
-        ixs = np.array(
-            [np.abs(((lon_vals - lo + 180.0) % 360.0) - 180.0).argmin() for lo in req_lons]
-        )
-        iys = np.array([np.abs(lat_vals - la).argmin() for la in req_lats])
+        # (n_path, n_grid) differences, argmin per row: same first-minimum
+        # tie-break as the per-point argmin this replaces. Done in row blocks so a
+        # long path on a fine global grid never builds one huge temporary.
+        def _argmin_rows(grid, wanted, periodic: bool) -> np.ndarray:
+            out = np.empty(wanted.size, dtype=np.intp)
+            for s0 in range(0, wanted.size, 256):
+                diff = grid[None, :] - wanted[s0 : s0 + 256, None]
+                if periodic:
+                    diff = ((diff + 180.0) % 360.0) - 180.0
+                out[s0 : s0 + 256] = np.abs(diff).argmin(axis=1)
+            return out
+
+        ixs = _argmin_rows(lon_vals, req_lons, periodic=True)
+        iys = _argmin_rows(lat_vals, req_lats, periodic=False)
         snapped_lon, snapped_lat = lon_vals[ixs], lat_vals[iys]
 
     # Cumulative distance along the *requested* path, over the whole sequence
