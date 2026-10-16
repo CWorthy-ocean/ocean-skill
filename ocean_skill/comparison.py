@@ -119,6 +119,10 @@ NARROWING_FEATURE_TYPES = frozenset(
     {"timeSeries", "point", "station", "profile", "timeSeriesProfile", "trajectory"}
 )
 
+#: featureTypes a table is read as (stations, casts, tracks): never a climatology, so
+#: :meth:`Comparison._follow_steps` does not open them to look.
+_TABULAR_FEATURES = NARROWING_FEATURE_TYPES | {"trajectoryProfile"}
+
 #: featureTypes a fixed instrument reports at -- one lon/lat *and* one depth, unlike
 #: a profile (one lon/lat, a whole column) or a ``timeSeriesProfile``/
 #: ``trajectoryProfile`` (more than one candidate vertical reading). Used by
@@ -1437,6 +1441,11 @@ def _names_geographic_velocity(spec: Any) -> bool:
 #: that caller actually asked for. Bounded in size to whatever the call's own window
 #: needed, never the model's full domain.
 _SHARED_SLABS: dict[tuple[str, str], Any] = {}
+
+#: The ``(test, reference)`` pairs whose "reference follows the test's months" line
+#: :func:`compare` has already printed this call; see
+#: :meth:`Comparison._announce_follow`.
+_FOLLOW_SAID: set[tuple[str, str]] = set()
 
 #: Ceiling on one shared slab's decompressed size, generous relative to
 #: :data:`POINT_COLUMN_MATERIALIZE_MAX_BYTES` (that ceiling is per *pair*; this one
@@ -4135,6 +4144,7 @@ def prepare_source(
     time_window: tuple[Any, Any] | None = None,
     time_targets: Any = None,
     time_targets_method: str = "nearest",
+    follow_times: Any = None,
     qc: Any = None,
     detide: dict[str, Any] | None = None,
     literal_depths: bool = False,
@@ -4242,6 +4252,15 @@ def prepare_source(
     cast. Folded into the key only when it is not the default, so a
     ``"nearest"`` lane's key is byte-identical to one cached before this option
     existed.
+
+    ``follow_times`` lays a *monthly climatology* source out along the given dates
+    before anything is selected or reduced: each date takes the climatology's matching
+    calendar month (:func:`ocean_skill.align.follow_months`), so the lane arrives as the
+    dated series the other side of a comparison already is. A source that is not a
+    climatology (:func:`ocean_skill.align.month_axis`) is left exactly as it was.
+    Passed by :meth:`Comparison._prepare_lane` for the reference lane only, when it
+    decides the reference should follow the test's months; folded into the key (a digest
+    of the dates) only then, so every other lane's key is untouched.
 
     ``qc`` overrides the source's own saved provider-QC policy (see
     :mod:`ocean_skill.qc`) at read time -- a dict (typically ``{"keep": [...]}``/
@@ -4374,6 +4393,15 @@ def prepare_source(
             key_select["_time_targets_method"] = (
                 f"{time_targets_method}:gap{TIME_GAP_FACTOR:g}"
             )
+    if follow_times is not None and len(follow_times) > 0:
+        # A climatology laid out along these dates is a different lane from the same
+        # climatology read whole -- hashed, like _time_targets, since a daily record
+        # names thousands of dates and the key only has to tell one set from another.
+        import hashlib
+
+        key_select["_follow_months"] = hashlib.sha256(
+            ",".join(str(t) for t in np.asarray(follow_times).tolist()).encode()
+        ).hexdigest()[:16]
     if effective_qc is not None:
         key_select["_qc"] = {
             "keep": sorted(str(v) for v in (effective_qc.get("keep") or [])),
@@ -4517,6 +4545,21 @@ def prepare_source(
     # lane never touches were most of that bill. See _narrow_to_variables for what is
     # kept, and for when nothing is dropped.
     obj = _narrow_to_variables(obj, meta, [variable], select)
+    if follow_times is not None and len(follow_times) > 0:
+        from ocean_skill.align import follow_months
+
+        obj, _dropped = follow_months(obj, follow_times)
+        if _dropped:
+            import warnings
+
+            from ocean_skill import _stacklevel
+
+            warnings.warn(
+                f"{source!r} is a climatology that lacks the calendar month of "
+                f"{_dropped} of the {len(follow_times)} test time steps, which are "
+                "left unpaired.",
+                stacklevel=_stacklevel.find(),
+            )
     # Crop in time and then horizontally *before* _prepare, so the vertical transform it
     # runs (roms.to_depth/to_sigma0 -- an xgcm transform per water column, the most
     # expensive step in the pipeline) only ever touches the cells this lane keeps.
@@ -5318,6 +5361,10 @@ class Comparison:
         # align() call it, and it reads the reference to get it. _UNSET marks
         # "not computed yet" without colliding with a genuine None result.
         self._time_targets_cache = _UNSET
+        # Memoized for the same reason: the test steps a climatology reference follows
+        # (see _follow_steps), ``None`` -- "nothing follows" -- included.
+        self._follow_cache = _UNSET
+        self._follow_announced = False
         # Whether the "interp was asked for but cannot apply" warning has been said (see
         # _interpolates_onto_profile, which cache key and align() both call).
         self._interp_fallback_warned = False
@@ -6256,6 +6303,121 @@ class Comparison:
                         stacklevel=_stacklevel.find(),
                     )
         return values
+
+    def _follow_steps(self) -> np.ndarray | None:
+        """Return the test time steps a *climatology* reference follows, else ``None``.
+
+        A reference that is a monthly climatology -- twelve calendar months, no dated
+        time axis (:func:`ocean_skill.align.month_axis`: WOA23's monthly stack, a
+        roms-tools climatology file, Holte and Talley) -- has no instant of its own to
+        pair a dated test step with. Against a dated test lane the reference is
+        therefore laid out along the test's own steps, each taking its calendar month
+        (:func:`ocean_skill.align.follow_months`), so that every later stage sees two
+        dated series: a ``times=`` bin selects its steps on both lanes and averages them
+        (a bin spanning several months is the mean of those months **weighted by how
+        many test steps fall in each**), ``over="time"`` pairs the climatology repeated
+        at the test's months, and a plain ``aggregate={"time": "mean"}`` averages the
+        months the test actually covers. The steps returned are the test source's own,
+        cut to its lane's time select (the same bin or list entry ``times=`` writes).
+
+        Automatic, and by construction a change only where the comparison could not be
+        formed before. It stands down -- leaving every request exactly as it was -- for:
+
+        - an explicit ``month`` anywhere in either lane's select or aggregate, or
+          ``over="month"``: the caller already said which month, or how to fold them;
+        - a reference that is not a climatology, or a test lane with no decoded calendar
+          (two climatologies have no dates to follow);
+        - a climatology whose twelve months sit on an undecoded ``time`` axis (WOA23)
+          when the request already handles that axis: an aggregate that reduces ``time``
+          with no time select (the mean of all twelve months, which worked before), or
+          a *numeric* time select naming one of its raw steps. A calendar time select
+          (what ``times=`` writes) is refused by such an axis, so there it follows.
+
+        Read-free of the data (only the two sources' coordinates are opened, memoized
+        like every other read) and fails open on what reading a source's coordinates
+        can raise (:data:`_FOLLOW_OPEN_ERRORS`): the comparison then runs as if this
+        did not exist, with one warning per comparison saying why the reference was not
+        laid out along the test's months. Anything else is a bug and propagates.
+        """
+        if self._follow_cache is _UNSET:
+            try:
+                self._follow_cache = self._follow_steps_uncached()
+            except _FOLLOW_OPEN_ERRORS as exc:
+                self._follow_cache = None  # memoized: one warning per comparison
+                if not self._quiet:
+                    import warnings
+
+                    from ocean_skill import _stacklevel
+
+                    warnings.warn(
+                        f"could not check whether reference {self.reference_name!r} "
+                        f"is a monthly climatology to pair with {self.test_name!r}'s "
+                        f"months ({type(exc).__name__}: {exc}); comparing without "
+                        "month-following. If the reference is a climatology, each "
+                        "test step is then not paired with its own calendar month.",
+                        stacklevel=_stacklevel.find(),
+                    )
+        return self._follow_cache
+
+    def _follow_steps_uncached(self) -> np.ndarray | None:
+        import ocean_skill as osk
+        from ocean_skill.align import month_axis
+        from ocean_skill.sources import _TIME_KEYS as time_keys
+
+        if self._section_casts is not None:
+            return None
+        if self.over is not None and str(self.over).lower() == "month":
+            return None
+        ref_sel = select_for(self.select, "reference")
+        ref_agg = aggregate_for(self.aggregate, "reference") or {}
+        test_sel = select_for(self.select, "test")
+        test_agg = aggregate_for(self.aggregate, "test") or {}
+        if any("month" in side for side in (ref_sel, ref_agg, test_sel, test_agg)):
+            return None
+        # Only a gridded reference can be a climatology; a table (an ERDDAP tabledap,
+        # a CTD file) is not worth opening here, and would be read whole.
+        from ocean_skill.catalog import resolve
+
+        ref_meta = resolve(self.reference_name).metadata
+        if ref_meta.get("tabledap") or ref_meta.get("featureType") in _TABULAR_FEATURES:
+            return None
+        reference = osk.read(self.reference_name)
+        axis = month_axis(reference)
+        if axis is None:
+            return None
+        if axis != "month":
+            # Twelve months on an undecoded time axis: a time aggregate with no time
+            # select, or a raw numeric select, is a request this axis already answers.
+            calendar_select = [ref_sel[k] for k in time_keys if k in ref_sel]
+            if calendar_select:
+                if not all(_is_calendar_time_value(v) for v in calendar_select):
+                    return None
+            elif any(k in ref_agg for k in time_keys):
+                return None
+        steps = _test_steps(
+            self.test_name, [test_sel[k] for k in time_keys if k in test_sel]
+        )
+        return steps if steps is not None and steps.size else None
+
+    def _announce_follow(self) -> None:
+        """Say that the reference follows the test's months: once per comparison.
+
+        A ``times=`` fan builds one comparison per bin, and each would say it again, so
+        :func:`compare` clears :data:`_FOLLOW_SAID` at its start and the line prints
+        once per test/reference pair within a call (once per comparison, outside one).
+        Silent for the internal members of a base (:attr:`_quiet`).
+        """
+        if self._follow_announced or self._quiet:
+            return
+        self._follow_announced = True
+        pair = (self.test_name, self.reference_name)
+        if pair in _FOLLOW_SAID:
+            return
+        _FOLLOW_SAID.add(pair)
+        print(
+            f"  reference {self.reference_name!r} is a monthly climatology: each "
+            f"{self.test_name!r} time step is paired with its own calendar month"
+        )
 
     def _warn_if_no_overlap(self) -> None:
         """Warn, before either lane is read, when the two sources provably never meet.
@@ -7294,6 +7456,10 @@ class Comparison:
         ):
             select = {**select, "depth": SURFACE}
         hits_before = _LANE_HITS
+        # A climatology reference follows the test's months (see _follow_steps).
+        follow = self._follow_steps() if role == "reference" else None
+        if follow is not None:
+            self._announce_follow()
         result = prepare_source(
             source,
             variable_for(self.variable, role),
@@ -7308,6 +7474,7 @@ class Comparison:
             time_window=time_window,
             time_targets=time_targets,
             time_targets_method=time_targets_method,
+            follow_times=follow,
             qc=qc_for(self.qc, role),
             detide=detide_for(self.detide, role),
             # Only the reference lane's own observational branch reads a caller-
@@ -8481,6 +8648,89 @@ class Comparison:
         c.label = label
         return c
 
+    #: The aligned pairs of a pooled bin stacked along a ``step`` axis (see
+    #: :meth:`_pooled_over_steps`), or ``None`` for every other comparison. When set,
+    #: :meth:`metrics` scores *this* -- every cell of every step as one sample --
+    #: while :attr:`aligned` (what every plot, the family and the title read) holds
+    #: the bin's mean map.
+    _step_samples: Any = None
+
+    @classmethod
+    def _pooled_over_steps(
+        cls, members: Sequence[Comparison], *, select: dict[str, Any], label: str
+    ) -> Comparison:
+        """Pool one comparison per time step into the comparison of the whole bin.
+
+        What ``compare(times={"resample": "1YS", "reduce": "pool"})`` builds for each
+        bin: ``members`` are the bin's steps, each already aligned on its own, and the
+        result scores them as **samples of one comparison** -- bias, RMSE, correlation
+        and the rest over every valid cell of every step, area-weighted exactly as a
+        single map is (:func:`ocean_skill.metrics.area_weights`) -- rather than
+        averaging the steps into one map first and scoring that. The two differ
+        whenever the steps' errors do not line up: a model that is 1 degC too warm in
+        spring and 1 degC too cold in autumn has a mean-map bias near zero and a pooled
+        RMSE of 1 degC, which is the number a skill claim about the year means.
+
+        The comparison still draws: its :attr:`aligned` pair is the bin's **mean map**
+        (the mean of each lane over the steps where both are valid, difference of the
+        two means), so plots, family and titles treat it as the single map they know,
+        while :meth:`metrics` reads the stacked pairs (:attr:`_step_samples`) instead.
+        ``n`` counts valid cell-steps, and no effective sample size is reported (the
+        steps are not a row of independent cells to deflate).
+
+        Members must be maps or sections: a series, a profile or a time-depth block
+        already has a time or depth axis of its own to pool along, and stacking steps
+        onto it would give a number about no figure that can be drawn.
+        """
+        import warnings
+
+        import xarray as xr
+
+        for member in members:
+            if member.is_series or member.is_profile or member.is_time_depth:
+                raise ValueError(
+                    "times={'reduce': 'pool'} pools a bin's steps of maps (or "
+                    f"sections) into one score, but {member.test_name!r} vs "
+                    f"{member.reference_name!r} is a place through time or depth "
+                    "(already a series/profile): pool its samples with "
+                    "times={'seasons': [...]} and ComparisonSet.pool() instead."
+                )
+        pairs = [m.aligned for m in members]
+        samples = xr.concat(
+            pairs,
+            dim="step",
+            join="outer",
+            combine_attrs="override",
+            coords="different",
+            compat="equals",
+        )
+        test, reference = samples["test"], samples["reference"]
+        valid = np.isfinite(test) & np.isfinite(reference)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # a cell valid at no step
+            test_mean = test.where(valid).mean("step")
+            reference_mean = reference.where(valid).mean("step")
+        test_mean.attrs = dict(pairs[0]["test"].attrs)
+        reference_mean.attrs = dict(pairs[0]["reference"].attrs)
+        difference = test_mean - reference_mean
+        difference.attrs = dict(pairs[0]["difference"].attrs)
+        mean = xr.Dataset(
+            {"test": test_mean, "reference": reference_mean, "difference": difference},
+            attrs=dict(pairs[0].attrs),
+        )
+        first = members[0]
+        pooled = cls._averaged(
+            first,
+            mean,
+            test_name=first.test_name,
+            reference_name=first.reference_name,
+            label=label,
+        )
+        pooled.select = select
+        pooled._step_samples = samples
+        pooled._actual_depth = first._actual_depth
+        return pooled
+
     def _reference_metadata(self) -> dict[str, Any] | None:
         """Return the reference's catalog metadata, or ``None`` if it will not resolve.
 
@@ -8796,7 +9046,7 @@ class Comparison:
         from ocean_skill import metrics as _metrics
 
         if self._metrics is None:
-            aligned = self.aligned
+            aligned = self.aligned if self._step_samples is None else self._step_samples
             # The mask is per *cell*: it exists so the scalar describes the same domain
             # the maps show. A station (through time or through depth) has one cell
             # and no maps, so there is nothing to mask and asking for them would raise.
@@ -8968,7 +9218,8 @@ class Comparison:
         n = self._metrics.get("n")
         if not n:
             return None
-        if getattr(self, "_pooled", False):
+        pooled_steps = getattr(self, "_step_samples", None) is not None
+        if getattr(self, "_pooled", False) or pooled_steps:
             # Samples pooled from many places and times have no order to lag along.
             return None
         reference = aligned["reference"]
@@ -12759,6 +13010,13 @@ def _normalize_times(times: Any) -> tuple[str, Any] | None:
                 "season's samples. Or pass an explicit list of time values "
                 "instead, one comparison per entry."
             )
+        if times["reduce"] == "pool":
+            extra = sorted(set(times) - {"resample", "reduce"})
+            if extra:
+                raise ValueError(
+                    f"times={times!r}: 'reduce': 'pool' keeps every step of a bin as a "
+                    f"sample and takes no other key (found {extra})."
+                )
         return "bins", dict(times)
     values = (
         (times,)
@@ -12879,6 +13137,78 @@ def _time_select_value(bin_start: Any, bin_last: Any, freq: str) -> Any:
     if width is not None:
         return str(bin_start)[:width]
     return {"min": str(bin_start), "max": str(bin_last)}
+
+
+def _stamp_text(stamp: Any) -> str:
+    """Spell one time step as a timestamp a time select reads as an instant."""
+    import pandas as pd
+
+    if isinstance(stamp, np.datetime64):
+        return pd.Timestamp(stamp).isoformat()
+    return stamp.isoformat() if hasattr(stamp, "isoformat") else str(stamp)
+
+
+#: What :meth:`Comparison._follow_steps` treats as "could not look": a source or entry
+#: that does not resolve or open (``LookupError``/``OSError``), or coordinates that do
+#: not decode into a calendar (``ValueError``). A ``TypeError`` or ``AttributeError``
+#: is a defect in this package, not a data problem, and is left to surface.
+_FOLLOW_OPEN_ERRORS = (LookupError, ValueError, OSError)
+
+
+def _test_steps(source: str, selects: Sequence[Any] = ()) -> np.ndarray | None:
+    """List ``source``'s calendar time steps, cut by each time-select in ``selects``.
+
+    Coordinate-only, like :func:`_time_bins`: the source is opened (memoized) for its
+    time index and nothing else, and each entry of ``selects`` -- a period string, a
+    ``{"min", "max"}`` window, a month mask, a full timestamp -- is applied to that
+    index the way :func:`ocean_skill.operators.select` applies it to the data, so what
+    comes back is exactly the steps a lane with that select keeps. ``None`` when the
+    source has no decoded calendar time axis (nothing to list). A scalar select that
+    snaps to one step comes back as a one-element array; one that matches nothing, an
+    empty one.
+    """
+    import pandas as pd
+    import xarray as xr
+
+    import ocean_skill as osk
+    from ocean_skill import operators
+
+    obj = osk.read(source)
+    dim = operators.resolve_dim(obj, "time")
+    index = obj.indexes.get(dim) if dim is not None else None
+    if not isinstance(index, pd.DatetimeIndex | xr.CFTimeIndex):
+        return None
+    steps = xr.Dataset(coords={dim: index})
+    for value in selects:
+        steps = operators.select(steps, {dim: value})
+        if dim not in steps.dims:
+            steps = steps.expand_dims(dim)
+    return np.asarray(steps[dim].values)
+
+
+def _is_calendar_time_value(value: Any) -> bool:
+    """Report whether a time-select value names dates (a string, window, mask or list).
+
+    ``False`` for a number or a list/window of numbers -- the raw position on an
+    undecoded climatology axis (``{"time": 396.5}``), which that axis answers itself.
+    A window with an open end, a slice, and a month mask all count by what they *can*
+    hold: dates.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int | float | np.number):
+        return False
+    if isinstance(value, dict):
+        if {"season", "months"} & set(value):
+            return True
+        ends = [v for k, v in value.items() if k in ("min", "max") and v is not None]
+        return all(_is_calendar_time_value(v) for v in ends)
+    if isinstance(value, slice):
+        ends = (value.start, value.stop)
+        return all(_is_calendar_time_value(v) for v in ends if v is not None)
+    if isinstance(value, list | tuple):
+        return all(_is_calendar_time_value(v) for v in value)
+    return True
 
 
 def _fanned_time_select(sel: dict[str, Any], value: Any) -> dict[str, Any]:
@@ -13652,7 +13982,10 @@ def compare(
         test's own time axis (``{"resample": ..., "reduce": ...}``,
         ``{"groupby": "month"|"season", "reduce": ...}``), or an explicit
         list/tuple/str of time values -- one comparison per bin or value, in
-        the same vocabulary ``aggregate={"time": ...}`` uses.
+        the same vocabulary ``aggregate={"time": ...}`` uses. ``"reduce":
+        "pool"`` keeps each bin's steps as samples of one score instead of
+        averaging them (see below); a climatology reference follows the test's
+        calendar months.
     select
         Dict of axis -> selection (e.g. ``{"time": "2012-01"}``), or a
         ``{"test": ..., "reference": ...}`` pair-spec giving each lane its
@@ -14268,6 +14601,47 @@ def compare(
     :meth:`ComparisonSet.pool`). A ``{"min", "max"}`` year window in ``select=``'s
     time entry is kept and narrows each season's years.
 
+    ``times={"resample": "1YS", "reduce": "pool"}`` is the **pooled-bin** form: each
+    bin's steps are kept as *samples of one score* instead of being averaged into a
+    map first. ``"mean"`` scores the mean map of the year (a model 1 degC too warm in
+    spring and 1 degC too cold in autumn has an RMSE near zero there); ``"pool"``
+    scores every valid cell of every step together (bias, RMSE, correlation... over
+    all space x time samples, area-weighted exactly as a single map is), so that
+    RMSE is 1 degC. Each step of the bin (the test source's own time steps within it)
+    is compared on its own, the way a ``times=[...]`` entry would be, and the pairs
+    are pooled into the bin's one comparison. It still draws: its aligned pair is the
+    bin's **mean map** (each lane's mean over the steps where both are valid), while
+    ``metrics()`` reads the stacked pairs and reports ``n`` as valid cell-steps with
+    no effective sample size. It is for maps and sections (a series, profile or
+    time-depth member is refused: pool those with ``{"seasons": [...]}`` and
+    :meth:`ComparisonSet.pool`). It takes no other key, and refuses ``over=`` (which
+    scores each cell separately along an axis) and an ``aggregate=`` time entry. A
+    ``select=`` time window narrows which steps are pooled; a step that cannot be
+    compared is left out with a warning, and a bin with none is skipped.
+    ``over="time"`` is the different question -- a skill *map*, one score per cell
+    along time.
+
+    **A climatology reference follows the test's months.** A reference that is a
+    monthly climatology -- twelve calendar months and no dated time axis (WOA23's
+    monthly stack, a roms-tools climatology file, Holte and Talley) -- is paired with
+    a dated test lane month by month, automatically: each test step takes the
+    climatology's matching calendar month (a step in January 2011 and one in January
+    2012 both get the climatological January; nothing is interpolated). So
+    ``times={"resample": "1MS", "reduce": "mean"}`` scores each month against its own
+    month, a ``times=`` bin spanning several months uses the mean of those months
+    **weighted by how many test steps fall in each** (two March steps and one April
+    step make ``(2 * March + April) / 3``), ``over="time"`` pairs the climatology
+    repeated at the test's months, ``.metrics_series()`` gives one value per test
+    time, and a plain ``aggregate={"time": "mean"}`` averages the months the test
+    covers. It stands down -- every request that already worked is unchanged -- for an
+    explicit ``month`` in either lane's ``select``/``aggregate`` (``select={"reference":
+    {"month": 7}}``, ``aggregate={"reference": {"month": "mean"}}``), ``over="month"``,
+    a test lane with no dated time axis, and, for a climatology stored as twelve
+    undecoded steps on ``time`` (WOA23), an ``aggregate`` that already reduces that
+    ``time`` with no time select (the all-twelve-months mean, as before); a
+    ``times=`` bin or list entry follows there too. One line says so per
+    test/reference pair per call; see :func:`ocean_skill.align.follow_months`.
+
     A ``select`` time entry alongside the resample-bins form narrows *which*
     bins are enumerated — the window, not a conflict, mirroring how ``depths=``
     can default from a select entry already present; a ``select={"season":
@@ -14279,10 +14653,11 @@ def compare(
     resulting :class:`ComparisonSet` plots as monthly or seasonal rows
     (``.plot()``), animates as frames (``.movie()``), or scores as skill
     through time (``.taylor()``/``.target()``); its ``.metrics()`` table
-    carries a ``time`` column (season names for the season form). Against a
-    reference whose time axis is not a decoded calendar (a climatology read
-    with ``decode_times=False``) ``times=`` has no axis to fan against — use
-    the pair-spec ``select``/``aggregate`` pattern above instead.
+    carries a ``time`` column (season names for the season form). A *test*
+    source whose time axis is not a decoded calendar (a climatology read with
+    ``decode_times=False``) gives ``times=`` no axis to fan against — use the
+    pair-spec ``select``/``aggregate`` pattern above instead. (A climatology
+    *reference* is fine: it follows the test's months, see above.)
 
     Each pair's aligned result is cached to disk and reused on a later run with the
     same arguments (see :mod:`ocean_skill.cache`, which prints where once per
@@ -14290,6 +14665,9 @@ def compare(
     — what to use after rerunning a model, since entries are keyed on source and
     selection rather than on file contents.
     """
+    # One "reference follows the test's months" line per test/reference pair per call,
+    # not one per fanned member (see Comparison._announce_follow).
+    _FOLLOW_SAID.clear()
     # A lone spec -- a name, a pair-spec, a combination/calculate dict -- is a
     # one-element list, as with series(variables=). Iterating it directly would
     # walk a string's characters or a dict's keys. Before the aggregate fan below,
@@ -14553,6 +14931,9 @@ def compare(
     time_freq: str | None = None
     time_window: Any = None
     season_entry: dict[str, Any] | None = None
+    # times={"resample": ..., "reduce": "pool"}: each bin keeps its steps as samples of
+    # one score (see Comparison._pooled_over_steps) rather than averaging them first.
+    pool_bins = False
     if times_fan is not None:
         if over is not None and over in _TIME_KEYS:
             raise ValueError(
@@ -14586,7 +14967,15 @@ def compare(
             time_window = next(iter(explicit_time_select.values()), None)
             time_entry = dict(times_fan[1])
             time_freq = time_entry["resample"]
-            aggregate = _merged_time_aggregate(aggregate, time_entry)
+            pool_bins = time_entry["reduce"] == "pool"
+            if pool_bins and over is not None:
+                raise ValueError(
+                    f"compare() got both times={{'reduce': 'pool'}} and over={over!r}: "
+                    "pooling keeps each bin's steps as samples of one score, while "
+                    "over= scores each cell separately along an axis. Pick one."
+                )
+            if not pool_bins:
+                aggregate = _merged_time_aggregate(aggregate, time_entry)
         elif times_fan[0] == "seasons":
             if _has_time_entry(aggregate):
                 raise ValueError(
@@ -14825,6 +15214,95 @@ def compare(
         else:
             print(f"  skipped {label}: {type(exc).__name__}: {exc}")
             unexpected.append((pair, exc))
+
+    def _make_comparison(
+        ref: Any,
+        tst: str,
+        var: Any,
+        select_: dict[str, Any],
+        aggregate_: Any,
+        label_: str,
+        literal_depths_: bool | None,
+    ) -> Comparison:
+        """Build one fanned comparison from this call's own arguments."""
+        return Comparison(
+            reference=ref,
+            test=tst,
+            variable=var,
+            select=select_,
+            aggregate=aggregate_,
+            method=method,
+            over=over,
+            time_method=time_method,
+            depth_method=depth_method,
+            tolerance=tolerance,
+            bin_anchor=bin_anchor,
+            min_coverage=min_coverage,
+            min_pairs=min_pairs,
+            metrics=metrics,
+            label=label_,
+            cache=cache,
+            qc=qc,
+            subtract_mean=subtract_mean,
+            detide=detide,
+            depth_origin=depth_origin,
+            literal_depths=literal_depths_,
+        )
+
+    def _pooled_bin(
+        ref: Any,
+        tst: str,
+        var: Any,
+        sel: dict[str, Any],
+        value: Any,
+        label_: str,
+        literal_depths_: bool | None,
+    ) -> Comparison:
+        """One bin of ``times={"resample": ..., "reduce": "pool"}``: its steps, pooled.
+
+        The bin's steps are the test source's own time steps inside ``value`` (and the
+        ``select=`` time window, when there is one). Each is compared on its own -- both
+        lanes select that instant, exactly as a ``times=[...]`` entry would -- and
+        :meth:`Comparison._pooled_over_steps` pools the pairs into the bin's one score.
+        A step that cannot be compared (no valid data, a gap in the reference) is left
+        out with a warning; the bin fails only when none can.
+        """
+        windows = ([time_window] if time_window is not None else []) + [value]
+        stamps = _test_steps(tst, windows)
+        if stamps is None or not stamps.size:
+            raise NoValidData(f"{tst!r} has no time step in {value!r} to pool.")
+        members: list[Comparison] = []
+        failed: list[tuple[Any, Exception]] = []
+        for stamp in stamps:
+            member = _make_comparison(
+                ref,
+                tst,
+                var,
+                _fanned_time_select(sel, _stamp_text(stamp)),
+                aggregate,
+                label_,
+                literal_depths_,
+            )
+            member._quiet = True
+            try:
+                member.align(refresh=refresh)
+            except Exception as exc:
+                if not skip_missing:
+                    raise
+                failed.append((stamp, exc))
+                continue
+            members.append(member)
+        if not members:
+            raise failed[0][1]
+        if failed:
+            warnings.warn(
+                f"{label_}: left {len(failed)} of the bin's {len(stamps)} steps out of "
+                f"the pool ({_error_text(failed[0][1])}).",
+                stacklevel=_stacklevel.find(),
+            )
+        return Comparison._pooled_over_steps(
+            members, select=_fanned_time_select(sel, value), label=label_
+        )
 
     def _form_sections(
         var: Any,
@@ -15252,28 +15730,22 @@ def compare(
                         if many_times:
                             parts.append(_time_label(t))
                         label = " ".join(parts) if parts else short
-                        c = Comparison(
-                            reference=ref,
-                            test=tst,
-                            variable=var,
-                            select=sel_t,
-                            aggregate=agg_t,
-                            method=method,
-                            over=over,
-                            time_method=time_method,
-                            depth_method=depth_method,
-                            tolerance=tolerance,
-                            bin_anchor=bin_anchor,
-                            min_coverage=min_coverage,
-                            min_pairs=min_pairs,
-                            metrics=metrics,
-                            label=label,
-                            cache=cache,
-                            qc=qc,
-                            subtract_mean=subtract_mean,
-                            detide=detide,
-                            depth_origin=depth_origin,
-                            literal_depths=literal_depths,
+                        if pool_bins:
+                            # Every step of the bin is its own comparison, pooled
+                            # into one score for the bin (see _pooled_bin).
+                            try:
+                                c = _pooled_bin(
+                                    ref, tst, var, sel, t, label, literal_depths
+                                )
+                            except Exception as exc:
+                                if not skip_missing:
+                                    raise
+                                _skip(label, f"{tst!r} vs {ref!r}", exc)
+                                continue
+                            out.append(c)
+                            continue
+                        c = _make_comparison(
+                            ref, tst, var, sel_t, agg_t, label, literal_depths
                         )
                         try:
                             c.align(refresh=refresh)

@@ -58,6 +58,8 @@ __all__ = [
     "apply_transect",
     "as_transect",
     "boundary_strip",
+    "boundary_walk",
+    "check_boundary_sides",
     "densify_waypoints",
     "grid_slice",
     "sample_along",
@@ -159,7 +161,20 @@ def _as_boundary_transect(spec: dict[str, Any]) -> dict[str, Any]:
             "boundary strip -- it is the exact outermost row/column of each named "
             "side, with nothing to window, space out or interpolate."
         )
-    value = spec["boundary"]
+    sides = check_boundary_sides(spec["boundary"], f"select={{'transect': {spec!r}}}")
+    return {"kind": "boundary", "sides": sides}
+
+
+def check_boundary_sides(value: Any, label: str) -> list[str]:
+    """Return ``value`` (a side or a list of sides) as a validated list, in walk order.
+
+    Every name must be a boundary side, none may repeat, and each consecutive pair must
+    share a grid corner -- the rules a boundary strip is walked by, said once for the
+    ``select={"transect": {"boundary": ...}}`` request on model output
+    (:func:`_as_boundary_transect`) and a forcing entry's ``strip:`` key
+    (:func:`ocean_skill.build.add_boundary_sources`). ``label`` is how an error names
+    the request (``"strip=['west', 'east']"``).
+    """
     sides = [value] if isinstance(value, str) else value
     if (
         not isinstance(sides, list | tuple)
@@ -167,30 +182,53 @@ def _as_boundary_transect(spec: dict[str, Any]) -> dict[str, Any]:
         or not all(isinstance(side, str) for side in sides)
     ):
         raise ValueError(
-            f"select={{'transect': {spec!r}}}: 'boundary' is a side or a list of "
-            f"sides, from {sorted(_BOUNDARY_SIDES)} -- e.g. {{'boundary': "
-            "['west', 'south']}."
+            f"{label}: a boundary strip is a side or a list of sides, from "
+            f"{sorted(_BOUNDARY_SIDES)} -- e.g. ['west', 'south']."
         )
     unknown = [side for side in sides if side not in _BOUNDARY_SIDES]
     if unknown:
         raise ValueError(
-            f"select={{'transect': {spec!r}}}: {unknown} are not boundary sides -- "
-            f"choose from {sorted(_BOUNDARY_SIDES)}."
+            f"{label}: {unknown} are not boundary sides -- choose from "
+            f"{sorted(_BOUNDARY_SIDES)}."
         )
     if len(set(sides)) != len(sides):
         raise ValueError(
-            f"select={{'transect': {spec!r}}}: a side is named twice -- a strip "
-            "walks each boundary once."
+            f"{label}: a side is named twice -- a strip walks each boundary once."
         )
     for first, second in pairwise(sides):
         if _BOUNDARY_SIDES[first][0] == _BOUNDARY_SIDES[second][0]:
             raise ValueError(
-                f"select={{'transect': {spec!r}}}: {first!r} and {second!r} are "
-                "opposite sides of the grid and share no corner, so a strip cannot "
-                "turn from one into the other -- name them in an order where each "
-                "meets the next (e.g. ['west', 'south', 'east'])."
+                f"{label}: {first!r} and {second!r} are opposite sides of the grid "
+                "and share no corner, so a strip cannot turn from one into the other "
+                "-- name them in an order where each meets the next (e.g. "
+                "['west', 'south', 'east'])."
             )
-    return {"kind": "boundary", "sides": list(sides)}
+    return list(sides)
+
+
+def boundary_walk(sides: list[str]) -> list[bool]:
+    """Return, for each side of a strip, whether it is walked in increasing index.
+
+    A side starts at the corner it shares with the previous one and ends at the corner
+    it shares with the next: after a side whose fixed row/column is the first (index
+    0) the next side runs ascending, after the far one (-1) descending. The first
+    side's direction is set by the corner it shares with the second, a lone side runs
+    in increasing index. The one walking rule, shared by :func:`boundary_strip` (on
+    model output) and :func:`ocean_skill.build.join_boundary_sides` (on forcing
+    entries), so a strip reads the same either way. ``sides`` must already be valid
+    (:func:`check_boundary_sides`).
+    """
+    ascending = []
+    for i, _ in enumerate(sides):
+        if i > 0:
+            # start where the previous side's fixed row/column crosses this one
+            ascending.append(_BOUNDARY_SIDES[sides[i - 1]][1] == 0)
+        elif len(sides) > 1:
+            # end where the next side's fixed row/column crosses this one
+            ascending.append(_BOUNDARY_SIDES[sides[1]][1] != 0)
+        else:
+            ascending.append(True)
+    return ascending
 
 
 def _as_half_width(half_width: Any) -> int:
@@ -801,7 +839,16 @@ def grid_slice(
     lon_bc, lat_bc = xr.broadcast(sliced[lon_name], sliced[lat_name])
     sliced = sliced.assign_coords({lon_name: lon_bc, lat_name: lat_bc})
     sliced = sliced.rename({along_dim: ALONG_DIM})
-    return _attach_along_coord(sliced, lon_name, lat_name, path_method="grid")
+    sliced = _attach_along_coord(sliced, lon_name, lat_name, path_method="grid")
+    if along_center is None:
+        # A forcing entry that is itself a boundary strip
+        # (:func:`ocean_skill.build.join_boundary_sides`) records where it turns its
+        # corners as dataset attributes; the whole row's distances are the section's, so
+        # the marks carry over. A window starts the distance over, so they would not.
+        for key in ("boundary_sides", "boundary_corner_km"):
+            if key in obj.attrs:
+                sliced[ALONG_DIM].attrs[key] = obj.attrs[key]
+    return sliced
 
 
 def _attach_along_coord(
@@ -898,18 +945,10 @@ def boundary_strip(obj, sides: list[str], *, subject: str = "the source"):
     """
     from ocean_skill.align import ALONG_DIM, _lat_name, _lon_name
 
-    n = len(sides)
     pieces = []
-    for i, side in enumerate(sides):
+    walk = boundary_walk(sides)
+    for i, (side, ascending) in enumerate(zip(sides, walk, strict=True)):
         dim, index = _BOUNDARY_SIDES[side]
-        if i > 0:
-            # start where the previous side's fixed row/column crosses this one
-            ascending = _BOUNDARY_SIDES[sides[i - 1]][1] == 0
-        elif n > 1:
-            # end where the next side's fixed row/column crosses this one
-            ascending = _BOUNDARY_SIDES[sides[1]][1] != 0
-        else:
-            ascending = True
         piece = grid_slice(obj, dim, index, subject=subject)
         if not ascending:
             piece = piece.isel({ALONG_DIM: slice(None, None, -1)})

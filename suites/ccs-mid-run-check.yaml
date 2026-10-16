@@ -1,0 +1,244 @@
+# Mid-run check of the CCS 4 km run (Sam's ccs_4km_works, 2013): the same pages as
+# mid-run-check.yaml -- bathymetry, domain-mean time series, the surface alkalinity
+# extremes, the latest restart at the surface and 200 m, and the latest month against
+# satellite chlorophyll, Holte & Talley MLD, WOA23 nutrients and GLODAPv2 carbon -- for a
+# different domain. Only the block from `name:` to `defaults:` differs from that file.
+#
+# Run it:
+#     ocean-skill-run suites/ccs-mid-run-check.yaml --list    # check the page list first
+#     ocean-skill-run suites/ccs-mid-run-check.yaml
+# --list also runs refresh:, which builds the kerchunk reference over the restart files
+# and the catalog entry `ccs_4km` (both in this run's own diagnostics folder, not the
+# shared catalogs directory).
+#
+# The restarts are gathered as symlinks in tasks/rst_files/ (103 files, 2013-01-02 ..
+# 2013-12-31: daily through February, then weekly). Each is ~56 GB (1346 x 674 x 100
+# levels, every MARBL tracer), so the reference stores one level per chunk and a page
+# reads only the levels it needs.
+#
+# Before you run it: see mid-run-check.yaml (Holte & Talley month dimension, Copernicus
+# login, WOA downloads, Ghostscript).
+
+name: ccs-mid-run-check
+output_dir: /anvil/projects/x-ees250129/x-kthyng/ccs_4km/diagnostics
+cache_dir: /anvil/projects/x-ees250129/x-kthyng/ccs_4km/diagnostics
+pdf_images: jpeg
+catalog_search_paths:
+  - /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs
+  - /anvil/projects/x-ees250129/x-kthyng/ccs_4km/diagnostics/catalogs
+
+# The rst_files symlink folder hides the C-Star run folder from the cover page's own
+# discovery, so name the workplan and blueprint here. (The transformed workplan lists
+# only the July-December steps.)
+run_info:
+  workplan: /anvil/scratch/x-smaticka/sims_runtime/cstar/ccs_4km_works/workplan_2013_ramp_transformed.yaml
+  blueprint: /anvil/scratch/x-smaticka/cstar-forge-run/CCS_worplan_NEW/B_ccs_4km_v6.yaml
+
+refresh:
+  catalog: /anvil/projects/x-ees250129/x-kthyng/ccs_4km/diagnostics/catalogs/ccs-4km.yaml
+  sources:
+    - name: ccs_4km
+      files: /anvil/scratch/x-smaticka/sims_runtime/cstar/ccs_4km_works/tasks/rst_files/output_rst.*.nc
+      grid: /anvil/projects/x-ees250129/x-bsaenz/cstar/_forge_bp_runs/ccs_4km_v8/input_data/ccs_4km_v6_grid.nc
+      ref: /anvil/projects/x-ees250129/x-kthyng/ccs_4km/diagnostics/refs/ccs_4km.parquet
+      keep: latest-per-file  # restart files: keep each file's main (not repeated) time step
+      # One level per chunk: a page matched to a depth reads only the levels around it.
+      # (1346 rows = 2 x 673, so there is no useful row split.)
+      subchunk: {s_rho: 1, s_w: 1}
+
+defaults:
+  test: ccs_4km
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80% (difference panels too), so coastal and
+  # river-mouth extremes don't wash out the open ocean.
+  plot: {robust: true}
+  depths: [surface, 100]
+  # The time window for the extremum and domain-mean pages: open-ended, the whole run.
+  period: {min: "2013-01-01"}
+  # Depths of the latest-snapshot pages, one page each.
+  snapshot_depths: [surface, 200]
+
+pages:
+  # -- model domain -----------------------------------------------------------------
+  - title: "Model domain"
+    section: ""
+
+  - title: "Bathymetry"
+    field: {variables: [h]}
+    caption: Grid depth h (m).
+    plot: {robust: false}           # the full depth range, trenches included
+
+  # -- domain-wide trends ---------------------------------------------------------
+  - title: "Domain-wide trends"
+    section: >-
+      Area-weighted means over the whole model domain at each restart snapshot in the
+      window defaults.period (the whole run so far, by default), at the surface (the
+      top model level), at 100 m and at 200 m. A mean at depth covers only the water
+      deeper than that depth, so the 100 m and 200 m lines leave out the shallower
+      parts of the domain.
+
+  - title: "Domain-mean time series"
+    field:
+      variables: [temperature, salinity, nitrate, alkalinity, dissolved_inorganic_carbon,
+                  {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}]
+      # Surface only for CCS: the 100 m and 200 m lines need every level of every restart
+      # interpolated at once (~75 GB per variable on this grid; out of memory at 62 GB).
+      select: {depth: [surface], time: "{period}"}
+      aggregate:
+        lon: mean                              # one area-weighted whole-domain mean
+        lat: mean
+        # time: {resample: 3MS, reduce: mean}   # quarterly means instead of every restart
+    caption: >-
+      Area-weighted mean over the whole domain at each restart snapshot, at the surface.
+    plot:
+      title: "Domain-mean time series (area-weighted): surface"
+      rows: variable           # one panel per variable, one shared legend for the depths
+      encode: {color: depth}   # color (and marker) tell surface / 100 m / 200 m apart
+
+  # -- extreme values -------------------------------------------------------------
+  - title: "Extreme values"
+    section: >-
+      Where surface alkalinity is lowest and highest, searched over every grid cell and
+      every restart snapshot in the window defaults.period (the whole run so far, by
+      default), and how dissolved inorganic carbon, temperature, salinity and nitrate
+      evolved at that one grid point over the same window. These are point time series
+      at the location of the extremum, not domain means.
+
+  # The whole window's surface field is loaded to search it, so these two pages read
+  # more data than a single-snapshot page does.
+  - title: "Surface alkalinity minimum — time series"
+    caption: >-
+      The grid cell and restart with the lowest surface alkalinity in the window, and the
+      surface time series of the other variables at that one cell.
+    field:
+      variables: [alkalinity]
+      select: {depth: surface, time: "{period}"}
+    then:
+      - extremum: min
+      - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate], time: "{period}"}
+
+  - title: "Surface alkalinity maximum — time series"
+    caption: >-
+      The grid cell and restart with the highest surface alkalinity in the window, and the
+      surface time series of the other variables at that one cell.
+    field:
+      variables: [alkalinity]
+      select: {depth: surface, time: "{period}"}
+    then:
+      - extremum: max
+      - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate], time: "{period}"}
+
+  # -- latest model snapshot -------------------------------------------------------
+  - title: "Latest model snapshot"
+    section: >-
+      The newest restart on its own, with no observations: every variable at the surface,
+      then at 200 m, each map with its own robust color limits (central 80%).
+
+  - title: "Latest snapshot — {depth.label}"
+    for_each:
+      depth: "{snapshot_depths}"
+    field:
+      variables: [temperature, salinity, nitrate, phosphate, oxygen,
+                  dissolved_inorganic_carbon, alkalinity]
+      select: {depth: "{depth}", time: latest}
+    caption: The newest restart snapshot, model only; robust color limits per map.
+    plot: {colorbar_label_clipped: true}
+
+  # -- chlorophyll and mixed layer depth vs observations -------------------------------
+  - title: "Chlorophyll and mixed layer depth vs observations"
+    section: >-
+      Chlorophyll: the latest snapshot against the same day of the Copernicus gap-free
+      L4 satellite chlorophyll product (chl_gapfree_my_daily_geo). Mixed layer depth:
+      the model's density-threshold depth (0.03 kg/m3 change in sigma-theta from
+      10 m) in the latest month against that calendar month of the Holte and Talley
+      Argo climatology (mld_dt_mean, which uses the same criterion).
+
+  # Untested on this run: if it skips with 'window matched no data', check that the
+  # latest restart's day exists in chl_gapfree_my_daily_geo.
+  - title: "Chlorophyll vs satellite — latest snapshot"
+    compare:
+      reference: chl_gapfree_my_daily_geo
+      variables:
+        - {test: {sum: [spChl, diatChl, diazChl]}, reference: chlorophyll,
+           standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}
+      select: {test: {depth: surface, time: latest}, reference: {}}
+      times: {resample: 1D, reduce: mean}   # one comparison (row) for the snapshot day
+    caption: >-
+      Surface chlorophyll (sum of the three phytoplankton pools) in the newest restart
+      against the gap-free L4 satellite product on the same day.
+
+  - title: "Mixed layer depth vs Holte & Talley — {month.name} {month.year}"
+    for_each: {month: {run: {last: 1}}}   # latest month only; raise last: N for more months
+    compare:
+      reference: holte_talley_mld_clim
+      variables:
+        - {test: {calculate: mld, method: density_threshold}, reference: mld_by_sigma_theta}
+      select:
+        test: {time: "{month.window}"}
+        reference: {month: "{month.month}"}
+      aggregate: {test: {time: mean}, reference: {}}
+    caption: >-
+      Model mixed layer depth (0.03 kg/m³ sigma-theta threshold from 10 m) averaged over
+      the restarts of the latest month, against that calendar month of Holte & Talley.
+
+  - title: "Chlorophyll and mixed layer depth — metrics"
+    summary: {scope: section, kind: [table]}
+
+  # -- nutrients vs WOA23 -----------------------------------------------------------
+  - title: "Nutrients vs WOA23"
+    section: >-
+      The model's mean over the latest month (here, the restart snapshots in that
+      month) against the WOA23 monthly climatology for that calendar month, at the
+      surface and at 100 m.
+
+  - title: "Nutrients vs WOA23 — {month.name} {month.year} ({depth.label})"
+    for_each:
+      month: {run: {last: 1}}   # latest month only; raise last: N for more months
+      depth: "{depths}"
+    compare:
+      reference:
+        - woa23_nitrate_month{month.mm}
+        - woa23_phosphate_month{month.mm}
+        - woa23_silicate_month{month.mm}
+        - woa23_oxygen_month{month.mm}
+      variables: [nitrate, phosphate, silicate, oxygen]
+      select:
+        test: {depth: "{depth}", time: "{month.window}"}
+        reference: {depth: "{depth}"}
+      aggregate: {time: mean}
+    caption: >-
+      Model mean over the restarts of the latest month against the WOA23 climatology for
+      that calendar month, at {depth.label}.
+
+  - title: "Nutrients vs WOA23 — metrics"
+    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
+
+  # -- carbon vs GLODAPv2 -----------------------------------------------------------
+  - title: "Carbon vs GLODAPv2"
+    section: >-
+      GLODAPv2.2016b is a climatology, not a record of a particular year, so the
+      model's mean over the latest month is compared with it, at the surface and at
+      100 m.
+
+  - title: "Alkalinity & DIC vs GLODAPv2 — {month.name} {month.year} mean ({depth.label})"
+    for_each:
+      month: {run: {last: 1}}   # latest month only; raise last: N for more months
+      depth: "{depths}"
+    compare:
+      reference: [glodap]
+      variables: [alkalinity, dissolved_inorganic_carbon]
+      depths: ["{depth}"]
+      select: {test: {time: "{month.window}"}, reference: {}}
+      aggregate: {test: {time: mean}, reference: {}}
+    caption: >-
+      Model mean over the restarts of the latest month against the GLODAPv2.2016b mapped
+      climatology, at {depth.label}.
+
+  - title: "Carbon vs GLODAPv2 — metrics"
+    summary: {scope: section, kind: [table]}
+
+  - title: "Summary"
+    summary: {kind: both, color_by: variable}   # every comparison of the report
+
+  # T-S diagrams and the zonal-velocity sections are in final-report.yaml: they are slow
+  # (the T-S page took ~12 min, the velocity sections ~30 GB of memory) for a quick check.

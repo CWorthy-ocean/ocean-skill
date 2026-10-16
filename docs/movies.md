@@ -95,6 +95,22 @@ without `times=` at all. Either form gives a `ComparisonSet` that also scores as
 through time (`.taylor()`/`.target()`), and whose `.metrics()` table carries a `time`
 column.
 
+Two things worth knowing about `times=` bins:
+
+- **`"reduce": "pool"` pools instead of averaging.** `"mean"` averages each bin's steps
+  into one map per lane and scores that, so a model 1 °C too warm in spring and 1 °C too
+  cold in autumn scores a year RMSE near zero. `times={"resample": "1YS", "reduce":
+  "pool"}` keeps every step of the bin as samples of one score (bias, RMSE, correlation
+  over all space × time samples, area-weighted like a single map), while the comparison
+  still draws the bin's mean map. For maps and sections; it refuses `over=` and an
+  `aggregate=` time entry.
+- **A climatology reference follows the test's months.** Against a monthly climatology
+  (WOA23's monthly stack, a roms-tools climatology file, Holte and Talley) each bin is
+  scored against its own calendar month, and a bin spanning several months uses their
+  mean weighted by how many test steps fall in each. This is automatic, one log line per
+  test/reference pair; an explicit `month` in `select=`/`aggregate=` (or `over="month"`)
+  keeps meaning exactly what it said.
+
 A comparison movie keeps the ~260px panels of the row it animates, since it draws three
 of them side by side; only the single-field movie takes the whole width.
 

@@ -185,8 +185,10 @@ def test_grid_renders_rows_by_colour_and_columns_by_marker(diagram, crossed_comp
 def test_grid_cell_glyphs_cross_colour_and_marker(crossed_comparisons):
     import matplotlib.colors as mcolors
 
-    from ocean_skill.plot.style import COLOR_CYCLE
+    from ocean_skill.plot.style import variable_colors
 
+    # a row's colour is its variable's own, not its position in the grid
+    colors = variable_colors(["alk", "dic"])
     fig = target(
         crossed_comparisons, color_by="variable", marker_by="method", legend_style="grid"
     )
@@ -202,7 +204,7 @@ def test_grid_cell_glyphs_cross_colour_and_marker(crossed_comparisons):
                 continue  # the deliberately missing combination — see next test
             h = handles[_grid_cell_index(i, j, len(rows))]
             assert h.get_marker() == ("o", "^", "s")[j]
-            assert mcolors.to_hex(h.get_mfc()) == mcolors.to_hex(COLOR_CYCLE[i])
+            assert mcolors.to_hex(h.get_mfc()) == mcolors.to_hex(colors[rows[i]])
 
     # Corner, row-label, and column-header handles carry no visible glyph — only the
     # cross-product cells do.

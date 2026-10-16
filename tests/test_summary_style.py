@@ -254,8 +254,15 @@ def test_colors_dict_rejects_an_unknown_level_and_lists_the_real_ones(comparison
 
 
 def test_colors_dict_partial_override_falls_back_to_the_cycle(comparisons):
-    """Naming one level doesn't force the caller to name every level."""
-    from ocean_skill.plot.style import COLOR_CYCLE
+    """Naming one level doesn't force the caller to name every level.
+
+    The levels it leaves alone keep the colour their variable always has
+    (:func:`~ocean_skill.plot.style.variable_colors`), not whichever one their position
+    would have drawn.
+    """
+    from ocean_skill.plot.style import COLOR_CYCLE, variable_colors
+
+    auto = variable_colors(["sea_water_temperature", "sea_water_salinity", "nitrate"])
 
     fig = target(
         comparisons,
@@ -267,8 +274,9 @@ def test_colors_dict_partial_override_falls_back_to_the_cycle(comparisons):
     cols = [c.get_facecolor()[0] for c in ax.collections]
 
     assert mcolors.to_hex(cols[0]) == mcolors.to_hex("r")
+    assert mcolors.to_hex(cols[1]) == mcolors.to_hex(auto["sea_water_salinity"])
     assert mcolors.to_hex(cols[1]) == mcolors.to_hex(COLOR_CYCLE[1])
-    assert mcolors.to_hex(cols[2]) == mcolors.to_hex(COLOR_CYCLE[2])
+    assert mcolors.to_hex(cols[2]) == mcolors.to_hex(auto["nitrate"])
 
 
 def test_marker_by_only_swatches_match_the_points_they_key(comparisons):

@@ -53,6 +53,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from ocean_skill.comparison import (
+    _depth_label,
+    _time_label,
     aggregate_for,
     is_pair_spec,
     qc_for,
@@ -355,11 +357,32 @@ class _MonthNS:
         return format(str(self), spec)
 
 
+class _Item(dict):
+    """A ``for_each`` item that is a mapping, its keys also read as attributes.
+
+    So ``{group.name}`` fills a title (through ``str.format_map``) and
+    ``"{group.variables}"`` a value, the same way a depth's or a month's attributes do.
+    """
+
+    def __getattribute__(self, name: str) -> Any:
+        # A key wins over a dict method of the same name (``values``, ``items``, ``get``
+        # ...): ``{group.values}`` must read the mapping's own entry, never the bound
+        # method. Dunder lookups stay ordinary, and the dict's own C-level methods never
+        # go through here, so dict behaviour is unchanged.
+        if not name.startswith("__") and dict.__contains__(self, name):
+            return dict.__getitem__(self, name)
+        return super().__getattribute__(name)
+
+
 def _resolve_path(namespace: dict[str, Any], path: str) -> Any:
     segments = path.split(".")
     obj = namespace[segments[0]]  # KeyError -> caller wraps with the page title
     for seg in segments[1:]:
         obj = getattr(obj, seg)
+    if isinstance(obj, _Item):
+        # the whole mapping as a value: a plain dict for pydantic/compare/json, which
+        # may call ``.items()`` on it even when the mapping has a key of that name
+        return dict(obj)
     if len(segments) == 1 and hasattr(obj, "raw"):
         obj = obj.raw
     return obj
@@ -1590,7 +1613,10 @@ def expand(suite: Any) -> list[ExpandedPage]:
         plot_defaults = defaults.get("plot", {})
 
         for combo in combos:
-            namespace = {**defaults, **combo}
+            namespace = {
+                **defaults,
+                **{k: _Item(v) if isinstance(v, dict) else v for k, v in combo.items()},
+            }
             title = _template_value(page.title, namespace, title=page.title)
             own_plot = _template_value(page.plot, namespace, title=title)
             plot = {**plot_defaults, **own_plot}
@@ -1782,6 +1808,41 @@ def expand(suite: Any) -> list[ExpandedPage]:
             out[-1].caption = caption
             out[-1].default_plot = default_plot
     return out
+
+
+def time_pins(pages: list[ExpandedPage]) -> Any:
+    """Return the times ``pages`` name, as :class:`ocean_skill.sources.TimePins`.
+
+    Read-only.
+
+    Walks every resolved page's kwargs, ``then:`` steps and contour overrides for a
+    ``time`` entry (any spelling in :data:`ocean_skill.sources._TIME_KEYS`) or a
+    ``times:`` list: a date is an instant, a short ``{min, max}`` window or a period
+    string (``"2010-01"``) a window. Longer windows, ``times: {resample: ...}``, and
+    ``"latest"`` add nothing (:meth:`ocean_skill.sources.TimePins.from_values`). Used by
+    ``ocean-skill-run --smoke`` so the truncated read keeps the steps the pages ask for.
+    """
+    from ocean_skill.sources import _TIME_KEYS, TimePins
+
+    values: list[Any] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _TIME_KEYS or key == "times":
+                    values.append(value)
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for item in node:
+                walk(item)
+
+    for page in pages:
+        if page.kind == "section":
+            continue
+        walk(page.kwargs)
+        walk(page.steps)
+        walk(page.contours)
+    return TimePins.from_values(values)
 
 
 def _check_contour_families(
@@ -2121,8 +2182,47 @@ def _labelled_record(comparison: Any) -> dict[str, Any]:
 #: Record fields that tell two pooled comparisons with the same label apart, in the
 #: order a disambiguated label lists them.
 _DISTINGUISHING_FIELDS = (
-    "statistic", "aggregate", "depth", "time", "reference", "test"
+    "variable", "statistic", "aggregate", "depth", "time", "reference", "test"
 )
+
+
+def _short_label(text: str) -> str:
+    """Shorten a label made of CF standard names the way the figures do.
+
+    Every figure titles a variable by :func:`ocean_skill.vars.short_name`
+    (``"temperature"``, ``"nitrate"``); a summary table that named its rows by the
+    record's raw variable instead read ``mole_concentration_of_nitrate_in_sea_water``
+    in one table and ``nitrate`` in the plots next to it. Applied to each `` · ``-joined
+    part on its own, and only to a single token that *is* a standard name -- a name the
+    vocabulary knows, or one the short-name rules would actually shorten -- so a
+    source name (``mld_bry_phys_strip``) or a phrase is left exactly as written.
+    """
+    from ocean_skill.vars import short_name
+    from ocean_skill.vocabulary import is_known
+
+    def one(part: str) -> str:
+        if " " in part or "_" not in part:
+            return part
+        short = short_name(part)
+        return short if is_known(part) or short != part.replace("_", " ") else part
+
+    return " · ".join(one(part) for part in text.split(" · "))
+
+
+def _spell_field(name: str, value: Any) -> str:
+    """Spell one record field for a label: a depth band or time window as its label.
+
+    A band or window is a dict in the record (``{"min": 0, "max": 500}``); ``str()`` of
+    it would put the dict's repr into a summary table's row name, where the Notes
+    column already spells it (``"0-500 m"``, ``"2010-01-01–2013-12-31"``).
+    """
+    if name == "depth" and isinstance(value, dict | list | tuple):
+        return _depth_label(value)
+    if name == "time" and isinstance(value, dict | list | tuple):
+        return _time_label(value)
+    if name == "variable":
+        return _short_label(str(value))
+    return str(value)
 
 
 def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
@@ -2134,7 +2234,9 @@ def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
     (``"temperature · std · 200"``), and a running number as the last resort, so the
     summary table has one row per comparison instead of refusing the pool.
     """
-    base = [str(r.get("label") or r.get("variable") or "") for r in records]
+    base = [
+        _short_label(str(r.get("label") or r.get("variable") or "")) for r in records
+    ]
     groups: dict[str, list[int]] = {}
     for i, label in enumerate(base):
         groups.setdefault(label, []).append(i)
@@ -2149,9 +2251,14 @@ def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
         ]
         for i in idx:
             parts = [
-                str(records[i][f]) for f in differ if records[i].get(f) is not None
+                _spell_field(f, records[i][f])
+                for f in differ
+                if records[i].get(f) is not None
             ]
-            out[i] = " · ".join([label, *parts]) if parts else label
+            # the variable reads first ("temperature surface mean"), the rest after
+            named = "variable" in differ and records[i].get("variable") is not None
+            lead = parts.pop(0) + " " if named else ""
+            out[i] = lead + (" · ".join([label, *parts]) if parts else label)
         seen: dict[str, int] = {}
         for i in idx:
             seen[out[i]] = seen.get(out[i], 0) + 1

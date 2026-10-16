@@ -1526,6 +1526,10 @@ def _horizontal_mean(da):
     mid_lat = 0.5 * (float(lat_min) + float(lat_max))
     out = out.assign_coords({lon_coord.name: mid_lon, lat_coord.name: mid_lat})
     out.attrs["spatial_mean"] = description
+    if len(dims) == 1:
+        # lon and lat ride on one dimension: a transect, a boundary strip -- a line
+        # through the domain, not a patch of it. Titles say so rather than "domain".
+        out.attrs["spatial_mean_extent"] = "along-transect"
     if region is not None:
         out.attrs["region"] = list(region)
     return out

@@ -623,8 +623,6 @@ class MetricsTable:
         counts once); ``None`` limits only by the page. Spanning
         cells (a table built with ``split=``) are drawn on their first line only.
         """
-        import textwrap
-
         import matplotlib.pyplot as plt
         from matplotlib.table import Table
 
@@ -645,14 +643,14 @@ class MetricsTable:
         wrapped = [
             [
                 [
-                    textwrap.wrap(t, wrap) or [""] if a == "l" else [t]
+                    _wrap_cell(t, wrap) if a == "l" else [t]
                     for t, a in zip(line, aligns, strict=True)
                 ]
                 for line in row
             ]
             for row in rows
         ]
-        head = [textwrap.wrap(h, wrap) or [""] for h in header]
+        head = [_wrap_cell(h, wrap) for h in header]
         # one type size and column widths for every figure, so continued ones match:
         # the size that fits the widest column contents into the page width
         every_line = [line for row in wrapped for line in row]
@@ -777,6 +775,38 @@ class _Row:
     by_col: dict[Any, list[dict[str, Any]]] = field(default_factory=dict)
     lines: list[Any] = field(default_factory=lambda: [None])  # split levels, or None
     rep: dict[str, Any] = field(default_factory=dict)  # the record that speaks for it
+
+
+def _wrap_cell(text: str, width: int) -> list[str]:
+    """Wrap one cell's text to about ``width`` characters, at word boundaries only.
+
+    :func:`textwrap.wrap` breaks a word longer than the width wherever the column runs
+    out (``mole_concentration_of_nitrate_in_s`` / ``ea_water``), which reads as two
+    words. A word that is too long is cut after its underscores instead
+    (``mole_concentration_of_`` / ``nitrate_in_sea_water``), and the cut pieces are laid
+    out without a space between them, so the line break is the only thing separating
+    them. A piece with no underscore left to cut at stays whole and overflows its line
+    rather than being split. Always at least one (possibly empty) line.
+    """
+    # (piece, whether a space goes before it): only a word's first piece gets one
+    pieces: list[tuple[str, bool]] = []
+    for word in text.split():
+        parts = re.findall(r"[^_]+_*|_+", word) if len(word) > width else [word]
+        chunks: list[str] = []
+        for part in parts:
+            if chunks and len(chunks[-1]) + len(part) <= width:
+                chunks[-1] += part
+            else:
+                chunks.append(part)
+        pieces.extend((chunk, i == 0) for i, chunk in enumerate(chunks))
+    lines: list[str] = []
+    for piece, spaced in pieces:
+        joined = f" {piece}" if spaced and lines else piece
+        if lines and len(lines[-1]) + len(joined) <= width:
+            lines[-1] += joined
+        else:
+            lines.append(piece)
+    return lines or [""]
 
 
 def _table_records(cs, skip: tuple[str, ...] = ()) -> list[dict[str, Any]]:

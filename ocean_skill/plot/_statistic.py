@@ -81,10 +81,12 @@ def units_text(units, statistic=None) -> str:
     ``mmol m-3`` is ``mmol/m³``) and the machine spelling of a spread statistic
     (``delta_degC^2``, from ``for_statistic``) reads ``°C²``. ``statistic`` is kept so
     callers need not change; display is the same for every statistic. ``None``/empty
-    units give ``""``.
+    units give ``""``, and so does a bare dimensionless ``1`` (CF's unit for practical
+    salinity or a ratio), which would otherwise print as ``[1]``.
     """
     if not units:
         return ""
     from ocean_skill.units import display
 
-    return display(str(units))
+    shown = display(str(units))
+    return "" if shown.strip() == "1" else shown

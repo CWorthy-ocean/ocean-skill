@@ -553,6 +553,32 @@ def test_list_only_still_runs_the_refresh_block(tmp_path, stub_model):
     assert catalog_path == str(tmp_path / "catalog.yaml")
 
 
+def test_a_first_refresh_creates_its_catalog_folder_on_the_search_path(
+    tmp_path, stub_model
+):
+    """The folder refresh: writes into may be listed before the first run made it."""
+    new_dir = tmp_path / "fresh" / "catalogs"
+    suite = _model_only_suite(
+        tmp_path,
+        catalog_search_paths=[str(new_dir)],
+        refresh={
+            "catalog": str(new_dir / "run.yaml"),
+            "sources": [{"name": "stub", "files": "x*.nc", "ref": "stub.json"}],
+        },
+    )
+    with mock.patch("ocean_skill.workflows.run._refresh_sources"):
+        run_suite(_write_suite(tmp_path, suite), list_only=True)
+    assert new_dir.is_dir()
+
+
+def test_a_missing_search_path_that_is_not_the_refresh_folder_is_still_refused(
+    tmp_path, stub_model
+):
+    suite = _model_only_suite(tmp_path, catalog_search_paths=[str(tmp_path / "nope")])
+    with pytest.raises(FileNotFoundError, match="is not a directory"):
+        run_suite(_write_suite(tmp_path, suite), list_only=True)
+
+
 def test_list_only_shows_the_then_chain(tmp_path, stub_extremum_model, capsys):
     path = _write_suite(tmp_path, _extremum_suite(tmp_path))
     run_suite(path, list_only=True)

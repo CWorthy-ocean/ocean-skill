@@ -865,6 +865,45 @@ def test_skill_map_titles_wrong_length_lists_the_current_titles_to_copy(skill_it
         render(_skill_spec(skill_item, titles=["only one"]))
 
 
+def _holoviews_suptitle(obj) -> str:
+    return obj.opts.get("plot").kwargs.get("title", "")
+
+
+def test_skill_map_names_the_variable_in_its_suptitle_in_both_renderers(skill_item):
+    """Panels name the metrics, rows the depth; nothing said which variable."""
+    spec = _skill_spec(skill_item)
+    assert render(spec)._suptitle.get_text() == "nitrate"
+    assert _holoviews_suptitle(render(spec, renderer="holoviews")) == "nitrate"
+
+    stacked = _skill_spec(
+        [_skill_item("surface"), _skill_item("200 m", offset=0.4)]
+    )
+    assert render(stacked)._suptitle.get_text() == "nitrate"
+    assert _holoviews_suptitle(render(stacked, renderer="holoviews")) == "nitrate"
+
+
+def test_skill_map_suptitle_adds_the_depth_only_for_a_lone_comparison():
+    item = _skill_item()
+    item["depth"] = "200 m"
+    spec = _skill_spec(item)
+    assert render(spec)._suptitle.get_text() == "nitrate · 200 m"
+    assert _holoviews_suptitle(render(spec, renderer="holoviews")) == "nitrate · 200 m"
+
+
+def test_skill_map_suptitle_is_left_off_for_mixed_variables_and_an_explicit_title():
+    other = _skill_item("oxygen")
+    other["standard_name"] = (
+        "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
+    )
+    mixed = _skill_spec([_skill_item(), other])
+    assert render(mixed)._suptitle is None
+    assert _holoviews_suptitle(render(mixed, renderer="holoviews")) == ""
+    for title in ("", "My title"):
+        spec = _skill_spec(_skill_item(), title=title)
+        assert (getattr(render(spec)._suptitle, "get_text", lambda: "")()) == title
+        assert _holoviews_suptitle(render(spec, renderer="holoviews")) == title
+
+
 def test_the_overall_value_reaches_the_static_corner_box(skill_item):
     """The map and the single number are one statistic at two resolutions."""
     fig = render(_skill_spec(skill_item))

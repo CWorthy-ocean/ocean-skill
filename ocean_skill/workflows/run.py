@@ -33,8 +33,8 @@ overwritten by a later run.
 
 Guardrails against finding a bug only after hours of compute (see "Guardrails" in
 ``docs/suites.md``): ``smoke=N`` reads every model source of the ``refresh:`` block
-with only its last N steps (own output directory and results cache), ``self_check``
-redraws every ``compare:`` page against itself and flags any difference,
+with only its first and last N steps (own output directory and results cache),
+``self_check`` redraws every ``compare:`` page against itself and flags any difference,
 ``only=GLOB`` draws just the matching pages, and ``strict`` counts a layout warning as
 a problem. Whatever goes wrong -- a skipped or failed page, a self-check mismatch, a
 strict warning -- is collected in :attr:`SuiteResult.problems`, listed at the end of the
@@ -53,6 +53,7 @@ import contextlib
 import fnmatch
 import io
 import json
+import os
 import re
 import shutil
 import sys
@@ -217,6 +218,19 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     existing entry rather than raising, since that is an ordinary state for a suite
     refreshed against a live run rather than a failure. An entry's ``min_age`` key,
     when given, is forwarded to both the filter and ``make_kerchunk``.
+
+    ``files`` is one glob, or a list of globs for a run whose output is spread over
+    several task folders (``tasks/first_wk/output/output_rst.*.nc``,
+    ``tasks/second_wk/...``, then a second run's ``tasks/*/output/...``). A list is
+    joined into one reference in *time* order, not path order (a folder named
+    ``first_half`` sorts before ``first_wk``), by
+    :func:`ocean_skill.build.order_segments`. Where two files give the same time step
+    -- after ``keep: latest-per-file`` has cut each file to its newest record -- the
+    later one wins: a file of a later glob beats one of an earlier glob, and within one
+    glob the later path in sorted order beats the earlier. Each file dropped that way
+    is logged (``refresh: <name>: <time> from <path> replaces <path>``). A single glob
+    given as a string is read as it always was: every match in path order, repeats
+    collapsed by ``make_kerchunk``'s own ``keep`` rule.
     """
     import glob as _glob
 
@@ -224,6 +238,7 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         _partition_unfinished,
         add_source,
         make_kerchunk,
+        order_segments,
         save,
     )
 
@@ -233,19 +248,37 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     rebuilt, skipped = [], []
     for entry in spec:
         # glob.glob (not Path.glob) so absolute patterns work
-        files = sorted(_glob.glob(str(Path(entry["files"]).expanduser())))
+        patterns = entry["files"]
+        joined = not isinstance(patterns, str)
+        groups = [
+            sorted(_glob.glob(str(Path(pattern).expanduser())))
+            for pattern in (patterns if joined else [patterns])
+        ]
+        files = [f for group in groups for f in group]
         if not files:
             skipped.append(entry["name"])
             continue
         min_age = entry.get("min_age", 0.0)
         ready, unfinished = _partition_unfinished(
-            [Path(f) for f in files], min_age=min_age
+            [Path(f) for f in dict.fromkeys(files)], min_age=min_age
         )
         for p, why in unfinished.items():
             print(f"  refresh: {entry['name']}: skipping {p} ({why})")
         if not ready:
             skipped.append(entry["name"])
             continue
+        replaced = []
+        if joined:
+            ready_set = set(ready)
+            ready, replaced = order_segments(
+                [[Path(f) for f in group if Path(f) in ready_set] for group in groups],
+                keep=entry.get("keep", "last"),
+            )
+            for when, winner, loser in replaced:
+                print(
+                    f"  refresh: {entry['name']}: {when} from {winner} "
+                    f"replaces {loser}"
+                )
         # Each left out entirely when the suite doesn't name it, so make_kerchunk's
         # own defaults (keep, automatic subchunking) take effect here too.
         kwargs = {k: entry[k] for k in ("keep", "subchunk") if k in entry}
@@ -254,7 +287,8 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         )
         add_source(cat, entry["name"], ref)
         rebuilt.append(entry["name"])
-        print(f"  refresh: {entry['name']} <- {len(ready)} files")
+        note = f" ({len(replaced)} replaced by a later segment)" if replaced else ""
+        print(f"  refresh: {entry['name']} <- {len(ready)} files{note}")
 
     if skipped:
         print(f"  refresh: no files matched for {skipped}; kept their existing entries")
@@ -263,13 +297,26 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     save(cat, catalog_path)
 
 
+#: The ``refresh.forcing`` keys each ``kind`` forwards to its builder (the config
+#: model's own defaults, ``climatology: false``, must not reach a builder that has no
+#: such key).
+_FORCING_KEYS = {
+    "boundary": ("variables", "climatology", "sides", "strip", "ref", "subchunk"),
+    "surface": ("variables", "climatology", "time_coord", "ref", "subchunk"),
+    "initial_conditions": ("variables",),
+}
+
+
 def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> None:
     """Catalog a suite's roms-tools forcing files into the ``refresh:`` catalog.
 
     Each ``refresh.forcing`` entry becomes the catalog entries
     :func:`ocean_skill.build.add_boundary_sources` (``kind: boundary``, one per side,
-    ``<name>_<side>``) or :func:`ocean_skill.build.add_forcing_source` (``kind:
-    surface``) write, alongside the model output ``refresh.sources`` rebuilt. The
+    ``<name>_<side>``, plus ``<name>_strip`` when ``strip:`` names sides),
+    :func:`ocean_skill.build.add_forcing_source` (``kind: surface``) or
+    :func:`ocean_skill.build.add_initial_conditions` (``kind: initial_conditions``, one
+    entry from one file) write, alongside the model output ``refresh.sources``
+    rebuilt. The
     entries are rebuilt on every run. An entry with a ``ref`` reads a kerchunk
     reference kept there, which the builder rebuilds only when the matched files
     change, so a run with unchanged forcing reuses it and opens nothing else; an entry
@@ -291,8 +338,15 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         _local_path,
         add_boundary_sources,
         add_forcing_source,
+        add_initial_conditions,
         save,
     )
+
+    adders = {
+        "boundary": add_boundary_sources,
+        "surface": add_forcing_source,
+        "initial_conditions": add_initial_conditions,
+    }
 
     catalog_path = Path(catalog_path).expanduser()
     cat = _reopen_catalog(catalog_path)
@@ -333,20 +387,10 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         if not files:
             skipped.append(entry["name"])
             continue
-        kwargs = {
-            k: entry[k]
-            for k in (
-                "variables",
-                "climatology",
-                "sides",
-                "time_coord",
-                "ref",
-                "subchunk",
-            )
-            if k in entry
-        }
-        boundary = entry["kind"] == "boundary"
-        add = add_boundary_sources if boundary else add_forcing_source
+        kwargs = {k: entry[k] for k in _FORCING_KEYS[entry["kind"]] if k in entry}
+        if "hc" in entry:  # a grid (and data) file that states no critical depth
+            kwargs["vertical"] = {"hc": float(entry["hc"])}
+        add = adders[entry["kind"]]
         # the builder writes this record of the files next to a reference it
         # (re)builds, so an unchanged one means the reference was reused
         sidecar = (
@@ -789,6 +833,250 @@ def _page_problems(
     return found
 
 
+#: How many ``<base_dir>/smoke-cache/<hash>/`` folders a smoke run leaves behind (the
+#: current one plus the newest others, by last use); older ones are deleted.
+SMOKE_CACHE_KEEP = 3
+
+#: A smoke-cache folder used within this long is never deleted by another run's
+#: pruning, so two runs going at once cannot pull the folder from under each other.
+SMOKE_CACHE_GRACE_S = 3600.0
+
+
+def _code_identity() -> str | None:
+    """Name the exact code a run executes, or ``None`` when that cannot be known.
+
+    The installed package version, plus -- from the git checkout holding the package
+    -- ``HEAD`` and, when the tree has uncommitted changes under the package, a hash
+    of those changes (``git diff HEAD`` and the contents of untracked files), so an
+    edit not yet committed also changes the identity. ``None`` (no git, or not a git
+    checkout) makes the smoke cache always cold: nothing then vouches that the code
+    is the one that wrote an earlier result.
+    """
+    import hashlib
+    import subprocess
+    from importlib import metadata
+
+    import ocean_skill
+
+    pkg = Path(ocean_skill.__file__).resolve().parent
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(pkg), *args],
+            check=True,
+            capture_output=True,
+            timeout=60,
+        ).stdout
+
+    try:
+        version = metadata.version("ocean-skill")
+    except metadata.PackageNotFoundError:
+        version = "unknown"
+    try:
+        parts = [version, git("rev-parse", "HEAD").decode().strip()]
+        if git("status", "--porcelain", "--", str(pkg)).strip():
+            digest = hashlib.sha256(git("diff", "HEAD", "--", str(pkg)))
+            untracked = git(
+                "ls-files", "--others", "--exclude-standard", "-z", "--", str(pkg)
+            )
+            for rel in sorted(r for r in untracked.decode().split("\0") if r):
+                digest.update(rel.encode())
+                digest.update((pkg / rel).read_bytes())  # paths are relative to pkg
+            parts.append("dirty-" + digest.hexdigest())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return "|".join(parts)
+
+
+def _smoke_pins(suite: Any, only: str | None) -> Any:
+    """Return the time steps the suite's pages name, for ``--smoke`` to keep.
+
+    Expands the suite once *before* the truncation is set, so month windows and other
+    placeholders resolve against the whole run (expansion itself reads the time index,
+    so collecting from inside the truncation would see only the steps it is about to
+    choose).
+    Output and warnings of this throwaway pass are dropped -- the real expansion repeats
+    them. A suite that will not expand here keeps only its first and last steps.
+    """
+    import io
+
+    from ocean_skill import sources as _sources
+    from ocean_skill.workflows import pages as _pages
+
+    try:
+        with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+            warnings.simplefilter("ignore")
+            expanded = _pages.expand(suite)
+    except Exception as exc:  # noqa: BLE001 -- any failure only costs the pins
+        warnings.warn(
+            f"smoke: could not collect the time steps the pages name "
+            f"({type(exc).__name__}: {exc}); keeping only the first and last steps",
+            stacklevel=2,
+        )
+        return _sources.TimePins()
+    if only is not None:
+        expanded = _select_pages(expanded, only)
+    return _pages.time_pins(expanded)
+
+
+def _smoke_stamps(
+    names: list[str], steps: int
+) -> list[tuple[str, int, str, str, int, str]]:
+    """Return ``(name, steps, first, last, kept, digest)`` for each truncated source.
+
+    Called inside :func:`ocean_skill.sources.truncate_time`, so these describe the time
+    stamps the run will actually see (``-`` and 0 for a source with no time axis):
+    ``kept`` is how many, ``digest`` a hash of all of them, so a change to the steps
+    pinned in between (not just the ends) starts a new cache.
+    A source that cannot be read gets a stamp no other run shares, so its cache is cold.
+    """
+    import hashlib
+
+    from ocean_skill import operators
+    from ocean_skill import sources as _sources
+
+    out = []
+    for name in names:
+        try:
+            obj = _sources.read(name)
+            dim = operators.resolve_dim(obj, "time") if hasattr(obj, "dims") else None
+            index = obj.indexes.get(dim) if dim is not None else None
+            if index is not None and len(index):
+                first, last, kept = str(index[0]), str(index[-1]), len(index)
+                digest = hashlib.sha256(
+                    "\n".join(str(t) for t in index).encode()
+                ).hexdigest()[:16]
+            else:
+                first, last, kept, digest = "-", "-", 0, "-"
+        except Exception as exc:
+            first = last = f"unreadable-{type(exc).__name__}-{time.time_ns()}"
+            kept, digest = 0, "-"
+        out.append((name, steps, first, last, kept, digest))
+    return out
+
+
+def _stat_tree(path: Path) -> list[tuple[str, int, int]]:
+    """Return ``(name, mtime_ns, size)`` of ``path``, or of every file under a folder.
+
+    Stat only -- nothing is opened. A parquet kerchunk reference is a folder, whose own
+    mtime does not move when one of its files is rewritten, so each file counts. A
+    path that does not exist gives ``[]``.
+    """
+    try:
+        if not path.is_dir():
+            st = path.stat()
+            return [(path.name, st.st_mtime_ns, st.st_size)]
+        out = []
+        for root, _dirs, names in os.walk(path):
+            for name in sorted(names):
+                f = Path(root) / name
+                st = f.stat()
+                out.append((str(f.relative_to(path)), st.st_mtime_ns, st.st_size))
+        return sorted(out)
+    except OSError:
+        return []
+
+
+def _smoke_data_stamps(refresh: Any) -> list[Any]:
+    """Return what the data behind a suite's ``refresh:`` block looks like on disk.
+
+    The truncation stamps (:func:`_smoke_stamps`) name which time steps are kept, not
+    what is in them: a model rerun or a rebuilt reference that rewrites the same steps
+    in place would otherwise be served the earlier run's cached results. So the key
+    also covers, for each ``refresh.sources`` and ``refresh.forcing`` entry, the
+    ``(mtime_ns, size)`` of its kerchunk ``ref`` (a rebuild rewrites it) -- or, with no
+    ref, of the files its globs match -- and of the refresh catalog file. Cheap stats
+    only. ``[]`` for a suite with no ``refresh:`` block.
+    """
+    import glob as _glob
+
+    if refresh is None:
+        return []
+    out: list[Any] = [
+        ["catalog", _stat_tree(Path(refresh.catalog).expanduser().resolve())]
+    ]
+    for group, entries in (("source", refresh.sources), ("forcing", refresh.forcing)):
+        for entry in entries:
+            if entry.ref:
+                stats = _stat_tree(Path(entry.ref).expanduser().resolve())
+            else:
+                patterns = entry.files
+                if isinstance(patterns, str):
+                    patterns = [patterns]
+                stats = [
+                    (f, *st[1:])
+                    for pattern in patterns
+                    for f in sorted(_glob.glob(str(Path(pattern).expanduser())))
+                    for st in _stat_tree(Path(f))
+                ]
+            out.append([group, entry.name, stats])
+    return out
+
+
+def _smoke_cache_key(
+    stamps: list[tuple[str, int, str, str, int, str]],
+    data: list[Any] | None = None,
+) -> tuple[str, str | None]:
+    """Return the smoke-cache folder name and the code identity it was built from.
+
+    A short hash of the truncation (``stamps``), the data on disk behind it (``data``,
+    :func:`_smoke_data_stamps`) and the code (:func:`_code_identity`). With no code
+    identity the name carries a fresh nonce, so it is never found again.
+    """
+    import hashlib
+    import uuid
+
+    identity = _code_identity()
+    nonce = None if identity else uuid.uuid4().hex
+    payload = json.dumps([stamps, data or [], identity or nonce])
+    return hashlib.sha256(payload.encode()).hexdigest()[:12], identity
+
+
+def _smoke_last_used(folder: Path) -> float:
+    """Return when ``folder`` (or one of its kind subfolders) last changed."""
+    stamps = [folder.stat().st_mtime]
+    for sub in folder.iterdir():
+        try:
+            stamps.append(sub.stat().st_mtime)
+        except OSError:
+            pass
+    return max(stamps)
+
+
+def _prune_smoke_cache(root: Path, current: Path) -> list[Path]:
+    """Delete old smoke-cache folders under ``root``; return those removed.
+
+    Keeps ``current`` and the newest others, :data:`SMOKE_CACHE_KEEP` in all, and never
+    removes ``current`` or anything used within :data:`SMOKE_CACHE_GRACE_S`. A folder
+    named for a cache kind is a leftover of the older one-folder layout: it is not
+    counted towards the keep, and goes once it is past the grace period.
+    """
+    from ocean_skill import cache as _cache
+
+    try:
+        siblings = [d for d in root.iterdir() if d.is_dir() and d != current]
+    except OSError:
+        return []
+    used = {}
+    for d in siblings:
+        try:
+            used[d] = _smoke_last_used(d)
+        except OSError:
+            pass
+    legacy = [d for d in used if d.name in _cache.KINDS]
+    hashed = sorted(
+        (d for d in used if d not in legacy), key=used.__getitem__, reverse=True
+    )
+    doomed = hashed[max(SMOKE_CACHE_KEEP - 1, 0) :] + legacy
+    now = time.time()
+    removed = []
+    for d in doomed:
+        if now - used[d] > SMOKE_CACHE_GRACE_S:
+            shutil.rmtree(d, ignore_errors=True)
+            removed.append(d)
+    return removed
+
+
 def run_suite(
     path: str | Path,
     *,
@@ -815,12 +1103,19 @@ def run_suite(
 
     ``smoke=N``
         Read every model source named under ``refresh.sources`` (or, with no
-        ``refresh:`` block, ``defaults.test``) with only its last ``N`` time steps --
+        ``refresh:`` block, ``defaults.test``) with only its first and last ``N`` time
+        steps, plus the steps the pages pin (the nearest step to each date a page names,
+        and the first and last ``N`` inside each window under 62 days; see
+        :func:`_smoke_pins`) --
         through :func:`ocean_skill.sources.truncate_time`, so the ``latest``/``month:
         run`` lookups at expansion see the same shortened record. The cache key does not
         know about the truncation, so the run's results go in
-        ``<cache>/smoke-cache/`` (:func:`ocean_skill.cache.scoped`), never the real
-        cache, and the report in ``<output_dir>/<name>-smoke/``.
+        ``<cache>/smoke-cache/<hash>/`` (:func:`ocean_skill.cache.scoped`), never the
+        real cache, and the report in ``<output_dir>/<name>-smoke/``. The hash names the
+        truncation (sources, ``N``, the time stamps kept, pinned ones included) and the
+        code version
+        (:func:`_code_identity`), so an identical run reuses it and any change starts
+        cold; old folders are pruned (:data:`SMOKE_CACHE_KEEP`).
     ``self_check``
         Every ``compare:`` page is redrawn with the reference replaced by the test
         source (:func:`ocean_skill.workflows.pages.self_check_page`) and any bias, error
@@ -874,7 +1169,16 @@ def run_suite(
 
     with _capture_terminal() as cap, contextlib.ExitStack() as stack:
         catalog_dirs = _resolve_catalog_dirs(suite.catalog_search_paths, path)
+        # The folder this suite's own refresh: writes its catalog into may not exist
+        # before the first refresh; it is created rather than refused.
+        refresh_dir = (
+            Path(suite.refresh.catalog).expanduser().resolve().parent
+            if suite.refresh is not None and refresh
+            else None
+        )
         for entry, resolved in zip(suite.catalog_search_paths, catalog_dirs):
+            if resolved == refresh_dir:
+                resolved.mkdir(parents=True, exist_ok=True)
             if not resolved.is_dir():
                 raise FileNotFoundError(
                     f"catalog_search_paths: {entry!r} resolved to {resolved}, which "
@@ -920,23 +1224,46 @@ def run_suite(
                     "smoke: no model source to shorten -- name them under "
                     "refresh.sources or set defaults.test"
                 )
-            smoke_dir = stack.enter_context(_smoke_cache.scoped("smoke-cache"))
-            # Scratch: its keys know neither N nor how far the model has grown since,
-            # so a smoke run must never be served an earlier one's results.
-            if not list_only and smoke_dir.name == "smoke-cache":
-                shutil.rmtree(smoke_dir, ignore_errors=True)
             modes["smoke_sources"] = smoke_sources
-            modes["smoke_cache"] = str(smoke_dir)
             # the other sources are cut to end where the test source does, so a
             # reference run that continues past the suite's window stays inside it
             anchor = test if isinstance(test, str) else smoke_sources[0]
+            # plus the steps the pages name (collected before the cut, see _smoke_pins)
+            pins = _smoke_pins(suite, only)
+            modes["smoke_pins"] = {
+                "instants": len(pins.instants),
+                "windows": len(pins.windows),
+            }
             stack.enter_context(
-                _sources.truncate_time(smoke_sources, smoke, anchor=anchor)
+                _sources.truncate_time(smoke_sources, smoke, anchor=anchor, pins=pins)
             )
+            # Its keys know neither N nor how far the model has grown, so the cache is
+            # named for the truncation (what it keeps) and the code, and a change to
+            # either starts a new, cold one.
+            stamps = _smoke_stamps(smoke_sources, smoke)
+            key, identity = _smoke_cache_key(stamps, _smoke_data_stamps(suite.refresh))
+            smoke_dir = stack.enter_context(_smoke_cache.scoped(f"smoke-cache/{key}"))
+            reused = smoke_dir.is_dir()
+            if not list_only:
+                smoke_dir.mkdir(parents=True, exist_ok=True)
+                os.utime(smoke_dir)  # marks it recently used for other runs' pruning
+                _prune_smoke_cache(smoke_dir.parent, smoke_dir)
+            modes["smoke_cache"] = str(smoke_dir)
+            modes["smoke_cache_key"] = key
+            modes["smoke_cache_reused"] = reused
+            kept = ", ".join(f"{st[0]} {st[4]} step(s)" for st in stamps)
             print(
-                f"smoke: reading only the last {smoke} time step(s) of "
-                f"{smoke_sources}; results cached in {smoke_dir}"
+                f"smoke: reading the first and last {smoke} time step(s) of "
+                f"{smoke_sources}, plus the steps the pages pin "
+                f"({len(pins.instants)} instant(s), {len(pins.windows)} short "
+                f"window(s)); kept {kept}; results cached in {smoke_dir}"
             )
+            print(f"smoke cache: {smoke_dir} ({'reused' if reused else 'new'})")
+            if identity is None:
+                print(
+                    "smoke cache: no git checkout to name the code version, so every "
+                    "run starts cold"
+                )
 
         expanded = _pages.expand(suite)
         if only is not None:
@@ -971,7 +1298,7 @@ def run_suite(
 
             print(f"cache: {_cache.base_dir()}")
             if smoke_dir is not None:
-                print(f"smoke cache: {smoke_dir}")
+                print(f"smoke cache: {smoke_dir} ({'reused' if reused else 'new'})")
             for i, p in enumerate(expanded, 1):
                 if p.kind == "section":
                     print(f"{i:2d}. [section] {p.title}")
@@ -1269,8 +1596,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         type=int,
         metavar="N",
-        help="read only the last N (default 2) time steps of the suite's model "
-        "sources; report in <name>-smoke/, results in a separate smoke-cache",
+        help="read only the first and last N (default 2) time steps of the suite's "
+        "model sources; report in <name>-smoke/, results in a separate smoke-cache",
     )
     parser.add_argument(
         "--self-check",

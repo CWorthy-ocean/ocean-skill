@@ -876,6 +876,96 @@ def subset_to_time_targets(obj, targets, method: str = "nearest"):
     return cropped.interp({name: targets}, method="linear")
 
 
+def month_axis(obj) -> str | None:
+    """Return the dimension a monthly climatology lays its months along, else ``None``.
+
+    A climatology here is an object with a one-dimensional integer ``month`` coordinate
+    (1 to 12, no repeats) and **no dated time axis**: either ``month`` is itself the
+    dimension (a roms-tools climatology file, the Holte & Talley product), or it rides
+    on a ``time`` dimension left undecoded because "months since ..." names no calendar
+    (WOA23's monthly stack, see :func:`ocean_skill.sources._with_month_coordinate`).
+    The dimension of the first kind is ``"month"``, of the second ``"time"`` (or
+    whatever that axis is called) -- the caller tells them apart by comparing the
+    return with ``"month"``.
+
+    ``None`` for anything dated (a decoded calendar ``time`` stands beside the
+    months), a ``month`` that is not an index of the calendar (two-dimensional,
+    non-integer, outside 1..12, repeated), a table, or an object with no ``month``.
+    """
+    if not hasattr(obj, "coords") or "month" not in obj.coords:
+        return None
+    month = obj.coords["month"]
+    if month.ndim != 1 or month.size == 0:
+        return None
+    try:
+        values = np.asarray(month.values, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(values).all() or not (values == np.round(values)).all():
+        return None
+    ints = values.astype(int)
+    if ints.min() < 1 or ints.max() > 12 or len(set(ints.tolist())) != ints.size:
+        return None
+    dim = str(month.dims[0])
+    from ocean_skill.operators import resolve_dim
+
+    tdim = resolve_dim(obj, "T")
+    if tdim is not None and tdim in obj.coords and tdim != "month":
+        stamps = obj.coords[tdim]
+        if stamps.dtype.kind == "M" or (
+            stamps.dtype.kind == "O"
+            and stamps.size
+            and hasattr(stamps.values.reshape(-1)[0], "calendar")
+        ):
+            return None  # a decoded calendar: the object is dated, not a climatology
+    return dim
+
+
+def follow_months(obj, times) -> tuple[Any, int]:
+    """Lay a monthly climatology out along ``times``: each step gets its own month.
+
+    ``obj`` is an object :func:`month_axis` reads as a climatology; the result has a
+    dated ``time`` axis equal to ``times`` (those whose calendar month the climatology
+    holds), each step carrying that step's month. January 2011 and January 2012 both
+    carry the climatology's January: the climatology is *repeated* at the months of
+    ``times``, never interpolated. Everything downstream -- selecting a bin by date,
+    averaging it, pairing it step by step with a dated lane -- then treats the result as
+    the dated series it now is, which is what makes a bin spanning several months the
+    mean of those months weighted by how many of ``times`` fall in each.
+
+    A ``month``-dimensioned climatology renames that dimension to ``time``; an
+    undecoded ``time`` keeps its name and swaps its raw values for the dates. The
+    ``month`` coordinate is dropped either way (it has done its job).
+
+    Returns ``(followed, dropped)``: ``dropped`` counts the steps of ``times`` whose
+    month the climatology lacks (a four-month climatology against a year of steps);
+    they are left out of the followed object. ``obj`` itself is returned, with
+    ``dropped = 0``, when it is not a climatology or ``times`` is empty; every step
+    missing raises ``ValueError``.
+    """
+    dim = month_axis(obj)
+    stamps = np.asarray(times)
+    if dim is None or stamps.size == 0:
+        return obj, 0
+    wanted = np.asarray(xr.DataArray(stamps, dims="step").dt.month.values, dtype=int)
+    have = {int(m): i for i, m in enumerate(np.asarray(obj.coords["month"].values))}
+    keep = [i for i, m in enumerate(wanted) if int(m) in have]
+    if not keep:
+        raise ValueError(
+            f"none of the {stamps.size} test time steps falls in a month the "
+            f"climatology holds (it has months {sorted(have)})."
+        )
+    out = obj.isel({dim: [have[int(wanted[i])] for i in keep]})
+    dates = stamps[keep]
+    out = out.drop_vars("month")
+    if dim == "month":
+        out = out.drop_vars("time", errors="ignore").rename_dims({"month": "time"})
+        out = out.assign_coords(time=("time", dates))
+    else:
+        out = out.assign_coords({dim: (dim, dates)})
+    return out, stamps.size - len(keep)
+
+
 def bbox_of(obj) -> tuple[float, float, float, float]:
     """Return ``(lon_min, lat_min, lon_max, lat_max)`` of ``obj``."""
     lon, lat = _lon_name(obj), _lat_name(obj)

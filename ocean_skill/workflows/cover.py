@@ -99,10 +99,16 @@ def _resolve(given: str, base: Path) -> Path | None:
     return None
 
 
+def _globs(files: str | list[str]) -> list[str]:
+    """Return a ``refresh.sources[].files`` value (glob or list of globs) as a list."""
+    return [files] if isinstance(files, str) else list(files)
+
+
 def _run_dir(suite: SuiteConfig) -> Path | None:
     """Find the C-Star run folder behind ``refresh.sources[].files``, if any."""
     for source in suite.refresh.sources if suite.refresh else []:
-        parent = Path(source.files).expanduser().parent
+        first = source.files if isinstance(source.files, str) else source.files[0]
+        parent = Path(first).expanduser().parent
         for cand in (parent, parent.parent):
             if (
                 not re.search(r"[*?\[]", str(cand))
@@ -340,7 +346,11 @@ def gather(
                 ("Refresh catalog", refresh.catalog if refresh else None),
                 (
                     "Refreshed files",
-                    "\n".join(s.files for s in refresh.sources) if refresh else None,
+                    "\n".join(
+                        f for s in refresh.sources for f in _globs(s.files)
+                    )
+                    if refresh
+                    else None,
                 ),
                 (
                     "Grid",

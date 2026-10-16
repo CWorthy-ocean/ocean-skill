@@ -1549,6 +1549,19 @@ def _draw_highlights(ax, spans, *, label_size: float | None = None) -> None:
             )
 
 
+def _add_headroom(ax, headroom: float) -> None:
+    """Stretch ``ax``'s value axis upward by ``headroom`` of its own span.
+
+    Leaves a clear band across the top of the panel for the statistics box and the key
+    (:func:`ocean_skill.plot.series.overlay_plan`) instead of laying them over the
+    curves. Read off the axis as autoscaled, so the data keeps its own margins.
+    """
+    if not headroom:
+        return
+    low, high = ax.get_ylim()
+    ax.set_ylim(low, high + headroom * (high - low))
+
+
 def _metrics_box(ax, panel, metrics_kwargs: dict[str, Any]) -> None:
     """Put the statistics box in the corner :mod:`ocean_skill.plot.series` measured."""
     if not panel.metrics_text:
@@ -1738,6 +1751,8 @@ def series(
         ncols=ncols,
         nrows=nrows,
         highlight=highlight,
+        # a fixed or shared value axis cannot be stretched to make room for the box/key
+        headroom=ylim is None and not sharey,
     )
     canvas = resolve_canvas(size, zoom)
     _warn_if_overplotted(layout, canvas)
@@ -1831,7 +1846,13 @@ def series(
             fontsize=scale["title"],
             **{**title_pad, **_without_font(title_kwargs)},
         )
-        ax.set_ylabel(panel.ylabel, fontsize=scale["axes_label"])
+        ylabel = panel.ylabel
+        if panel.residual and " [" in ylabel:
+            # A panel with a strip under it is short: a rotated "alkalinity [mmol/m³]"
+            # is taller than its axes and runs into the strip's own label below. Units
+            # go on a second line, the way the strip's label spells them.
+            ylabel = ylabel.replace(" [", "\n[", 1)
+        ax.set_ylabel(ylabel, fontsize=scale["axes_label"])
         if panel.ylabel_color:
             ax.yaxis.label.set_color(panel.ylabel_color)
             ax.tick_params(axis="y", labelcolor=panel.ylabel_color)
@@ -1846,6 +1867,8 @@ def series(
             if panel.secondary_ylabel_color:
                 twin.yaxis.label.set_color(panel.secondary_ylabel_color)
                 twin.tick_params(axis="y", labelcolor=panel.secondary_ylabel_color)
+            _add_headroom(twin, panel.headroom)
+        _add_headroom(ax, panel.headroom)
         _metrics_box(ax, panel, metrics_kwargs)
         _x_axis(ax, scale, tick_label_kwargs, date=layout.date_axis, ticks=layout.xticks)
         if panel.residual:
@@ -8598,6 +8621,8 @@ def skill_map(
 
     if layout not in ("rows", "columns"):
         raise ValueError(f"layout={layout!r} — expected 'rows' or 'columns'")
+    if title is None:  # "" asks for none: the panels name metrics, this the variable
+        title = _titles.skill_map_title(items)
     metric_titles = metric_panel_titles(names)
     aspect = _aspect_of(items[0]["skill"][names[0]])
     canvas = resolve_canvas(size, zoom)

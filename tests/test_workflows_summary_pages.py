@@ -355,6 +355,20 @@ def test_shared_labels_get_the_fields_that_tell_them_apart():
     ]
 
 
+def test_a_depth_band_and_a_time_window_are_spelled_not_printed_as_dicts():
+    window = {"min": "2010-01-01", "max": "2013-12-31"}
+    records = [
+        {"label": "temperature", "depth": {"min": 0, "max": 500}, "time": window},
+        {"label": "temperature", "depth": [5, 50], "time": "2010-01"},
+    ]
+    labels = P._distinct_labels(records)
+    assert labels == [
+        "temperature · 0-500 m · 2010-01-01–2013-12-31",
+        "temperature · 5 m, 50 m · 2010-01",
+    ]
+    assert not any("{" in label for label in labels)
+
+
 def test_records_alike_in_every_field_are_numbered():
     records = [{"variable": "mld"}, {"variable": "mld"}]
     assert P._distinct_labels(records) == ["mld (1)", "mld (2)"]
@@ -380,3 +394,94 @@ def test_a_summary_table_draws_two_statistics_of_one_variable(tmp_path):
     assert "temperature · mean" in text and "temperature · std" in text
     for _, f in figs:
         plt.close(f)
+
+
+def test_rows_of_one_page_that_differ_only_by_variable_are_named_by_it():
+    records = [
+        {"label": "surface mean", "variable": "temperature"},
+        {"label": "surface mean", "variable": "salinity"},
+    ]
+    assert P._distinct_labels(records) == [
+        "temperature surface mean",
+        "salinity surface mean",
+    ]
+
+
+# -- row names: the figures' short variable names, wrapped at word boundaries ----------
+
+_NITRATE = "mole_concentration_of_nitrate_in_sea_water"
+_OXYGEN = "mole_concentration_of_dissolved_molecular_oxygen_in_sea_water"
+_CHLOROPHYLL = "chlorophyll_a_in_sea_water"
+
+
+def test_rows_named_by_a_standard_name_read_as_the_figures_name_the_variable():
+    records = [
+        {"variable": _NITRATE},
+        {"variable": _OXYGEN},
+        {"label": f"{_CHLOROPHYLL} · surface", "variable": _CHLOROPHYLL},
+        {
+            "label": "temperature · surface",
+            "variable": "sea_water_potential_temperature",
+        },
+    ]
+    assert P._distinct_labels(records) == [
+        "nitrate",
+        "oxygen",
+        "chlorophyll a · surface",
+        "temperature · surface",
+    ]
+
+
+def test_a_variable_leading_a_disambiguated_label_is_short_too():
+    records = [
+        {"label": "2010-01", "variable": _NITRATE},
+        {"label": "2010-01", "variable": _OXYGEN},
+    ]
+    assert P._distinct_labels(records) == ["nitrate 2010-01", "oxygen 2010-01"]
+
+
+def test_source_names_and_phrases_are_not_taken_for_standard_names():
+    records = [
+        {"label": "mld_bry_phys_strip", "variable": "x"},
+        {"label": "pyesper_ic · mld_ic", "variable": "x"},
+        {"label": "surface mean", "variable": "x"},
+    ]
+    assert P._distinct_labels(records) == [
+        "mld_bry_phys_strip",
+        "pyesper_ic · mld_ic",
+        "surface mean",
+    ]
+
+
+def test_table_text_wraps_at_words_and_cuts_long_tokens_only_at_underscores():
+    from ocean_skill.table import _wrap_cell
+
+    assert _wrap_cell("temperature · surface · 2010-01", 20) == [
+        "temperature ·",
+        "surface · 2010-01",
+    ]
+    lines = _wrap_cell(f"{_OXYGEN} 2010-01 · mld_bry_bgc_strip", 24)
+    for line in lines:
+        # every line is whole words, or pieces cut right after an underscore
+        assert not line.startswith("_")
+    assert "".join(
+        ln if ln.endswith("_") else ln + " " for ln in lines
+    ).split() == f"{_OXYGEN} 2010-01 · mld_bry_bgc_strip".split()
+    assert all(len(line) <= 24 for line in lines)
+    # a token with nothing to cut at overflows rather than splitting
+    assert _wrap_cell("a" * 30 + " b", 10) == ["a" * 30, "b"]
+    assert _wrap_cell("", 10) == [""]
+
+
+def test_a_long_standard_name_is_never_split_mid_word_in_the_table_figure():
+    records = [
+        _record(_OXYGEN, "mmol m-3", test="mld_bry_bgc_strip", reference="x"),
+        _record(_NITRATE, "mmol m-3", test="mld_bry_bgc_strip", reference="y"),
+    ]
+    page = _page({"kind": "table"})
+    ((_, fig),) = P.build(page, pooled_records=records)
+    cells = [c.get_text().get_text() for c in _table_of(fig).get_celld().values()]
+    flat = " ".join(cells)
+    assert "mole_concentration" not in flat  # now the short name
+    assert "oxygen" in flat and "nitrate" in flat
+    plt.close(fig)

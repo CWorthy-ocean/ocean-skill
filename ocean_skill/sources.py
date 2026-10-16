@@ -12,15 +12,18 @@ Returns a **known type** by featureType: point featureTypes →
 from __future__ import annotations
 
 import contextlib
+import datetime
 import json
+import re
 import warnings
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from ocean_skill import casts, time_zone
 from ocean_skill.catalog import SourceRef, resolve
 
-__all__ = ["erddap_constraints", "read", "truncate_time"]
+__all__ = ["TimePins", "erddap_constraints", "read", "truncate_time"]
 
 #: In-process memo of :func:`read`'s standardized result, keyed on source identity +
 #: catalog-file freshness + the call's own qc/kwargs (see ``_read_cache_key`` below).
@@ -36,20 +39,110 @@ __all__ = ["erddap_constraints", "read", "truncate_time"]
 _READ_CACHE: OrderedDict[tuple, Any] = OrderedDict()
 _READ_CACHE_MAXSIZE = 8
 
-#: Entry name -> ``(steps, anchor)``: how many trailing time steps :func:`read` keeps of
-#: it and the source whose last time bounds them (or ``None``). Set only inside
-#: :func:`truncate_time` (``ocean-skill-run --smoke``). Applied to every result *after*
-#: the memo above, never before it: the memo and the on-disk cache keys know nothing
-#: about it, so what they hold must stay the full record.
-_TRUNCATE: dict[str, tuple[int, str | None]] = {}
+#: Entry name -> ``(steps, anchor, pins)``: how many time steps :func:`read` keeps at
+#: each end of it, the source whose last time bounds them (or ``None``), and the
+#: :class:`TimePins` of further steps to keep. Set only inside :func:`truncate_time`
+#: (``ocean-skill-run --smoke``). Applied to every result *after* the memo above, never
+#: before it: the memo and the on-disk cache keys know nothing about it, so what they
+#: hold must stay the full record.
+_TRUNCATE: dict[str, tuple[int, str | None, TimePins]] = {}
 
 #: Slack allowed past the anchor's last time, for sources stamped slightly differently.
 _ANCHOR_TOLERANCE = "12h"  # under a daily step, so it admits no extra one
 
+#: How far from a pinned instant the nearest step may be and still be kept.
+PIN_TOLERANCE = "2D"
+
+#: Longest window that pins steps. A longer one (a whole-run ``period``) is already
+#: covered by the first and last steps.
+PIN_WINDOW_MAX = "62D"
+
+_PIN_DATE = re.compile(r"\d{4}-\d{2}")
+
+
+@dataclass(frozen=True)
+class TimePins:
+    """Times a suite's pages name, which a truncated read must still reach.
+
+    ``instants`` are single moments (the nearest step within :data:`PIN_TOLERANCE` is
+    kept); ``windows`` are ``(start, end)`` pairs no longer than :data:`PIN_WINDOW_MAX`
+    (the first and last steps inside each are kept). Both hold ``pandas.Timestamp``.
+    """
+
+    instants: tuple = ()
+    windows: tuple = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.instants or self.windows)
+
+    @classmethod
+    def from_values(cls, values) -> TimePins:
+        """Return the pins named by time specs ``values`` (``select`` time values).
+
+        A scalar date (a string such as ``"2010-01-31"``, a ``date``/``datetime``) at
+        most a day wide is an instant; a coarser string (``"2010-01"``) is the window
+        it spans, as is a ``{"min", "max"}`` window with both ends, under
+        :data:`PIN_WINDOW_MAX`. A list holds one spec per entry. Anything else (a
+        resample, ``"latest"``, a season mask with no window, a longer window) names no
+        pin.
+        """
+        import numpy as np
+        import pandas as pd
+
+        limit = pd.Timedelta(PIN_WINDOW_MAX)
+        instants: set = set()
+        windows: set = set()
+
+        def bounds(value):
+            if isinstance(value, str):
+                if not _PIN_DATE.match(value):
+                    return None
+                try:
+                    period = pd.Period(value)
+                    lo, hi = period.start_time, period.end_time
+                except (TypeError, ValueError):
+                    return None
+            elif isinstance(value, (datetime.date, np.datetime64)):
+                try:
+                    lo = hi = pd.Timestamp(value)
+                except (TypeError, ValueError):
+                    return None
+            else:
+                return None
+            if pd.isna(lo):
+                return None
+            if lo.tzinfo is not None:
+                lo, hi = lo.tz_convert(None), hi.tz_convert(None)
+            return lo, hi
+
+        def visit(value):
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    visit(item)
+            elif isinstance(value, dict):
+                if "min" in value and "max" in value:
+                    lo, hi = bounds(value["min"]), bounds(value["max"])
+                    if lo and hi and pd.Timedelta(0) <= hi[1] - lo[0] < limit:
+                        windows.add((lo[0], hi[1]))
+            else:
+                b = bounds(value)
+                if b is None:
+                    return
+                if b[1] - b[0] <= pd.Timedelta(days=1):
+                    instants.add(b[0])
+                elif b[1] - b[0] < limit:
+                    windows.add(b)
+
+        for value in values:
+            visit(value)
+        return cls(tuple(sorted(instants)), tuple(sorted(windows)))
+
 
 @contextlib.contextmanager
-def truncate_time(names, steps: int, *, anchor: str | None = None):
-    """Make :func:`read` return only the last ``steps`` time steps of ``names``.
+def truncate_time(
+    names, steps: int, *, anchor: str | None = None, pins: TimePins | None = None
+):
+    """Make :func:`read` return only the first and last ``steps`` steps of ``names``.
 
     For a quick look at a long model run (``--smoke``): every comparison, field and
     time-index lookup that goes through :func:`read` sees the shortened record, so a
@@ -61,15 +154,20 @@ def truncate_time(names, steps: int, *, anchor: str | None = None):
     also point the results cache somewhere separate (:func:`ocean_skill.cache.scoped`).
     A source with no time axis (an observation climatology, say) is returned whole.
 
-    ``anchor`` names the test source the other sources are compared against: the last
-    ``steps`` of every *other* name are taken from those no later than the anchor's
-    last time (plus 12 hours), so a reference run that continues past the test's end
-    does not end up entirely outside the window. If none qualifies, its last ``steps``.
+    ``anchor`` names the test source the other sources are compared against: the steps
+    of every *other* name are taken from those no later than the anchor's last time
+    (plus 12 hours), so a reference run that continues past the test's end does not
+    end up entirely outside the window. If none qualifies, its own first and last.
+
+    ``pins`` (:class:`TimePins`) adds the steps a suite's pages name: the nearest step
+    to each pinned instant (within :data:`PIN_TOLERANCE`, else none) and the first and
+    last ``steps`` inside each pinned window. They are chosen from the same steps the
+    first-and-last rule draws on, so the anchoring above still bounds them.
     """
     if steps < 1:
         raise ValueError(f"truncate_time: steps must be at least 1, got {steps}")
     saved = dict(_TRUNCATE)
-    _TRUNCATE.update(dict.fromkeys(names, (int(steps), anchor)))
+    _TRUNCATE.update(dict.fromkeys(names, (int(steps), anchor, pins or TimePins())))
     try:
         yield
     finally:
@@ -89,16 +187,17 @@ def _anchor_end(anchor: str):
 
 
 def _truncated(ref: SourceRef, obj):
-    """``obj`` cut to its last :data:`_TRUNCATE` steps if ``ref`` is named there."""
+    """Cut ``obj`` to the steps :data:`_TRUNCATE` keeps, if ``ref`` is named there."""
     entry = _TRUNCATE.get(ref.name) if _TRUNCATE else None
     if entry is None or not hasattr(obj, "dims"):
         return obj
-    steps, anchor = entry
+    steps, anchor, pins = entry
     from ocean_skill import operators
 
     dim = operators.resolve_dim(obj, "time")
     if dim is None or dim not in obj.dims:
         return obj
+    candidates = list(range(obj.sizes[dim]))
     if anchor is not None and dim in obj.indexes:
         try:
             # the anchor itself is plain last-N (and must not be asked for its own end)
@@ -109,14 +208,64 @@ def _truncated(ref: SourceRef, obj):
                 limit = end + pd.Timedelta(_ANCHOR_TOLERANCE)
                 inside = [i for i, t in enumerate(obj.indexes[dim]) if t <= limit]
                 if inside:
-                    return obj.isel({dim: inside[-steps:]})
+                    candidates = inside
         except (TypeError, ValueError) as exc:  # calendars or types that do not compare
             warnings.warn(
                 f"smoke: could not bound {ref.name!r} by the end of {anchor!r} "
                 f"({type(exc).__name__}: {exc}); keeping its last {steps} step(s)",
                 stacklevel=2,
             )
-    return obj.isel({dim: slice(-steps, None)})
+    keep = set(_ends(candidates, steps))
+    if pins and dim in obj.indexes:
+        try:
+            keep |= _pinned(obj.indexes[dim], candidates, steps, pins)
+        except (TypeError, ValueError) as exc:  # calendars or types that do not compare
+            warnings.warn(
+                f"smoke: could not keep the steps the pages pin of {ref.name!r} "
+                f"({type(exc).__name__}: {exc}); keeping only its first and last "
+                f"{steps} step(s)",
+                stacklevel=2,
+            )
+    return obj.isel({dim: sorted(keep)})
+
+
+def _ends(index: list[int], steps: int) -> list[int]:
+    """The first and the last ``steps`` positions of ``index``, each once, in order.
+
+    Both ends, so a smoke run still reaches the pages pinned to the start of a run
+    (initial conditions, its first month) as well as the latest ones.
+    """
+    return sorted(set(index[:steps]) | set(index[-steps:]))
+
+
+def _pinned(index, candidates: list[int], steps: int, pins: TimePins) -> set[int]:
+    """Positions among ``candidates`` of ``index`` that ``pins`` ask to keep.
+
+    The nearest step to each instant, if within :data:`PIN_TOLERANCE`; the first and
+    last ``steps`` steps inside each window. Raises ``TypeError`` for an index that
+    does not compare with a ``Timestamp`` (a cftime calendar).
+    """
+    import numpy as np
+    import pandas as pd
+
+    if not candidates:
+        return set()
+    sub = index.take(candidates)
+    if not isinstance(sub, pd.DatetimeIndex):
+        raise TypeError(f"a {type(sub).__name__} time axis cannot be pinned")
+    pos = np.asarray(candidates)
+    tolerance = pd.Timedelta(PIN_TOLERANCE)
+    keep: set[int] = set()
+    for t in pins.instants:
+        gap = np.abs((sub - t) / tolerance)  # in tolerances, whatever the unit
+        nearest = int(gap.argmin())
+        if gap[nearest] <= 1:
+            keep.add(int(pos[nearest]))
+    for lo, hi in pins.windows:
+        inside = pos[(sub >= lo) & (sub <= hi)]
+        keep.update(int(i) for i in inside[:steps])
+        keep.update(int(i) for i in inside[-steps:])
+    return keep
 
 
 def _read_cache_key(ref: SourceRef, qc: Any, kwargs: dict[str, Any]) -> tuple | None:

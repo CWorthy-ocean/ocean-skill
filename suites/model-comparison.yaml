@@ -1,57 +1,52 @@
-# Model comparison: PACMED pyesper 2015 (ESPER boundary BGC) against PACMED 2015 (WOA/
-# GLODAP-climatology boundary BGC) -- the pair in Abigale's analysis_cache/pacmed_bc_compare.
-# Forcing first (boundary, surface, initial conditions), then how the two solutions differ
-# (domain means, metrics through time, maps), then each run against observations.
+# Model comparison: PACMED12km with pyesper BGC boundary conditions against the run with
+# MLD-interpolated BGC boundary conditions, from 2010-01. Built on Abigale's notebook
+# (PACMED_BC_compare.ipynb, sections A-E; E's distance-band and seasonality parts are
+# left out). Differences are always pyesper minus MLD-interp.
 #
-# Every block below is self-contained: comment out any section you don't need.
+#                    MLD-interp (reference)              pyesper (test)
+#   model output     pacmed (2010-01..10) +              pacmed_pyesper (2010) +
+#                    pacmed_2015 (2010-11..2014-12)      pacmed_pyesper_2015 (2011..)
+#   initial cond.    PACMED12km_initial_conditions.nc    pac_12km_esper_initial_conditions.nc
+#   BGC boundary     PACMED12km_boundary-bgc-unified     ESPER, daily (ALK DIC NO3 O2 PO4 SiO3)
+#                    _clim.nc (monthly climatology)      + Ben's unified BGC climatology
+#   physics boundary PACMED12km_boundary-physics_*       Ben's pac_12km_esper_*_boundary-physics
+#
+# The two runs differ by MORE than the BGC boundary method: the pyesper run also uses
+# Ben's physics boundaries and BGC initial conditions, which were built on a different
+# bathymetry (hmin 5 m vs 15 m; h differs by up to ~2200 m). Both runs use the same grid
+# file, so the forcing is drawn here on that grid, as the model received it. Neither run
+# saved history or average files: everything comes from restart files (instantaneous
+# snapshots), daily through January 2010 and at the end of every month after that.
+#
+# Sections:
+#   A  domain                       bathymetry
+#   B  input differences            initial conditions; boundary forcing along the
+#                                   west+south strip (Jan and Jul 2010) and through time
+#   C  start of the run             end of January 2010, maps and boundary sections
+#   D  seasonal differences         end of Jan/Apr/Jul/Oct, years x seasons, maps and
+#                                   boundary sections (difference only)
+#   E  how the runs diverge         per-cell skill maps over the whole run and the last
+#                                   year; domain means; metrics table
+#   E2 skill through time           per-year target/Taylor diagrams; monthly and
+#                                   first-month daily bias/RMS/correlation
+#   F  each run against WOA23
 #
 # Run it:
-#     ocean-skill-run suites/model-comparison.yaml --list  # check the page list first
+#     ocean-skill-run suites/model-comparison.yaml --list    # check the page list first
+#     ocean-skill-run suites/model-comparison.yaml --smoke 2 --self-check
+#       (--smoke keeps only the first and last N restarts of each run, so every page that
+#       names a date in between -- the end of January, the seasons, the January/July
+#       boundary means -- finds no data under it and is reported; use --smoke for the
+#       first-pass check of the other pages, and --only to redraw the dated ones.)
 #     ocean-skill-run suites/model-comparison.yaml
-# --list also runs the refresh: block below, so it rebuilds both runs' kerchunk
-# references and every catalog entry the block names (it draws nothing).
+# --list also runs the refresh: block, which builds every entry the pages read into
+# one catalog (pacmed-pyesper-2015.yaml): both runs from 2010 (each joined from its
+# task folders), their initial conditions, and both runs' boundary forcing with a
+# west+south strip entry each.
 #
-# What differs between these two runs (from the task input folders): the boundary BGC
-# (and, negligibly, the boundary physics files) and the restart each started from.
-# Surface physics, surface BGC, salinity restoring, rivers and tides are the very same
-# files (_forge_bp_runs/PACMED12km/input_data), so surface forcing gets one example page
-# (salinity restoring vs WOA23) and the rest is left commented out. Rivers are not
-# supported (indexed by nriver, not on the grid); tides have their own recipe in the
-# README.
-#
-# Everything this suite reads is set up by the refresh: block, into one catalog
-# (pacmed-pyesper-2015.yaml): the two runs' model output, the restart each run started
-# from, and both runs' forcing files. The entries it writes:
-#     pacmed_pyesper, pacmed_2015  model output (monthly restarts)
-#     ic_pyesper, ic_pacmed2015    the restart each run started from
-#     pyesper_bry_phys_<side>      boundary T/S/zeta, dated (2011-2013)
-#     pyesper_bry_bgc_<side>       boundary ALK/DIC/NO3/O2/PO4/SiO3 from ESPER, dated
-#     pacmed2015_bry_phys_<side>   boundary T/S/zeta, dated
-#     pacmed2015_bry_bgc_<side>    boundary BGC climatology (month 1-12), all tracers
-#     pyesper_surface_restoring_clim  the salinity restoring climatology (month 1-12)
-# (more forcing entries -- boundary Chl/Fe/... climatology, surface physics, surface BGC,
-# CO2 -- are commented out in refresh.forcing below)
-# <side> is south, north, east or west. A side entry holds one row (south/north) or one
-# column (east/west) of the grid, so its section is select: {transect: {eta_rho: 0}}
-# for south/north and {transect: {xi_rho: 0}} for east/west. Boundary velocities are
-# not catalogued (grid-relative, staggered).
-#
-# The forcing entries are rebuilt on every run, over kerchunk references (ref:) that are
-# rebuilt only when their files change; the first run builds them all, which takes a
-# while (the surface physics files are 37 GB each). An entry that cannot be built prints
-# "refresh: FAILED <name>", and the pages reading it are skipped ("will be skipped" under
-# --list); the rest of the report still draws.
-#
-# Known gaps (ocean-skill today):
-#   - pacmed_2015's boundary BGC is a 12-month climatology, the pyesper one is dated. A
-#     climatology cannot yet be drawn as a line over month or scored month-by-month
-#     against a dated run in one page, so the BGC boundary comparison below is the mean
-#     and the seasonal variability (std of the 12 monthly means), not a time series, and
-#     the BGC boundary through time is drawn for the dated pyesper side only.
-#
-# Lines to edit for another pair: refresh: (both runs' output, start restarts, forcing
-# files and grids), defaults.test, defaults.period, the forcing entry names in the
-# pages, output_dir, cache_dir.
+# Lines to edit for another pair: refresh: (both runs' output folders, initial
+# conditions, forcing files, grid), defaults.test / defaults.reference, defaults.period,
+# defaults.last_year, defaults.season_days, output_dir, cache_dir.
 
 name: model-comparison
 output_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
@@ -66,364 +61,435 @@ run_info:
   workplan: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/PAC_2015-pyesper_transformed.yaml
   blueprint: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/work/B_PACMED12km_pyesper_2011.ovrd.cfrom.yaml
   notes:
-    Comparison: "pacmed_pyesper_2015 (test, ESPER boundary BGC) vs pacmed_2015 (reference, WOA/GLODAP climatology boundary BGC)"
+    Comparison: "pyesper (test: ESPER BGC boundary, Ben's physics boundary and ICs) vs MLD-interp (reference: MLD-interpolated BGC boundary climatology), 2010-01 on"
 
-# Paths shared below (YAML anchors: &name defines, *name reuses).
-#   pyesper forcing lives in one folder per year; each holds Dec of the year before
-#   through Jan of the year after, so every glob keeps only that year's twelve months.
-#   pacmed_2015's forcing, and every surface file of both runs, is the shared
-#   _forge_bp_runs/PACMED12km/input_data folder.
 refresh:
   catalog: /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs/pacmed-pyesper-2015.yaml
-
-  # -- model output and initial conditions (kerchunk references) ----------------------
+  # -- model output: each run joined from its task folders -------------------------------
+  # files: a list of globs, joined in time order. A time step written by two folders is
+  # taken from the later glob (and, within one glob, the later path). The 2010 folders:
+  # first_wk, second_wk, third_2wks (daily restarts through 2010-02-01), first_half,
+  # all_the_rest (month ends).
   sources:
-    - name: pacmed_pyesper
-      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/gathered_output/output_rst.*.nc
-      grid: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/PACMED12km_grid.nc
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_pyesper.parquet
+    - name: pyesper
+      files:
+        - /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper/tasks/*/output/output_rst.2010*.nc
+        - /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/gathered_output/output_rst.*.nc
+      grid: &grid /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_grid.nc
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pyesper_from2010.parquet
       keep: latest-per-file
       # Store 1-level, 74-row chunks (74 divides the 962 rows): a page matched to a depth
-      # then reads one ~110 MB band of whole water columns at a time instead of every
-      # level of the whole domain (1.4 GB per variable per restart).
+      # then reads one ~110 MB band of whole water columns at a time.
       subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}
-    - name: pacmed_2015
-      # month-end restarts only: [23][0-9] skips y2011_test's 2011-01-01 file
-      files: /anvil/scratch/x-awyatt1/cstar/pacmed_2015/tasks/*/output/output_rst.??????[23][0-9]234500.nc
-      grid: /anvil/scratch/x-awyatt1/cstar/pacmed_2015/tasks/y2014/input/input_datasets/PACMED12km_grid.nc
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_2015.parquet
-      keep: latest-per-file
-      subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}
-    # The restart each run started from. Restart files hold two records; keep the last.
-    - name: ic_pyesper
-      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper/tasks/all_the_rest/output/output_rst.20101231234500.nc
-      grid: &grid /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_grid.nc
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/ic_pyesper.parquet
-      keep: latest-per-file
-      subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}
-    - name: ic_pacmed2015
-      files: /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/all_the_rest/output/output_rst.20101031234500.nc
+    - name: mld_interp
+      files:
+        - /anvil/scratch/x-awyatt1/cstar/pacmed/tasks/*/output/output_rst.2010*.nc
+        # month-end restarts only: [23][0-9] skips the test segments' 2011-01-01 file
+        - /anvil/scratch/x-awyatt1/cstar/pacmed_2015/tasks/*/output/output_rst.??????[23][0-9]234500.nc
       grid: *grid
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/ic_pacmed2015.parquet
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/mld_interp_from2010.parquet
       keep: latest-per-file
       subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}
-
-  # -- forcing files -------------------------------------------------------------------
-  # kind: boundary -> one entry per side, <name>_<side>; kind: surface -> one entry.
-  # files: a glob or a list of globs, joined in the order given (= time order).
-  # ref: a kerchunk reference kept over the files, rebuilt only when they change (the
-  # first build scans every file once; after that each run opens it in seconds). Two
-  # entries over the same files share one ref.
-  # Comment out any you don't need, along with the pages that read them.
+  # -- forcing -------------------------------------------------------------------------
   forcing:
-    # boundary, pyesper run
+    # initial conditions (2010-01-01); Ben's file carries no hc attribute
+    - name: pyesper_ic
+      kind: initial_conditions
+      files: /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2010/input_data/pac_12km_esper_initial_conditions.nc
+      grid: *grid
+      hc: 250.0
+    - name: mld_ic
+      kind: initial_conditions
+      files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_initial_conditions.nc
+      grid: *grid
+    # boundary forcing; strip: adds <name>_strip, the west boundary north->south then the
+    # south boundary west->east (north and east are almost all land)
     - name: pyesper_bry_phys
       kind: boundary
+      strip: [west, south]
       subchunk: {bry_time: 1}   # monthly files of 28-31 days: one step per chunk so they join
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pyesper_bry_phys.parquet
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pyesper_bry_phys_from2010.parquet
       grid: *grid
       files:
+        - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2010/input_data/pac_12km_esper_boundary-physics_2010??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2011/input_data/pac_12km_esper_boundary-physics_2011??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2012/input_data/pac_12km_esper_2012_boundary-physics_2012??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_woamerge_2013/input_data/pac_12km_esper_2013_boundary-physics_2013??.nc
     - name: pyesper_bry_bgc
       kind: boundary
-      subchunk: {bry_time: 1}   # monthly files of 28-31 days: one step per chunk so they join
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pyesper_bry_bgc.parquet
+      strip: [west, south]
+      subchunk: {bry_time: 1}
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pyesper_bry_bgc_from2010.parquet
       grid: *grid
       variables: [ALK, DIC, NO3, O2, PO4, SiO3]
       files:
+        - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2010/input_data/pac_12km_esper_boundary-bgc-esper-alk_dic_no3_o2_po4_sio3_2010??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2011/input_data/pac_12km_esper_boundary-bgc-esper-alk_dic_no3_o2_po4_sio3_2011??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2012/input_data/pac_12km_esper_2012_boundary-bgc-esper-alk_dic_no3_o2_po4_sio3_2012??.nc
         - /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_woamerge_2013/input_data/pac_12km_esper_2013_boundary-bgc-esper-alk_dic_no3_o2_po4_sio3_2013??.nc
-    # - name: pyesper_bry_bgcclim
-    #   kind: boundary
-    #   ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pyesper_bry_bgcclim.parquet
-    #   grid: *grid
-    #   climatology: true
-    #   files: /anvil/projects/x-ees250129/x-bsaenz/cstar-forge-run/pac_12km_esper_2011/input_data/pac_12km_esper_boundary-bgc-unified-chl_doc_docr_don_donr_dop_dopr_fe_nh4_clim.nc
-
-    # boundary, pacmed_2015 run
-    - name: pacmed2015_bry_phys
+    - name: mld_bry_phys
       kind: boundary
-      subchunk: {bry_time: 1}   # monthly files of 28-31 days: one step per chunk so they join
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pacmed2015_bry_phys.parquet
+      strip: [west, south]
+      subchunk: {bry_time: 1}
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_mld_bry_phys_from2010.parquet
       grid: *grid
-      files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_boundary-physics_201[123]??.nc
-    - name: pacmed2015_bry_bgc
+      files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_boundary-physics_201[0123]??.nc
+    - name: mld_bry_bgc
       kind: boundary
+      strip: [west, south]
       ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_pacmed2015_bry_bgc.parquet
       grid: *grid
       climatology: true
       files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_boundary-bgc-unified_clim.nc
 
-    # surface: the very same files in both runs here, so only the pyesper salinity
-    # restoring climatology is read (one example page). The rest are commented out as a
-    # template for a pair whose surface forcing differs: uncomment, point each run's
-    # entries at its own files AND give them their own ref: (the <<: copies inherit it;
-    # a ref shared over different files is refused). Surface physics is hourly over the
-    # whole domain, 37 GB a month, 1.3 TB for the run.
-    # - name: pyesper_surface_phys
-    #   kind: surface
-    #   ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_surface_phys.parquet
-    #   grid: *grid
-    #   files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_surface-physics_201[123]??.nc
-    # - &surface_bgc_clim
-    #   name: pyesper_surface_bgc_clim
-    #   kind: surface
-    #   ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_surface_bgc_clim.parquet
-    #   grid: *grid
-    #   climatology: true
-    #   files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_surface-bgc-unified_clim.nc
-    # - <<: *surface_bgc_clim
-    #   name: pacmed2015_surface_bgc_clim
-    - &surface_restoring_clim
-      name: pyesper_surface_restoring_clim
-      kind: surface
-      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_surface_restoring_clim.parquet
-      grid: *grid
-      climatology: true
-      files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_surface-restoring_clim.nc
-    # - <<: *surface_restoring_clim
-    #   name: pacmed2015_surface_restoring_clim
-    # - &surface_co2
-    #   name: pyesper_surface_co2
-    #   kind: surface
-    #   ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/forcing_surface_co2.parquet
-    #   grid: *grid
-    #   time_coord: xco2_time
-    #   files: /anvil/scratch/x-awyatt1/cstar/_forge_bp_runs/PACMED12km/input_data/PACMED12km_surface-bgc-mbl_co2_201[123].nc
-    # - <<: *surface_co2
-    #   name: pacmed2015_surface_co2
-
 defaults:
-  test: pacmed_pyesper
-  # The overlap of the two runs (pacmed_2015 runs on into 2014). Pages comparing the two
-  # runs, and the forcing time series, use time: "{period}".
-  period: {min: "2011-01-01", max: "2013-12-31"}
+  test: pyesper
+  reference: mld_interp
+  # Every page's plot: options start from these (a page's own plot: wins).
+  plot: {robust: true}
+  # Both runs from their initial conditions to the end of the pyesper run.
+  period: {min: "2010-01-01", max: "2013-12-31"}
+  last_year: {min: "2013-01-01", max: "2013-12-31"}
+  first_month: {min: "2010-01-01", max: "2010-02-01T12:00"}
+  end_of_jan: "2010-01-31"
   depths: [surface, 200]
-  # Depths of the boundary sections (m). The deepest the grid reaches will be NaN where
-  # the boundary is shallower.
-  bry_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
-  # Depth of the boundary line plots (m), the same 200 m as the rest of the suite. A list
-  # of several draws one line pair per depth on each panel.
-  bry_line_depths: [200]
+  # Abigale's six variables, at most three per figure.
+  groups:
+    - name: temperature, salinity, chlorophyll
+      vars: [temperature, salinity,
+             {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}]
+    - name: nitrate, alkalinity, oxygen
+      vars: [nitrate, alkalinity, oxygen]
+  all_vars: [temperature, salinity, nitrate, alkalinity, oxygen,
+             {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}]
+  # The same six, one page each: a title needs a name for the summed chlorophyll.
+  var_pages:
+    - {name: temperature, vars: [temperature]}
+    - {name: salinity, vars: [salinity]}
+    - {name: nitrate, vars: [nitrate]}
+    - {name: alkalinity, vars: [alkalinity]}
+    - {name: oxygen, vars: [oxygen]}
+    - name: chlorophyll
+      vars: [{sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}]
+  # The boundary forcing, by file: physics (T, S) and BGC (ESPER vs the climatology).
+  strip_groups:
+    - name: temperature and salinity
+      src: phys
+      vars: [temperature, salinity]
+      # the strip is the west+south boundary, not the domain: panel titles say so
+      titles: ["temperature · along-boundary mean, 0–500 m",
+               "salinity · along-boundary mean, 0–500 m"]
+    - name: "nitrate, alkalinity and oxygen"
+      src: bgc
+      vars: [nitrate, alkalinity, oxygen]
+      titles: ["nitrate · along-boundary mean, 0–500 m",
+               "alkalinity · along-boundary mean, 0–500 m",
+               "oxygen · along-boundary mean, 0–500 m"]
+  # The boundary sections: upper 1000 m.
+  strip_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
+  # End of Jan / Apr / Jul / Oct, 2010-2013: the years x seasons grids (4 columns).
+  season_days: ["2010-01-31", "2010-04-30", "2010-07-31", "2010-10-31",
+                "2011-01-31", "2011-04-30", "2011-07-31", "2011-10-31",
+                "2012-01-31", "2012-04-30", "2012-07-31", "2012-10-31",
+                "2013-01-31", "2013-04-30", "2013-07-31", "2013-10-31"]
 
 pages:
-  # =====================================================================================
-  # 1. Boundary forcing through time (Abigale's line plots)
-  # =====================================================================================
-  - title: "Boundary forcing through time"
+  # == A. Domain ==========================================================================
+  - title: "A. Domain"
     section: >-
-      Each open boundary's forcing averaged along the boundary at fixed depths (5 m to
-      1000 m), as monthly means through the overlap. First depth against time in colour,
-      one panel per boundary, for temperature and for ESPER nitrate (pyesper run). Then
-      200 m as lines, pyesper against pacmed_2015, with the difference (pyesper
-      minus pacmed_2015) in a strip below each panel. pacmed_2015's boundary BGC is a
-      monthly climatology, which cannot yet be lined up month by month against a dated
-      run, so the BGC difference is in the next section (mean and seasonal variability).
+      The PACMED12km domain. The south and west boundaries are open ocean (99% and 70%
+      wet); the north and east are almost all land. The boundary sections below run along
+      the west boundary from north to south, then along the south boundary from west to
+      east; the dotted vertical line marks the south-west corner.
 
-  # Depth against time, one panel per boundary. An explicit depth list normally draws
-  # one line per depth; family: time_depth asks for the colour panel instead.
-  - title: "Temperature along each boundary, depth vs time (pyesper run)"
-    field:
-      source: [pyesper_bry_phys_south, pyesper_bry_phys_north, pyesper_bry_phys_east, pyesper_bry_phys_west]
-      variables: [temperature]
-      select: {depth: "{bry_depths}", time: "{period}"}
-      aggregate: {lon: mean, lat: mean, time: {resample: 1MS, reduce: mean}}
-    plot: {family: time_depth}
+  - title: "Bathymetry"
+    field: {source: mld_interp, variables: [h]}
+    caption: Grid depth h (m), the grid file both runs use.
+    plot: {robust: false}
 
-  - title: "Nitrate along each boundary, depth vs time (ESPER, pyesper run)"
-    field:
-      source: [pyesper_bry_bgc_south, pyesper_bry_bgc_north, pyesper_bry_bgc_east, pyesper_bry_bgc_west]
-      variables: [nitrate]
-      select: {depth: "{bry_depths}", time: "{period}"}
-      aggregate: {lon: mean, lat: mean, time: {resample: 1MS, reduce: mean}}
-    plot: {family: time_depth}
-
-  # One depth as lines, both runs, with the difference strip (Abigale's figure).
-  - title: "Boundary temperature and salinity at 200 m, pyesper vs pacmed_2015 — {side}"
-    for_each:
-      side: [south, east, west]   # north is a ~75 m shelf: nothing at 200 m
-    compare:
-      test: "pyesper_bry_phys_{side}"
-      reference: ["pacmed2015_bry_phys_{side}"]
-      variables: [temperature, salinity]
-      depths: "{bry_line_depths}"
-      select: {time: "{period}"}
-      aggregate: {lon: mean, lat: mean}
-    plot: {residual: true}
-
-  # =====================================================================================
-  # 2. Boundary BGC: ESPER (pyesper) against the climatology (pacmed_2015)
-  # =====================================================================================
-  - title: "Boundary BGC, ESPER vs climatology"
+  # == B. Input differences ================================================================
+  - title: "B. Input differences"
     section: >-
-      Sections along each open boundary, surface to 1000 m: the pyesper run's dated ESPER
-      boundary BGC against pacmed_2015's monthly climatology. Top: the mean (ESPER over the
-      overlap, the climatology over its 12 months). Bottom: the seasonal variability, the
-      standard deviation (ddof 1) across the 12 monthly means.
+      What each run was given. The initial conditions (2010-01-01) at the surface and at
+      200 m, then the boundary forcing along the west+south strip: monthly means for
+      January and July 2010, and the upper-500 m strip mean through time. Temperature and
+      salinity come from the physics boundary files; nitrate, alkalinity and oxygen from
+      the ESPER files (pyesper) and the MLD-interpolated climatology (MLD-interp, its
+      calendar month).
 
-  - title: "Boundary BGC, ESPER vs climatology — {side} (mean and seasonal variability)"
+  - title: "Initial conditions — {group.name} ({depth.label})"
     for_each:
-      side: [south, north]
-    compare:
-      test: "pyesper_bry_bgc_{side}"
-      reference: ["pacmed2015_bry_bgc_{side}"]
-      variables: [alkalinity, dissolved_inorganic_carbon, nitrate, oxygen, phosphate, silicate]
-      select: {transect: {eta_rho: 0}, depth: "{bry_depths}"}   # ESPER files span exactly 2011-2013
-      aggregate:
-        - {test: {time: mean}, reference: {month: mean}}
-        - {test: {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]},
-           reference: {month: {reduce: std, ddof: 1}}}
-
-  - title: "Boundary BGC, ESPER vs climatology — {side} (mean and seasonal variability)"
-    for_each:
-      side: [east, west]
-    compare:
-      test: "pyesper_bry_bgc_{side}"
-      reference: ["pacmed2015_bry_bgc_{side}"]
-      variables: [alkalinity, dissolved_inorganic_carbon, nitrate, oxygen, phosphate, silicate]
-      select: {transect: {xi_rho: 0}, depth: "{bry_depths}"}   # ESPER files span exactly 2011-2013
-      aggregate:
-        - {test: {time: mean}, reference: {month: mean}}
-        - {test: {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]},
-           reference: {month: {reduce: std, ddof: 1}}}
-
-  # =====================================================================================
-  # 3. Surface forcing: one example (the same files in both runs for this pair)
-  # =====================================================================================
-  - title: "Surface forcing"
-    section: >-
-      Surface forcing is the same files in both runs for this pair, so run-against-run
-      pages would show zero differences. One example instead: the salinity the model is
-      restored toward, its 12-month mean against WOA23 surface salinity.
-
-  # roms-tools names it sss with standard_name sea_water_salinity, so ask for salinity.
-  - title: "Salinity restoring climatology vs WOA23 surface salinity (12-month mean)"
-    compare:
-      test: pyesper_surface_restoring_clim
-      reference: [woa23_salinity_annual]
-      variables: [salinity]
-      select: {test: {}, reference: {depth: surface}}
-      aggregate: {test: {month: mean}, reference: {}}
-
-  # =====================================================================================
-  # 4. Initial conditions: the restart each run started from
-  # =====================================================================================
-  - title: "Initial conditions"
-    section: >-
-      The restart each run started from: pyesper from pacmed_pyesper's 2010-12-31
-      restart, pacmed_2015 from pacmed's 2010-10-31 restart (both descend from
-      PACMED12km_initial_conditions.nc), at the surface and 200 m. The two dates differ by
-      two months, so part of the difference is seasonal.
-
-  - title: "Initial conditions, pyesper vs pacmed_2015 ({depth.label})"
-    for_each:
+      group: "{groups}"
       depth: "{depths}"
     compare:
-      test: ic_pyesper
-      reference: [ic_pacmed2015]
-      variables: [temperature, salinity, nitrate, phosphate, silicate, oxygen,
-                  alkalinity, dissolved_inorganic_carbon]
+      test: pyesper_ic
+      reference: [mld_ic]
+      variables: "{group.vars}"
       depths: ["{depth}"]
+    caption: >-
+      2010-01-01 initial conditions at {depth.label}: pyesper, MLD-interp, and pyesper
+      minus MLD-interp.
+
+  - title: "Boundary forcing along the strip — {variable} (January and July 2010)"
+    for_each:
+      variable: [temperature, salinity]
+    compare:
+      test: pyesper_bry_phys_strip
+      reference: [mld_bry_phys_strip]
+      variables: ["{variable}"]
+      select: {transect: {eta_rho: 0}, depth: "{strip_depths}"}
+      times: ["2010-01", "2010-07"]
       aggregate: {time: mean}
+    caption: >-
+      Monthly-mean boundary forcing along the west boundary (north to south) then the
+      south boundary (west to east), upper 1000 m. Rows: January and July 2010.
 
-  # =====================================================================================
-  # 5. The two solutions through time (Abigale's line plots)
-  # =====================================================================================
-  - title: "The two solutions through time"
+  - title: "Boundary forcing along the strip — {variable} (January and July 2010)"
+    for_each:
+      variable: [nitrate, alkalinity, oxygen]
+    compare:
+      test: pyesper_bry_bgc_strip
+      reference: [mld_bry_bgc_strip]
+      variables: ["{variable}"]
+      select: {transect: {eta_rho: 0}, depth: "{strip_depths}"}
+      times: ["2010-01", "2010-07"]
+      aggregate: {time: mean}
+    caption: >-
+      ESPER (pyesper, monthly mean of the daily files) against the MLD-interpolated
+      climatology for the same calendar month (MLD-interp), upper 1000 m along the strip.
+
+  - title: "Boundary forcing through time — upper 500 m strip mean ({group.name})"
+    for_each:
+      group: "{strip_groups}"
+    compare:
+      test: "pyesper_bry_{group.src}_strip"
+      reference: ["mld_bry_{group.src}_strip"]
+      variables: "{group.vars}"
+      select: {depth: {min: 0, max: 500}, time: "{period}"}
+      aggregate: {Z: mean, lon: mean, lat: mean, time: {resample: 1MS, reduce: mean}}
+    plot: {residual: true, titles: "{group.titles}"}
+    caption: >-
+      Thickness- and length-weighted mean over the upper 500 m of the west+south strip,
+      monthly; the strip below each panel is pyesper minus MLD-interp.
+
+  - title: "B. Input differences — metrics"
+    summary: {scope: section, kind: [table]}
+
+  # == C. Start of the run =================================================================
+  - title: "C. Start of the run"
     section: >-
-      Area-weighted whole-domain means of the two runs' restart snapshots through the
-      overlap: pyesper (test) and pacmed_2015 (reference) on one panel per variable, with
-      the difference (pyesper minus pacmed_2015) in a strip below each and bias, RMSE and
-      correlation printed on the panel. Then bias, RMSE and correlation of the two
-      fields over the whole domain, month by month.
+      The end of January 2010 (the daily restart of 2010-01-31), one month after both
+      runs started: maps at the surface and 200 m, then the boundary sections of the
+      initial conditions and of the end of January.
 
-  - title: "Domain mean, pyesper vs pacmed_2015 ({depth.label})"
+  - title: "End of January 2010 — {group.name} ({depth.label})"
+    for_each:
+      group: "{groups}"
+      depth: "{depths}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{group.vars}"
+      depths: ["{depth}"]
+      select: {time: "{end_of_jan}"}
+      aggregate: {time: mean}
+    caption: >-
+      The 2010-01-31 restart at {depth.label}: pyesper, MLD-interp, and the difference.
+
+  - title: "Initial conditions along the boundary — {group.name}"
+    for_each:
+      group: "{groups}"
+    compare:
+      test: pyesper_ic
+      reference: [mld_ic]
+      variables: "{group.vars}"
+      select: {transect: {boundary: [west, south]}, depth: "{strip_depths}"}
+    caption: >-
+      2010-01-01 initial conditions along the west boundary (north to south) then the
+      south boundary (west to east), upper 1000 m; dotted line: the south-west corner.
+
+  - title: "End of January 2010 along the boundary — {group.name}"
+    for_each:
+      group: "{groups}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{group.vars}"
+      select: {transect: {boundary: [west, south]}, depth: "{strip_depths}", time: "{end_of_jan}"}
+      aggregate: {time: mean}
+    caption: >-
+      The 2010-01-31 restart along the west+south boundary strip, upper 1000 m.
+
+  - title: "C. Start of the run — metrics"
+    summary: {scope: section, kind: [table, target], title: "C. Start of the run — metrics", color_by: variable, legend_style: legend}
+
+  # == D. Seasonal differences ==============================================================
+  - title: "D. Seasonal differences"
+    section: >-
+      pyesper minus MLD-interp at the end of January, April, July and October of each
+      year (rows: 2010-2013), difference only on one colour scale per figure: maps at
+      the surface and 200 m, then the west+south boundary sections.
+
+  - title: "Seasonal difference maps — {variable.name} ({depth.label})"
+    for_each:
+      variable: "{var_pages}"
+      depth: "{depths}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{variable.vars}"
+      depths: ["{depth}"]
+      times: "{season_days}"
+      aggregate: {time: mean}
+    plot: {panels: difference, ncols: 4}
+
+  - title: "Seasonal difference sections along the boundary — {variable.name}"
+    for_each:
+      variable: "{var_pages}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{variable.vars}"
+      select: {transect: {boundary: [west, south]}, depth: "{strip_depths}"}
+      times: "{season_days}"
+      aggregate: {time: mean}
+    plot: {panels: difference, ncols: 4}
+
+  # == E. How the runs diverge ==============================================================
+  - title: "E. How the runs diverge"
+    section: >-
+      Skill of pyesper against MLD-interp at every grid cell over the time series of
+      restarts (bias, centered RMS difference, correlation, standard-deviation ratio),
+      over the whole run and over its last year, and the whole-domain mean of every
+      restart. The next section follows how the skill changes from year to year, month
+      to month and day to day.
+
+  - title: "Per-cell skill over the run — {variable.name}"
+    for_each:
+      variable: "{var_pages}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{variable.vars}"
+      depths: "{depths}"
+      select: {time: "{period}"}
+      over: time
+    caption: >-
+      {variable.name}: at each grid cell, pyesper scored against MLD-interp over every
+      restart from 2010-01 to 2013-12. Rows: surface and 200 m.
+
+  - title: "Per-cell skill over the last year — {variable.name}"
+    for_each:
+      variable: "{var_pages}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{variable.vars}"
+      depths: "{depths}"
+      select: {time: "{last_year}"}
+      over: time
+    caption: >-
+      {variable.name}: as above, over 2013 only, where the runs have diverged by the end.
+
+  - title: "Domain means ({depth.label})"
     for_each:
       depth: "{depths}"
     compare:
-      reference: [pacmed_2015]
-      variables: &comparison_variables
-        - temperature
-        - salinity
-        - nitrate
-        - alkalinity
-        - oxygen
-        - {sum: [spChl, diatChl, diazChl], standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}
-      select: {depth: "{depth}", time: "{period}"}
-      aggregate: {lon: mean, lat: mean}
-    plot: {residual: true}
-
-  - title: "Domain mean sea surface height, pyesper vs pacmed_2015"
-    compare:
-      reference: [pacmed_2015]
-      variables: [ssh]
+      reference: ["{reference}"]
+      variables: "{all_vars}"
+      depths: ["{depth}"]
       select: {time: "{period}"}
       aggregate: {lon: mean, lat: mean}
     plot: {residual: true}
+    caption: >-
+      {depth.label}: area-weighted whole-domain means of every restart; the strip below
+      each panel is pyesper minus MLD-interp.
 
-  - title: "Bias, RMSE and correlation by month ({depth.label})"
+  - title: "E. How the runs diverge — metrics"
+    summary: {scope: section, kind: [table]}
+
+  # == E2. Skill through time ===============================================================
+  # Its own section so the metrics table above stays the per-cell and domain-mean rows:
+  # these pages carry hundreds of comparisons (a point per variable and year, month and
+  # day), which belong in the figures and in metrics/model-comparison.csv, not in a table.
+  - title: "E2. Skill through time"
+    section: >-
+      Each year's skill pooled over every cell and restart, as a target and a Taylor
+      diagram with an arrow from year to year; then the bias, RMS difference and
+      correlation month by month, and the RMS difference at each daily restart of the
+      first month.
+
+  - title: "Skill by year — target ({depth.label})"
     for_each:
       depth: "{depths}"
     compare:
-      reference: [pacmed_2015]
-      variables: *comparison_variables
-      select: {depth: "{depth}", time: "{period}"}
-      times: {resample: 1MS, reduce: mean}
+      reference: ["{reference}"]
+      variables: "{all_vars}"
+      depths: ["{depth}"]
+      select: {time: "{period}"}
+      times: {resample: 1YS, reduce: pool}
+    draw: target
+    plot:
+      title: "Skill by year, target ({depth.label})"
+      arrows: true
+      color_by: variable
+      legend_style: legend
+    caption: >-
+      {depth.label}: one point per variable and year (every cell of every restart in the
+      year pooled); arrows run from 2010 (hollow) to 2013.
+
+  - title: "Skill by year — Taylor ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{all_vars}"
+      depths: ["{depth}"]
+      select: {time: "{period}"}
+      times: {resample: 1YS, reduce: pool}
+    draw: taylor
+    plot:
+      title: "Skill by year, Taylor ({depth.label})"
+      arrows: true
+      color_by: variable
+      legend_style: legend
+    caption: >-
+      {depth.label}: the same points as the target diagram; arrows run from 2010 (hollow)
+      to 2013.
+
+  - title: "Bias, RMS difference and correlation by month ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference: ["{reference}"]
+      variables: "{all_vars}"
+      depths: ["{depth}"]
+      select: {time: "{period}"}
+      times: {resample: 1MS, reduce: pool}
     draw: metrics_series
     plot: {metrics: [bias, rmse, corr]}
+    caption: >-
+      {depth.label}: each month's restarts pooled over the whole domain (January 2010
+      holds the daily restarts).
 
-  # =====================================================================================
-  # 6. Difference maps (Abigale's _surf / _z200 maps)
-  # =====================================================================================
-  - title: "Difference maps"
-    section: >-
-      pyesper against pacmed_2015 at the surface and 200 m: averaged over the overlap,
-      then the latest month the two share.
-
-  - title: "Overlap mean, pyesper vs pacmed_2015 ({depth.label})"
+  - title: "First month: daily RMS difference ({depth.label})"
     for_each:
       depth: "{depths}"
     compare:
-      reference: [pacmed_2015]
-      variables: *comparison_variables
-      select: {depth: "{depth}", time: "{period}"}
-      aggregate: {time: mean}
-    plot: {robust: true}
+      reference: ["{reference}"]
+      variables: "{all_vars}"
+      depths: ["{depth}"]
+      select: {time: "{first_month}"}
+      times: {resample: 1D, reduce: pool}
+    draw: metrics_series
+    plot: {metrics: [rmse]}
+    caption: >-
+      {depth.label}: whole-domain RMS difference at each daily restart of January 2010.
 
-  - title: "Overlap mean sea surface height, pyesper vs pacmed_2015"
-    compare:
-      reference: [pacmed_2015]
-      variables: [ssh]
-      select: {time: "{period}"}
-      aggregate: {time: mean}
-    plot: {robust: true}
-
-  - title: "{month.name} {month.year}, pyesper vs pacmed_2015 ({depth.label})"
-    for_each:
-      month: {run: {last: 1}}   # raise N for more months
-      depth: "{depths}"
-    compare:
-      reference: [pacmed_2015]
-      variables: *comparison_variables
-      select: {depth: "{depth}", time: "{month.window}"}
-      aggregate: {time: mean}
-    plot: {robust: true}
-
-  # =====================================================================================
-  # 7. Each run against observations
-  # =====================================================================================
-  - title: "Each run against observations"
+  # == F. Each run against observations =====================================================
+  - title: "F. Each run against WOA23"
     section: >-
-      Each run's overlap mean and seasonal variability (standard deviation of the 12
-      monthly means) against the WOA23 monthly climatology, at the surface and 200 m --
-      which run sits closer to the observations.
+      Each run's mean over 2011-2013 and its seasonal variability (standard deviation,
+      ddof 1, across the twelve monthly means) against the WOA23 monthly climatology, at
+      the surface and 200 m: which run sits closer to the observations.
 
   - title: "{run} vs WOA23 — mean and seasonal variability ({depth.label})"
     for_each:
-      run: [pacmed_pyesper, pacmed_2015]
+      run: [pyesper, mld_interp]
       depth: "{depths}"
     compare:
       test: "{run}"
@@ -431,10 +497,10 @@ pages:
                   woa23_phosphate_monthly, woa23_silicate_monthly, woa23_oxygen_monthly]
       variables: [temperature, salinity, nitrate, phosphate, silicate, oxygen]
       depths: ["{depth}"]
-      select: {test: {time: "{period}"}, reference: {}}
+      select: {test: {time: {min: "2011-01-01", max: "2013-12-31"}}, reference: {}}
       aggregate:
         - {time: mean}
         - {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
 
-  - title: "Skill summary, every comparison above"
-    summary: {kind: both, color_by: variable}
+  - title: "F. Each run against WOA23 — metrics"
+    summary: {scope: section, kind: [table, target], title: "F. Each run against WOA23 — metrics", color_by: variable, legend_style: legend}

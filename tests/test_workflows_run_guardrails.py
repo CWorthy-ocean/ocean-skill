@@ -10,8 +10,13 @@ title filter, the strict warning watch, the problems summary and the all-NaN gua
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
 import sys
+import time
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
@@ -59,10 +64,10 @@ def fake_sources(monkeypatch):
     )
 
 
-def test_truncate_time_keeps_the_last_steps_of_the_named_sources_only(fake_sources):
+def test_truncate_time_keeps_both_ends_of_the_named_sources_only(fake_sources):
     with _sources.truncate_time(["m"], 2):
-        assert osk.read("m").sizes["time"] == 2
-        assert list(osk.read("m").time.dt.day) == [5, 6]
+        assert osk.read("m").sizes["time"] == 4
+        assert list(osk.read("m").time.dt.day) == [1, 2, 5, 6]
         assert osk.read("obs").sizes["time"] == 6  # not named: untouched
     assert osk.read("m").sizes["time"] == 6
 
@@ -93,10 +98,10 @@ def test_other_sources_are_cut_to_end_where_the_anchor_does(monkeypatch):
         _sources, "_read_uncached", lambda ref, meta, qc, kwargs: datasets[ref.name]
     )
     with _sources.truncate_time(["test", "ref", "ic", "late"], 2, anchor="test"):
-        assert list(osk.read("test").time.dt.day) == [5, 6]
-        assert list(osk.read("ref").time.dt.day) == [5, 6]  # not 9, 10
+        assert list(osk.read("test").time.dt.day) == [1, 2, 5, 6]
+        assert list(osk.read("ref").time.dt.day) == [1, 2, 5, 6]  # not 9, 10
         assert osk.read("ic").sizes["time"] == 1
-        assert list(osk.read("late").time.dt.day) == [3, 4]
+        assert list(osk.read("late").time.dt.day) == [1, 2, 3, 4]
     assert osk.read("ref").sizes["time"] == 10
 
 
@@ -114,7 +119,7 @@ def test_truncation_never_reaches_the_read_memo(fake_sources, monkeypatch, tmp_p
     ref = SimpleNamespace(name="m", metadata={}, path=tmp_path / "c.yaml")
     monkeypatch.setattr(_sources, "resolve", lambda name: ref)
     with _sources.truncate_time(["m"], 2):
-        assert osk.read("m").sizes["time"] == 2
+        assert osk.read("m").sizes["time"] == 4  # the first two and the last two
     assert osk.read("m").sizes["time"] == 6
 
 
@@ -174,22 +179,29 @@ def test_smoke_reads_few_steps_into_its_own_report_and_cache(
     real_index = osk.extrema._native_time_index
 
     def spy_index(source):
-        indexes.append(real_index(source))
-        return indexes[-1]
+        indexes.append((bool(_sources._TRUNCATE), real_index(source)))
+        return indexes[-1][1]
 
     monkeypatch.setattr("ocean_skill.extrema._native_time_index", spy_index)
 
     path = _write_suite(tmp_path, _smoke_suite(tmp_path))
-    result = run_suite(path, refresh=False, smoke=3)
+    result = run_suite(path, refresh=False, smoke=2)
 
     assert result.exit_code == 0
     assert result.report_dir == (tmp_path / "out" / "quick_check-smoke")
-    assert seen["steps"] == 3
-    # the time-index lookups made during expansion saw the same truncated record
-    assert indexes and all(len(i) == 3 for i in indexes)
-    assert seen["cache"] == _cache.base_dir() / "smoke-cache" / "prepared"
+    assert seen["steps"] == 4  # the first two and the last two
+    # the time-index lookups made during expansion saw the same truncated record (the
+    # throwaway pass that collects the pinned times runs before the cut, on all of it)
+    assert any(cut for cut, _ in indexes)
+    assert all(len(i) == 4 for cut, i in indexes if cut)
+    assert all(len(i) == 6 for cut, i in indexes if not cut)
+    smoke_dir = Path(json.loads(result.manifest.read_text())["modes"]["smoke_cache"])
+    assert smoke_dir.parent == _cache.base_dir() / "smoke-cache"
+    assert seen["cache"] == smoke_dir / "prepared"
     manifest = json.loads(result.manifest.read_text())
-    assert manifest["modes"]["smoke"] == 3
+    assert manifest["modes"]["smoke"] == 2
+    assert manifest["modes"]["smoke_cache_key"] == smoke_dir.name
+    assert manifest["modes"]["smoke_cache_reused"] is False
     assert manifest["modes"]["smoke_sources"] == ["m"]
     # a smoke run is not "the latest report", and nothing it set outlives it
     assert not (tmp_path / "out" / "latest.txt").exists()
@@ -780,22 +792,170 @@ def test_contours_that_cannot_be_paired_after_an_all_nan_drop_raise(
     assert "can no longer be paired" in problem.reason
 
 
-@pytest.mark.usefixtures("fake_sources")
-def test_every_smoke_run_starts_from_an_empty_smoke_cache(tmp_path, monkeypatch):
+@pytest.fixture
+def smoke_code(monkeypatch):
+    """Set the code identity, so the smoke-cache hash ignores the real git tree."""
+    state = {"identity": "v1|abc"}
+    monkeypatch.setattr(_run, "_code_identity", lambda: state["identity"])
     monkeypatch.setattr(
         _comparison, "prepare_source", lambda *a, **k: stub_model_field()
     )
-    stale = _cache.base_dir() / "smoke-cache" / "prepared" / "old_run.zarr"
-    stale.mkdir(parents=True)
-    path = _write_suite(tmp_path, _smoke_suite(tmp_path))
-    run_suite(path, refresh=False, smoke=2)
-    assert not stale.exists()
+    return state
+
+
+def _smoke(tmp_path, n=2):
+    result = run_suite(
+        _write_suite(tmp_path, _smoke_suite(tmp_path)), refresh=False, smoke=n
+    )
+    modes = json.loads(result.manifest.read_text())["modes"]
+    return Path(modes["smoke_cache"]), modes
 
 
 @pytest.mark.usefixtures("fake_sources")
-def test_list_prints_the_real_cache_and_a_separate_smoke_cache_line(
-    tmp_path, capsys
-):
+def test_same_code_and_truncation_reuse_the_smoke_cache(tmp_path, smoke_code, capsys):
+    first, modes = _smoke(tmp_path)
+    assert modes["smoke_cache_reused"] is False
+    assert f"smoke cache: {first} (new)" in capsys.readouterr().out
+    kept = first / "prepared" / "earlier_run.zarr"
+    kept.mkdir(parents=True)  # not emptied at the start any more
+    second, modes = _smoke(tmp_path)
+    assert second == first and modes["smoke_cache_reused"] is True
+    assert kept.exists()
+    assert f"smoke cache: {first} (reused)" in capsys.readouterr().out
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_a_different_truncation_gets_a_new_smoke_cache(tmp_path, smoke_code):
+    two, _ = _smoke(tmp_path, 2)
+    three, modes = _smoke(tmp_path, 3)
+    assert three != two and modes["smoke_cache_reused"] is False
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_different_kept_stamps_get_a_new_smoke_cache(tmp_path, smoke_code, monkeypatch):
+    before, _ = _smoke(tmp_path)  # same N, but the model has grown by two steps
+    monkeypatch.setattr(_sources, "_read_uncached", lambda *a: _model_dataset(8))
+    after, modes = _smoke(tmp_path)
+    assert after != before and modes["smoke_cache_reused"] is False
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_a_code_change_starts_a_cold_smoke_cache(tmp_path, smoke_code):
+    clean, _ = _smoke(tmp_path)
+    smoke_code["identity"] = "v1|abc|dirty-1"
+    dirty, modes = _smoke(tmp_path)
+    assert dirty != clean and modes["smoke_cache_reused"] is False
+    smoke_code["identity"] = "v1|abc|dirty-2"  # edited again
+    assert _smoke(tmp_path)[0] not in (clean, dirty)
+    smoke_code["identity"] = "v1|abc"  # back to the committed code
+    assert _smoke(tmp_path)[0] == clean
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_without_a_code_identity_every_smoke_run_is_cold(tmp_path, smoke_code, capsys):
+    smoke_code["identity"] = None
+    first, _ = _smoke(tmp_path)
+    second, modes = _smoke(tmp_path)
+    assert first != second and modes["smoke_cache_reused"] is False
+    assert "every run starts cold" in capsys.readouterr().out
+
+
+def _folders(root, ages_h):
+    out = []
+    for i, age in enumerate(ages_h):
+        d = root / f"{i:012x}"
+        (d / "prepared").mkdir(parents=True)
+        t = time.time() - age * 3600
+        os.utime(d / "prepared", (t, t))
+        os.utime(d, (t, t))
+        out.append(d)
+    return out
+
+
+def test_pruning_keeps_the_newest_and_never_the_current(tmp_path):
+    root = tmp_path / "smoke-cache"
+    current, *others = _folders(root, [90, 5, 4, 3, 2])  # current is the oldest
+    removed = _run._prune_smoke_cache(root, current)
+    assert current.exists()
+    # the current one plus the newest KEEP - 1 others stay
+    assert sorted(d for d in root.iterdir() if d != current) == sorted(
+        others[-(_run.SMOKE_CACHE_KEEP - 1) :]
+    )
+    assert sorted(removed) == sorted(others[: -(_run.SMOKE_CACHE_KEEP - 1)])
+
+
+def test_pruning_spares_anything_used_within_the_grace_period(tmp_path):
+    root = tmp_path / "smoke-cache"
+    current, *_ = _folders(root, [1, 0.5, 0.4, 0.3, 0.2, 0.1])
+    assert _run._prune_smoke_cache(root, current) == []  # all recent: none removed
+    assert len(list(root.iterdir())) == 6
+    # a concurrent run still writing into an old folder keeps it alive
+    (old,) = _folders(tmp_path / "other", [10])
+    (old / "calculated").mkdir()
+    assert _run._prune_smoke_cache(old.parent, old) == []
+
+
+def test_pruning_clears_the_old_one_folder_layout_after_the_grace_period(tmp_path):
+    root = tmp_path / "smoke-cache"
+    (current,) = _folders(root, [0])
+    for kind in ("prepared", "aligned"):
+        (root / kind / "x.zarr").mkdir(parents=True)
+        os.utime(root / kind / "x.zarr", (1.0, 1.0))
+        os.utime(root / kind, (1.0, 1.0))
+    _run._prune_smoke_cache(root, current)
+    assert [d.name for d in root.iterdir()] == [current.name]
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_a_smoke_run_prunes_old_caches_but_not_the_current_one(tmp_path, smoke_code):
+    root = _cache.base_dir() / "smoke-cache"
+    old = _folders(root, [50, 60, 70, 80])
+    current, _ = _smoke(tmp_path)
+    assert current.exists()
+    assert sum(d.exists() for d in old) == _run.SMOKE_CACHE_KEEP - 1
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_code_identity_tracks_commits_and_uncommitted_edits(tmp_path, monkeypatch):
+    import ocean_skill
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("x = 1\n")
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(pkg), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True,
+            capture_output=True,
+        )
+
+    monkeypatch.setattr(ocean_skill, "__file__", str(pkg / "__init__.py"))
+    assert _run._code_identity() is None  # not a git checkout: always cold
+    git("init")
+    git("add", ".")
+    git("commit", "-m", "one")
+    clean = _run._code_identity()
+    assert clean and "dirty" not in clean and _run._code_identity() == clean
+    (pkg / "__init__.py").write_text("x = 2\n")
+    edited = _run._code_identity()
+    assert edited != clean and "dirty-" in edited and _run._code_identity() == edited
+    (pkg / "__init__.py").write_text("x = 3\n")
+    assert _run._code_identity() != edited  # a different edit
+    (pkg / "__init__.py").write_text("x = 1\n")
+    assert _run._code_identity() == clean  # edit undone
+    (pkg / "new.py").write_text("y = 1\n")
+    untracked = _run._code_identity()
+    assert untracked != clean
+    (pkg / "new.py").write_text("y = 2\n")
+    assert _run._code_identity() != untracked
+    git("add", ".")
+    git("commit", "-m", "two")
+    assert _run._code_identity() not in (clean, untracked)
+
+
+@pytest.mark.usefixtures("fake_sources")
+def test_list_prints_the_real_cache_and_a_separate_smoke_cache_line(tmp_path, capsys):
     path = _write_suite(tmp_path, _smoke_suite(tmp_path))
     run_suite(path, refresh=False, list_only=True)
     out = capsys.readouterr().out
@@ -803,7 +963,10 @@ def test_list_prints_the_real_cache_and_a_separate_smoke_cache_line(
     run_suite(path, refresh=False, list_only=True, smoke=2)
     out = capsys.readouterr().out
     assert f"cache: {_cache.base_dir()}\n" in out
-    assert f"smoke cache: {_cache.base_dir() / 'smoke-cache'}" in out
+    assert f"smoke cache: {_cache.base_dir() / 'smoke-cache'}/" in out
+    assert "(new)" in out
+    # listing creates nothing
+    assert not (_cache.base_dir() / "smoke-cache").exists()
 
 
 def test_peak_memory_is_unknown_without_psutil(monkeypatch):
@@ -817,7 +980,7 @@ def test_peak_memory_is_unknown_without_psutil(monkeypatch):
     ]
 
 
-def test_an_anchor_that_cannot_be_compared_warns_and_keeps_the_last_steps(
+def test_an_anchor_that_cannot_be_compared_warns_and_keeps_both_ends(
     monkeypatch,
 ):
     monkeypatch.setattr(
@@ -842,7 +1005,7 @@ def test_an_anchor_that_cannot_be_compared_warns_and_keeps_the_last_steps(
     with _sources.truncate_time(["test", "noleap"], 2, anchor="test"):
         with pytest.warns(UserWarning, match="could not bound 'noleap'"):
             got = osk.read("noleap")
-    assert got.sizes["time"] == 2
+    assert got.sizes["time"] == 4
 
 
 def test_an_all_nan_check_that_cannot_run_says_so():
@@ -865,3 +1028,362 @@ def test_exit_code_4_is_for_failed_and_self_check_not_for_skips():
         assert result.exit_code == code
     result.pages = [SimpleNamespace(kind="field", status="skipped")]
     assert result.exit_code == 1  # nothing drew: still 1
+
+
+# -- --smoke keeps the steps the pages pin ------------------------------
+
+
+def _ts(*days):
+    return tuple(pd.Timestamp(d) for d in days)
+
+
+def _win(lo, hi):
+    """Return a window as the pins spell it: a date ends at the end of its period."""
+    return pd.Timestamp(lo), pd.Period(hi).end_time
+
+
+def _pins(*values):
+    return _sources.TimePins.from_values(values)
+
+
+def test_pins_an_instant_and_a_list_of_instants():
+    pins = _pins("2010-01-31", ["2010-04-30T12:00", "2010-07-31"])
+    assert pins.instants == _ts("2010-01-31", "2010-04-30T12:00", "2010-07-31")
+    assert pins.windows == ()
+
+
+def test_pins_a_date_object_from_unquoted_yaml():
+    import datetime
+
+    assert _pins(datetime.date(2010, 1, 31)).instants == _ts("2010-01-31")
+
+
+def test_pins_a_period_string_as_the_window_it_spans():
+    (window,) = _pins("2010-01").windows
+    assert window[0] == pd.Timestamp("2010-01-01")
+    assert window[1] > pd.Timestamp("2010-01-31")
+
+
+def test_pins_a_short_window_and_ignores_a_long_one():
+    short = {"min": "2010-01-01", "max": "2010-02-01T12:00"}
+    long = {"min": "2010-01-01", "max": "2013-12-31"}
+    pins = _pins(short, long)
+    assert pins.windows == (_win("2010-01-01", "2010-02-01T12:00"),)
+    assert pins.instants == ()
+
+
+def test_a_window_without_both_ends_names_nothing():
+    assert not _pins({"min": "2010-01-01"}, {"max": "2010-01-05"})
+
+
+def test_pins_ignore_what_is_not_a_date():
+    nothing = [
+        "latest",
+        "mean",
+        "2010",  # a whole year is a long window
+        {"resample": "1MS", "reduce": "mean"},
+        {"season": "MAM"},
+        {"months": [3, 4]},
+        [{"groupby": "month"}, {"reduce": "std"}],
+        5,
+        None,
+        True,
+    ]
+    assert not _pins(*nothing)
+
+
+def test_pins_from_a_season_mask_with_a_short_window():
+    # a mask carrying a short window still names the window
+    pins = _pins({"season": "JJA", "min": "2010-06-01", "max": "2010-07-15"})
+    assert pins.windows == (_win("2010-06-01", "2010-07-15"),)
+
+
+def _expanded(**kwargs):
+    return _pages.ExpandedPage(
+        title="p", kind=kwargs.pop("kind", "compare"), kwargs=kwargs,
+        plot={}, cache=False,
+    )  # fmt: skip
+
+
+def test_time_pins_reads_select_times_and_placeholder_lists():
+    season_days = ["2010-01-31", "2010-04-30"]  # what "{season_days}" expands to
+    pages = [
+        _expanded(select={"test": {"time": "2010-01-31"}, "reference": {}}),
+        _expanded(select={"depth": 0}, times=season_days),
+        _expanded(times=["2010-01", "2010-07"]),
+        _expanded(select={"time": {"min": "2010-01-01", "max": "2010-02-01T12:00"}}),
+        _expanded(select={"time": {"min": "2010-01-01", "max": "2013-12-31"}}),
+        _expanded(select={"time": "2010-09-15"}, kind="section"),  # a divider: skipped
+    ]
+    pins = _pages.time_pins(pages)
+    assert pins.instants == _ts("2010-01-31", "2010-04-30")
+    assert len(pins.windows) == 3  # January, July, and the first month
+    assert _win("2010-01-01", "2010-02-01T12:00") in pins.windows
+    assert pins.windows[-1][0] == pd.Timestamp("2010-07-01")
+
+
+def test_time_pins_ignores_resampled_bins_and_aggregates():
+    pages = [
+        _expanded(
+            select={"time": {"min": "2010-01-01", "max": "2013-12-31"}},
+            times={"resample": "1MS", "reduce": "pool"},
+            aggregate={"time": {"resample": "1MS", "reduce": "mean"}},
+        ),
+        _expanded(aggregate={"time": "mean"}),
+    ]
+    assert not _pages.time_pins(pages)
+
+
+def test_time_pins_reads_steps_and_contours():
+    page = _expanded(select={"time": "2010-01-31"})
+    window = {"min": "2010-03-01", "max": "2010-03-05"}
+    page.steps = [{"name": "series", "kwargs": {"time": window}}]
+    page.contours = {"select": {"time": "2010-02-15"}}
+    pins = _pages.time_pins([page])
+    assert pins.instants == _ts("2010-01-31", "2010-02-15")
+    assert pins.windows == (_win("2010-03-01", "2010-03-05"),)
+
+
+def _long_model(n=200, start="2020-01-01"):
+    return xr.Dataset(
+        {"temp": (("time", "y"), np.arange(n * 2.0).reshape(n, 2))},
+        coords={"time": pd.date_range(start, periods=n, freq="D")},
+    )
+
+
+@pytest.fixture
+def long_sources(monkeypatch):
+    monkeypatch.setattr(
+        _sources,
+        "resolve",
+        lambda name: SimpleNamespace(name=name, metadata={}, path=None),
+    )
+    datasets = {"m": _long_model(), "ref": _long_model(300)}
+    monkeypatch.setattr(
+        _sources, "_read_uncached", lambda ref, meta, qc, kwargs: datasets[ref.name]
+    )
+
+
+def _days(name, steps=1, **kwargs):
+    with _sources.truncate_time([name], steps, **kwargs):
+        t = osk.read(name).time
+    return list((t - np.datetime64("2020-01-01")).dt.days.values)
+
+
+def test_truncation_keeps_the_nearest_step_to_a_pinned_instant(long_sources):
+    pins = _pins("2020-03-10T00:00", "2020-05-02")
+    assert _days("m", pins=pins) == [0, 69, 122, 199]
+
+
+def test_a_pinned_instant_snaps_to_the_nearest_step_within_tolerance(long_sources):
+    # 2020-03-10T18:00 is nearer the 11th than the 10th
+    assert _days("m", pins=_pins("2020-03-10T18:00")) == [0, 70, 199]
+    # exactly 2 days from a step still counts; further than that adds nothing
+    assert _days("m", pins=_pins("2021-01-01")) == [0, 199]  # after the run ends
+    assert _days("m", pins=_pins("2019-12-30")) == [0, 199]  # 2 days before: step 0
+
+
+def test_an_instant_far_from_every_step_keeps_nothing_extra(monkeypatch):
+    monkeypatch.setattr(
+        _sources,
+        "resolve",
+        lambda name: SimpleNamespace(name=name, metadata={}, path=None),
+    )
+    sparse = _model_dataset(3).assign_coords(
+        time=pd.to_datetime(["2020-01-01", "2020-03-01", "2020-06-01"])
+    )
+    monkeypatch.setattr(_sources, "_read_uncached", lambda *a, **k: sparse)
+    # 2020-02-01 is 31 and 29 days from the nearest steps; 2020-02-29 is 1 day from one
+    with _sources.truncate_time(["m"], 1, pins=_pins("2020-02-01")):
+        assert osk.read("m").sizes["time"] == 2
+    with _sources.truncate_time(["m"], 1, pins=_pins("2020-02-29")):
+        assert osk.read("m").sizes["time"] == 3
+
+
+def test_truncation_keeps_the_ends_of_a_pinned_window(long_sources):
+    pins = _pins({"min": "2020-02-01", "max": "2020-02-10"})
+    assert _days("m", 2, pins=pins) == [0, 1, 31, 32, 39, 40, 198, 199]
+    assert _days("m", 1, pins=pins) == [0, 31, 40, 199]
+
+
+def test_a_window_of_fewer_than_n_steps_keeps_them_all(long_sources):
+    pins = _pins({"min": "2020-02-01", "max": "2020-02-02"})
+    assert _days("m", 3, pins=pins) == [0, 1, 2, 31, 32, 197, 198, 199]
+
+
+def test_a_long_window_adds_nothing_to_the_ends(long_sources):
+    pins = _pins({"min": "2020-01-01", "max": "2020-12-31"})
+    assert _days("m", 1, pins=pins) == [0, 199]
+
+
+def test_pins_outside_the_anchors_end_are_not_kept_for_other_sources(long_sources):
+    """The test source ends day 199; a reference runs on to day 299."""
+    pins = _pins("2020-04-01", "2020-09-01", {"min": "2020-08-01", "max": "2020-08-10"})
+    # ref is bounded by the anchor's end (day 199): Sep 1 (244) and Aug 1-10 are cut
+    assert _days("ref", 1, anchor="m", pins=pins) == [0, 91, 199]
+    # without the anchor, every pin is kept
+    assert _days("ref", 1, pins=pins) == [0, 91, 213, 222, 244, 299]
+
+
+def test_no_pins_is_the_plain_first_and_last(long_sources):
+    assert _days("m", 2) == [0, 1, 198, 199]
+    assert _days("m", 2, pins=_sources.TimePins()) == [0, 1, 198, 199]
+
+
+def test_pins_on_a_calendar_that_does_not_compare_warn_and_keep_the_ends(monkeypatch):
+    monkeypatch.setattr(
+        _sources,
+        "resolve",
+        lambda name: SimpleNamespace(name=name, metadata={}, path=None),
+    )
+    noleap = xr.Dataset(
+        {"temp": (("time", "y"), np.zeros((6, 2)))},
+        coords={
+            "time": xr.date_range(
+                "2020-01-01", periods=6, calendar="noleap", use_cftime=True
+            )
+        },
+    )
+    monkeypatch.setattr(_sources, "_read_uncached", lambda *a, **k: noleap)
+    with (
+        _sources.truncate_time(["m"], 1, pins=_pins("2020-01-03")),
+        pytest.warns(UserWarning, match="could not keep the steps the pages pin"),
+    ):
+        assert osk.read("m").sizes["time"] == 2
+
+
+def test_smoke_keeps_the_pinned_steps_and_logs_them(
+    tmp_path, long_sources, monkeypatch, capsys
+):
+    """A page naming a date in the middle still finds it; the log says what is kept."""
+    seen = {}
+
+    def fake_prepare(source, variable, select, aggregate, **kwargs):
+        seen["days"] = _days_of(osk.read("m").time)
+        da = xr.DataArray(
+            np.full((2, 2), 5.0),
+            dims=("lat", "lon"),
+            coords={"lat": [10.0, 20.0], "lon": [-100.0, -90.0]},
+            attrs={"units": "degC"},
+        )
+        return da, None
+
+    monkeypatch.setattr(_comparison, "prepare_source", fake_prepare)
+    suite = _smoke_suite(tmp_path)
+    suite["pages"] = [
+        _time_page("Mid", {"depth": "surface", "time": "2020-03-10"}),
+        _time_page("Window", {"time": {"min": "2020-05-01", "max": "2020-05-04"}}),
+    ]
+    path = _write_suite(tmp_path, suite)
+    result = run_suite(path, refresh=False, smoke=1)
+    out = capsys.readouterr().out
+    assert result.exit_code == 0
+    assert seen["days"] == [0, 69, 121, 124, 199]
+    assert "reading only" not in out
+    assert "first and last 1 time step(s)" in out
+    assert "1 instant(s), 1 short window(s)" in out
+    assert "m 5 step(s)" in out
+    modes = json.loads(result.manifest.read_text())["modes"]
+    assert modes["smoke_pins"] == {"instants": 1, "windows": 1}
+
+
+def _time_page(title, select):
+    return {"title": title, "field": {"variables": ["temperature"], "select": select}}
+
+
+def _days_of(t):
+    return list((t - np.datetime64("2020-01-01")).dt.days.values)
+
+
+@pytest.mark.usefixtures("long_sources")
+def test_a_changed_pin_gets_a_new_smoke_cache(tmp_path, smoke_code):
+    """The same ends but another step pinned in between is not the same cache."""
+
+    def run(day):
+        suite = _smoke_suite(tmp_path)
+        suite["pages"] = [_time_page("Mid", {"time": day})]
+        result = run_suite(_write_suite(tmp_path, suite), refresh=False, smoke=1)
+        modes = json.loads(result.manifest.read_text())["modes"]
+        return Path(modes["smoke_cache"]), modes
+
+    first, _ = run("2020-03-10")
+    again, modes = run("2020-03-10")
+    assert again == first and modes["smoke_cache_reused"] is True
+    other, modes = run("2020-04-10")
+    assert other != first and modes["smoke_cache_reused"] is False
+
+
+# -- the smoke cache key covers the data on disk, not just the kept time stamps ------
+
+
+def _refresh_block(tmp_path: Path, **forcing_kw):
+    from ocean_skill.config import RefreshConfig
+
+    ref = tmp_path / "run.json"
+    ref.write_text("{}")
+    cat = tmp_path / "cat.yaml"
+    cat.write_text("sources: {}")
+    forcing = {
+        "name": "bry",
+        "kind": "surface",
+        "files": str(tmp_path / "forcing" / "*.nc"),
+        "grid": str(tmp_path / "grid.nc"),
+        **forcing_kw,
+    }
+    (tmp_path / "forcing").mkdir()
+    (tmp_path / "forcing" / "a.nc").write_bytes(b"x")
+    return RefreshConfig(
+        catalog=str(cat),
+        sources=[{"name": "run", "files": "unused*.nc", "ref": str(ref)}],
+        forcing=[forcing],
+    ), ref, cat
+
+
+def _bump(path: Path, *, size: bool = False) -> None:
+    if size:
+        path.write_bytes(path.read_bytes() + b"more")
+    else:
+        st = path.stat()
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+
+
+def test_smoke_cache_key_changes_when_a_source_ref_is_rewritten(tmp_path, monkeypatch):
+    monkeypatch.setattr(_run, "_code_identity", lambda: "code-1")
+    refresh, ref, cat = _refresh_block(tmp_path)
+    stamps = [("run", 3, "a", "b", 6, "d")]  # the same kept time stamps throughout
+    base, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    again, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert base == again
+    # the reference rewritten in place (mtime moves, or just its size)
+    _bump(ref)
+    moved, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert moved != base
+    _bump(ref, size=True)
+    resized, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert resized not in (base, moved)
+    # the catalog file too
+    _bump(cat)
+    catalog, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert catalog != resized
+
+
+def test_smoke_cache_key_covers_forcing_files_and_a_parquet_ref_folder(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(_run, "_code_identity", lambda: "code-1")
+    refresh, _, _ = _refresh_block(tmp_path)  # forcing has no ref: its files count
+    stamps = [("run", 3, "a", "b", 6, "d")]
+    base, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    _bump(tmp_path / "forcing" / "a.nc", size=True)
+    forced, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert forced != base
+
+    folder = tmp_path / "forcing_ref.parq"
+    folder.mkdir()
+    (folder / "refs.0.parq").write_bytes(b"1")
+    (tmp_path / "second").mkdir()
+    refresh, _, _ = _refresh_block(tmp_path / "second", ref=str(folder))
+    first, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    _bump(folder / "refs.0.parq", size=True)  # a file inside; the folder's mtime stays
+    second, _ = _run._smoke_cache_key(stamps, _run._smoke_data_stamps(refresh))
+    assert first != second

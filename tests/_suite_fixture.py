@@ -54,16 +54,33 @@ NX, NY = LON.size, LAT.size
 NS = 8
 HC, THETA_S, THETA_B, VTRANSFORM = 100.0, 6.0, 3.0, 2
 
-#: Month-end restarts of the test run; the reference run has one more month.
+#: Month-end restarts of the mid-run-check / final-report stand-in run.
 RESTART_STAMPS = ("20110131", "20110228", "20110331", "20110430")
-REFERENCE_EXTRA_STAMPS = ("20110531",)
-IC_STAMPS = {"pyesper": "20101231", "pacmed2015": "20101031"}
-#: Days in each fixture "month" of boundary forcing -- unequal, as 28/30/31 are.
-BRY_MONTH_STEPS = (3, 4, 2, 5)
-BRY_MONTH_STARTS = (0, 31, 59, 90)  # days since 2011-01-01
 FORCING_EPOCH = "2011-01-01"
 ROMS_EPOCH = "2000-01-01"
 RUN_WINDOW = ("2011-01-01", "2011-04-30")
+
+#: The model-comparison runs keep the real run's dates (2010-01 on), small: daily
+#: restarts for the first days, one at the end of January, then quarterly month ends.
+#: Both runs hold the same steps; the folders they are split over mirror the real ones.
+MC_DAILY_STAMPS = (
+    "20100101",
+    "20100102",
+    "20100103",
+    "20100104",
+    "20100105",
+    "20100131",
+)
+MC_MONTH_ENDS = (
+    *(
+        f"{y}{md}"
+        for y in range(2010, 2014)
+        for md in ("0131", "0430", "0731", "1031")
+        if (y, md) != (2010, "0131")  # already a daily restart
+    ),
+    "20131231",
+)
+MC_WINDOW = ("2010-01-01", "2013-12-31")
 
 #: Land that touches the open boundaries (the north-west corner). Off: the real PACMED
 #: boundaries are open ocean along their whole length. A test turns it on to show that a
@@ -315,6 +332,87 @@ def write_restart(path: Path, stamp: str, *, shift: float = 0.0) -> Path:
     return path
 
 
+def write_initial_conditions(
+    path: Path,
+    stamp: str = "20110101",
+    *,
+    hc_attr: bool = False,
+    shift: float = 0.0,
+    ini_time: str | None = None,
+    reference_date: str = ROMS_EPOCH,
+) -> Path:
+    """Write a roms-tools initial-conditions file (roms-tools 4.0.0's layout).
+
+    One record on ``(ocean_time, s_rho, eta_rho, xi_rho)`` -- ``ocean_time`` is both the
+    dimension and the coordinate, seconds since ``model_reference_date``, with the
+    roms-tools ``abs_time`` beside it -- plus ``u``/``v`` on their staggered points,
+    ``ubar``/``vbar`` and ``zeta``; ``Cs_r``/``Cs_w`` as variables,
+    ``theta_s``/``theta_b`` as global attributes, no ``sigma_r`` and no grid. 4.0.0
+    writes no ``hc`` attribute (``hc_attr=True`` adds it, as a later version might).
+    ``ini_time`` (default: the day's start, as roms-tools states it) is what the file
+    claims its time is.
+    """
+    day = _stamp_day(stamp)
+    t = np.datetime64(f"{day}T00:00:00")
+    secs = float(
+        (t - np.datetime64(f"{reference_date}T00:00:00"))
+        .astype("timedelta64[s]")
+        .astype(float)
+    )
+    season = float(
+        (t.astype("datetime64[D]") - t.astype("datetime64[Y]")).astype(float) / 365.0
+    )
+    data, _ = _restart_records(1, season, shift)
+    data.pop("hbls")  # a model diagnostic, not an initial condition
+    v = vertical()
+    ocean = {
+        name: (("ocean_time", *dims[1:]), vals, attrs)
+        for name, (dims, vals, attrs) in data.items()
+    }
+    ocean["ubar"] = (
+        ("ocean_time", "eta_rho", "xi_u"),
+        data["u"][1].mean(axis=1).astype("float32"),
+        {"units": "m/s"},
+    )
+    ocean["vbar"] = (
+        ("ocean_time", "eta_v", "xi_rho"),
+        data["v"][1].mean(axis=1).astype("float32"),
+        {"units": "m/s"},
+    )
+    ds = xr.Dataset(
+        {
+            **ocean,
+            "Cs_r": ("s_rho", v["Cs_r"]),
+            "Cs_w": ("s_w", v["Cs_w"]),
+        },
+        coords={
+            "ocean_time": (
+                "ocean_time",
+                np.array([secs]),
+                {
+                    "long_name": (
+                        f"relative time: seconds since {reference_date} 00:00:00"
+                    ),
+                    "units": "seconds",
+                },
+            ),
+            "abs_time": ("ocean_time", np.array([t], dtype="datetime64[ns]")),
+        },
+        attrs={
+            "title": "ROMS initial conditions file created by ROMS-Tools",
+            "roms_tools_version": "4.0.0",
+            "ini_time": ini_time or f"{day} 00:00:00",
+            "model_reference_date": f"{reference_date} 00:00:00",
+            "source": "GLORYS",
+            "theta_s": THETA_S,
+            "theta_b": THETA_B,
+            **({"hc": HC} if hc_attr else {}),
+        },
+    )
+    ds.to_netcdf(path)
+    return path
+
+
 # ------------------------------------------------------------------------- the fixture
 
 
@@ -332,6 +430,9 @@ class SuiteFixture:
     forcing: dict[str, dict[str, Any]] = field(default_factory=dict)
     restart_days: list[str] = field(default_factory=list)
     window: tuple[str, str] = RUN_WINDOW
+    #: refresh.sources names whose stand-ins carry the real run's dates (the
+    #: model-comparison runs, 2010-2013): a suite built on them is not date-remapped.
+    dated_sources: frozenset[str] = frozenset()
 
 
 def _stamp_day(stamp: str) -> str:
@@ -350,7 +451,6 @@ _SIDES = {
 _PHYSICS = ("temp", "salt")
 _ESPER = ("ALK", "DIC", "NO3", "O2", "PO4", "SiO3")
 _UNIFIED = (*_ESPER, "Fe", "NH4")
-_DAYS = lambda d: f"relative time: days since {FORCING_EPOCH} 00:00:00"  # noqa: E731
 
 
 def _cdf5() -> str:
@@ -375,6 +475,7 @@ def write_boundary(
     offset: float = 0.0,
     velocities: bool = False,
     fmt: str | None = None,
+    epoch: str = FORCING_EPOCH,
 ) -> Path:
     """Write a roms-tools boundary file: ``<name>_<side>`` on ``(bry_time, ...)``.
 
@@ -420,11 +521,14 @@ def write_boundary(
         "bry_time": (
             "bry_time",
             days,
-            {"long_name": _DAYS(0), "units": "days"},
+            {
+                "long_name": f"relative time: days since {epoch} 00:00:00",
+                "units": "days",
+            },
         ),
         "abs_time": (
             "bry_time",
-            np.datetime64(FORCING_EPOCH)
+            np.datetime64(epoch)
             + (days * 86400).astype("timedelta64[s]").astype("timedelta64[ns]"),
         ),
     }
@@ -475,22 +579,32 @@ def write_surface_climatology(path: Path, names: tuple[str, ...] = ("sss",)) -> 
     return path
 
 
-def _month_files(
+def _dated_month_files(
     root: Path, stem: str, names, *, offset: float, velocities: bool
 ) -> list[Path]:
-    """One boundary file per fixture month, each a different (unequal) length."""
+    """One boundary file per calendar month of 2010-2013 (``<stem>_YYYYMM.nc``).
+
+    Each holds 2-4 steps five days apart (so month files differ in length, as 28-31 days
+    do), in days since the ROMS epoch, as the real roms-tools files are.
+    """
+    import datetime as dt
+
+    epoch = dt.date.fromisoformat(ROMS_EPOCH)
     files = []
-    for i, (start, n) in enumerate(zip(BRY_MONTH_STARTS, BRY_MONTH_STEPS)):
-        days = start + np.arange(n)
-        files.append(
-            write_boundary(
-                root / f"{stem}_2011{i + 1:02d}.nc",
-                days,
-                names,
-                offset=offset,
-                velocities=velocities,
+    for year in range(2010, 2014):
+        for month in range(1, 13):
+            start = (dt.date(year, month, 1) - epoch).days
+            n = 2 + (year * 12 + month) % 3
+            files.append(
+                write_boundary(
+                    root / f"{stem}_{year}{month:02d}.nc",
+                    start + 5 * np.arange(n),
+                    names,
+                    offset=offset,
+                    velocities=velocities,
+                    epoch=ROMS_EPOCH,
+                )
             )
-        )
     return files
 
 
@@ -1087,33 +1201,76 @@ def build_fixture(root: Path) -> SuiteFixture:
         return d
 
     test_dir = restarts("pacmed_pyesper", RESTART_STAMPS)
-    ref_dir = restarts(
-        "pacmed_2015", (*RESTART_STAMPS, *REFERENCE_EXTRA_STAMPS), shift=0.4
-    )
     fx.sources = {
         "pacmed_pyesper": {
             "files": str(test_dir / "output_rst.*.nc"),
             "grid": str(model_grid),
         },
-        "pacmed_2015": {
-            "files": str(ref_dir / "output_rst.*.nc"),
-            "grid": str(model_grid),
-        },
-        "ic_pyesper": {
-            "files": str(
-                restarts("ic_pyesper", [IC_STAMPS["pyesper"]], shift=0.1)
-                / "output_rst.*.nc"
-            ),
-            "grid": str(forcing_grid),
-        },
-        "ic_pacmed2015": {
-            "files": str(
-                restarts("ic_pacmed2015", [IC_STAMPS["pacmed2015"]], shift=0.3)
-                / "output_rst.*.nc"
-            ),
-            "grid": str(forcing_grid),
-        },
     }
+    # the CCS mid-run check reads its own run; here it is the same stand-in
+    fx.sources["ccs_4km"] = dict(fx.sources["pacmed_pyesper"])
+
+    # -- the model-comparison pair: both runs from 2010-01, split over task folders ----
+    def tasks(folder: str, layout: dict[str, tuple[str, ...]], kw) -> None:
+        for task, stamps in layout.items():
+            d = root / "runs" / folder / "tasks" / task / "output"
+            d.mkdir(parents=True, exist_ok=True)
+            for stamp in stamps:
+                write_restart(d / f"output_rst.{stamp}234500.nc", stamp, **kw(stamp))
+
+    def split(stamps) -> dict[str, tuple[str, ...]]:
+        """Split the stamps over the 2010 task folders, as the real run did."""
+        daily = [s for s in stamps if s in MC_DAILY_STAMPS]
+        ends = [s for s in stamps if s not in MC_DAILY_STAMPS and s < "2011"]
+        return {
+            "first_wk": tuple(daily[:3]),
+            "second_wk": tuple(daily[3:5]),
+            "third_2wks": tuple(daily[5:]),
+            "first_half": tuple(e for e in ends if e < "20100601"),
+            "all_the_rest": tuple(e for e in ends if e >= "20100601"),
+        }
+
+    def drift(stamp: str) -> float:
+        """Return the reference run's offset from the test run, growing with time."""
+        return 0.2 + 0.15 * (int(stamp[:4]) - 2010) + 0.05 * int(stamp[4:6]) / 12.0
+
+    every = (*MC_DAILY_STAMPS, *MC_MONTH_ENDS)
+    later = tuple(s for s in every if s >= "2011")
+    # pyesper (test): 2010 in the task folders, the rest in gathered_output
+    tasks("cstar_pyesper", split(every), lambda st: {"shift": 0.0})
+    gathered = root / "runs" / "cstar_pyesper_2015" / "gathered_output"
+    gathered.mkdir(parents=True, exist_ok=True)
+    for stamp in later:
+        write_restart(gathered / f"output_rst.{stamp}234500.nc", stamp, shift=0.0)
+    # MLD-interp (reference): the same, plus a segment's 2011-01-01 test restart that
+    # the month-end glob must leave out
+    tasks("cstar_mld", split(every), lambda st: {"shift": drift(st)})
+    tasks(
+        "cstar_mld_2015",
+        {
+            "m201101": ("20110131", "20110101"),
+            "m201104": ("20110430",),
+            "rest": tuple(s for s in later if s not in ("20110131", "20110430")),
+        },
+        lambda st: {"shift": drift(st) if st != "20110101" else 9.0},
+    )
+    mc_globs = {
+        "pyesper": [
+            str(root / "runs/cstar_pyesper/tasks/*/output/output_rst.2010*.nc"),
+            str(root / "runs/cstar_pyesper_2015/gathered_output/output_rst.*.nc"),
+        ],
+        "mld_interp": [
+            str(root / "runs/cstar_mld/tasks/*/output/output_rst.2010*.nc"),
+            str(
+                root
+                / "runs/cstar_mld_2015/tasks/*/output"
+                / "output_rst.??????[23][0-9]234500.nc"
+            ),
+        ],
+    }
+    for name, globs in mc_globs.items():
+        fx.sources[name] = {"files": globs, "grid": str(model_grid)}
+    fx.dated_sources = frozenset(mc_globs)
     fx.restart_days = [_stamp_day(s) for s in RESTART_STAMPS]
 
     # -- roms-tools forcing ----------------------------------------------------
@@ -1124,22 +1281,39 @@ def build_fixture(root: Path) -> SuiteFixture:
         return {"files": [str(p) for p in files], "grid": str(forcing_grid)}
 
     clim_days = np.arange(12) * 30.4
+    ic = f / "ic"
+    ic.mkdir(exist_ok=True)
     fx.forcing = {
+        # initial conditions (2010-01-01); pyesper's carries no hc attribute
+        "pyesper_ic": entry(
+            [write_initial_conditions(ic / "pyesper_ic.nc", "20100101", shift=0.1)]
+        ),
+        "mld_ic": entry(
+            [
+                write_initial_conditions(
+                    ic / "mld_ic.nc", "20100101", shift=0.3, hc_attr=True
+                )
+            ]
+        ),
+        # 2010-2013 monthly boundary files: pyesper's physics and ESPER BGC, the MLD
+        # run's physics, and its monthly BGC climatology
         "pyesper_bry_phys": entry(
-            _month_files(f, "pyesper_bry_phys", _PHYSICS, offset=0.0, velocities=True)
-        ),
-        "pyesper_bry_bgc": entry(
-            _month_files(f, "pyesper_bry_bgc", _ESPER, offset=0.0, velocities=False)
-        ),
-        "pacmed2015_bry_phys": entry(
-            _month_files(
-                f, "pacmed2015_bry_phys", _PHYSICS, offset=0.2, velocities=True
+            _dated_month_files(
+                f, "pyesper_bry_phys", _PHYSICS, offset=0.0, velocities=True
             )
         ),
-        "pacmed2015_bry_bgc": entry(
+        "pyesper_bry_bgc": entry(
+            _dated_month_files(
+                f, "pyesper_bry_bgc", _ESPER, offset=0.0, velocities=False
+            )
+        ),
+        "mld_bry_phys": entry(
+            _dated_month_files(f, "mld_bry_phys", _PHYSICS, offset=0.2, velocities=True)
+        ),
+        "mld_bry_bgc": entry(
             [
                 write_boundary(
-                    f / "pacmed2015_bry_bgc_clim.nc",
+                    f / "mld_bry_bgc_clim.nc",
                     clim_days,
                     _UNIFIED,
                     climatology=True,
@@ -1186,14 +1360,22 @@ _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 def _adapt_dates(node: Any, fx: SuiteFixture) -> Any:
-    """Fit a suite's dates to the fixture: clip windows, date lists -> restarts."""
+    """Fit a suite's dates to the fixture: clip windows, date lists -> restarts.
+
+    A window edge outside the run (a ``min`` after its last restart, a ``max`` before
+    its first) falls back to the run's own edge, so "from 2013" still selects the run
+    when the stand-in's restarts are all of 2011.
+    """
     lo, hi = fx.window
     if isinstance(node, dict):
         out = {k: _adapt_dates(v, fx) for k, v in node.items()}
-        for key, bound in (("min", lo), ("max", hi)):
+        for key in ("min", "max"):
             v = node.get(key)
             if isinstance(v, str) and _ISO_DAY.match(v) and set(node) <= {"min", "max"}:
-                out[key] = max(v, lo) if key == "min" else min(v, hi)
+                if key == "min":
+                    out[key] = lo if v > hi else max(v, lo)
+                else:
+                    out[key] = hi if v < lo else min(v, hi)
         return out
     if isinstance(node, list):
         if node and all(isinstance(v, str) and _ISO_DAY.match(v) for v in node):
@@ -1261,7 +1443,9 @@ def localize_suite(src_yaml: str | Path, tmp_path: Path, fx: SuiteFixture) -> Pa
     src = Path(src_yaml)
     raw = yaml.safe_load(src.read_text())
     refresh = raw.pop("refresh", None)
-    out = _adapt_dates(raw, fx)
+    # a suite on the dated stand-ins (model-comparison) already names real dates
+    names = {e["name"] for e in (refresh or {}).get("sources") or []}
+    out = raw if names and names <= fx.dated_sources else _adapt_dates(raw, fx)
     _widen_regions(out)
 
     catalog_dir = tmp_path / "catalogs"

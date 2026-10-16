@@ -1232,6 +1232,15 @@ climatology along its path. Climatology entries take `select={"month": 8}`. Vari
 keep their ROMS names (`temp`, `salt`, `NO3`, `zeta`, ...; surface `Tair`, `swrad`, `uwnd`
 stay raw, since none has a safe CF equivalent).
 
+`strip=["west", "south"]` on `add_boundary_sources` also adds `<name>_strip`: the west
+boundary north to south then the south boundary west to east, the corner once, as one entry
+(`select={"transect": {"eta_rho": 0}}` is the section, `along` in km, with the corner lines a
+boundary-following section draws; two runs' strips compare, and a climatology's keeps its
+`month` axis). A roms-tools initial-conditions file is one entry that reads like a restart
+-- `build.add_initial_conditions(cat, "ic", "ic.nc", "grid.nc")` -- so a depth can be selected
+on it and compared with the run's first restart; `hc` comes from the file, else the grid
+file, else `vertical={"hc": ...}`.
+
 A suite builds the same entries itself, on every run, from its `refresh.forcing:`
 list, into the catalog its model output goes to (see `docs/suites.md`).
 

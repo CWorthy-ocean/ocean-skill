@@ -1386,7 +1386,12 @@ panel.
 Honored by **both renderers** for `target`. (`taylor` and `paired` delegate to
 matplotlib interactively — bokeh has no floating polar axis — so they label the same
 way either way.) Colours are pinned to tab10 by level index in both, so a diagram keeps
-its colours when you switch renderer. `"grid"` is the one exception: bokeh legends are
+its colours when you switch renderer. The exception is `color_by="variable"` (and a series
+line's `variable` colour): a variable's colour comes from *which variable it is* --
+temperature blue, salinity orange, chlorophyll green, alkalinity red, oxygen purple,
+nitrate brown, and so on, any other variable a fixed colour hashed from its name -- so it
+is the same on every page of a report, whatever else is on the page
+(`ocean_skill.plot.style.variable_colors`). `"grid"` is the one exception: bokeh legends are
 flat, so the interactive `target` warns and falls back to the combined
 `"colour · marker"` entries described below — the static diagram (and interactive
 `taylor`/`paired`, since they delegate to it) draws the real matrix.
