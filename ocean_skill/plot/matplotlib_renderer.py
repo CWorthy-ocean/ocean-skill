@@ -16,6 +16,7 @@ have been.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -647,6 +648,56 @@ def _draw_colorbar(
     return cbar
 
 
+@contextlib.contextmanager
+def _meshes_hidden(fig):
+    """Hide the data artists that cannot affect layout, for the length of the block.
+
+    A map's ``pcolormesh`` is the expensive part of a measuring draw even when nothing
+    is painted: ``draw_without_rendering`` still runs its coordinate and path
+    transforms, 1858x962 cells per panel. Matplotlib already leaves an artist that is
+    clipped to exactly its axes out of the tight bounding box
+    (:meth:`~matplotlib.artist.Artist._fully_clipped_to_axes`), since ink inside the
+    axes cannot move anything outside it, so such an artist is not worth drawing here
+    either. Visibility is put back in ``finally``, so a failed measurement leaves the
+    figure as it was. That method is private: should a matplotlib release drop it,
+    nothing is hidden and the measuring draw is merely slower.
+    """
+    from matplotlib.collections import Collection
+    from matplotlib.image import AxesImage
+
+    def clipped(artist) -> bool:
+        check = getattr(artist, "_fully_clipped_to_axes", None)
+        return bool(check()) if callable(check) else False
+
+    hidden = [
+        artist
+        for ax in fig.axes
+        for artist in (*ax.collections, *ax.images)
+        if isinstance(artist, Collection | AxesImage)
+        and artist.get_visible()
+        and clipped(artist)
+    ]
+    for artist in hidden:
+        artist.set_visible(False)
+    try:
+        yield
+    finally:
+        for artist in hidden:
+            artist.set_visible(True)
+
+
+def _measure(fig) -> None:
+    """Draw ``fig`` to settle its layout and text extents, painting nothing.
+
+    Every layout pass that only needs to know where things ended up goes through here
+    rather than ``fig.canvas.draw()``: no pixels are needed, and a map page would
+    otherwise rasterize every panel on every pass. The cached Agg renderer
+    (``fig.canvas.get_renderer()``) is still valid afterwards.
+    """
+    with _meshes_hidden(fig):
+        fig.draw_without_rendering()
+
+
 def _align_colorbars(fig, renderer=None) -> None:
     """Re-fit every colorbar to the drawn extent of the panels it describes.
 
@@ -682,7 +733,7 @@ def _align_colorbars(fig, renderer=None) -> None:
     if not caxes:
         return
     if renderer is None:
-        fig.canvas.draw()
+        _measure(fig)
     fig_w, fig_h = fig.get_size_inches()
     # get_position() is the *active* position, so it reflects the shrinking a
     # fixed-aspect GeoAxes does to itself — but only once a draw has applied it.
@@ -755,7 +806,7 @@ def _level_row_gaps(fig, axes) -> None:
     rows = [list(np.atleast_1d(row).ravel()) for row in axes]
     if len(rows) < 3:
         return
-    fig.canvas.draw()
+    _measure(fig)
     tops = [max(ax.get_position().y1 for ax in row) for row in rows]
     first, last = tops[0], tops[-1]
     fig.set_layout_engine("none")
@@ -3022,7 +3073,7 @@ def _clear_row_labels(fig, renderer=None) -> None:
     takes no part in the layout, so nothing shifts back underneath it.
     """
     if renderer is None:
-        fig.canvas.draw()
+        _measure(fig)
         renderer = fig.canvas.get_renderer()
     _wrap_row_labels(fig, renderer)
     for ax in fig.axes:
@@ -3121,7 +3172,7 @@ def _fit_left_margin(fig, *, passes: int = 3) -> bool:
     engine = fig.get_layout_engine()
     moved = any(getattr(ax, "_osk_row_label", None) is not None for ax in fig.axes)
     for _ in range(passes):
-        fig.canvas.draw()
+        _measure(fig)
         renderer = fig.canvas.get_renderer()
         _clear_row_labels(fig, renderer)
         lefts = [
@@ -3194,7 +3245,7 @@ def _fit_text_widths(fig, renderer=None) -> None:
     figure edge, which is exactly what raising the type level made visible.
     """
     if renderer is None:
-        fig.canvas.draw()
+        _measure(fig)
         renderer = fig.canvas.get_renderer()
     fig_w_px = fig.get_size_inches()[0] * fig.dpi
 
@@ -3257,7 +3308,7 @@ def _centre_suptitle(fig, renderer=None) -> None:
     if sup is None or not sup.get_text():
         return
     if renderer is None:
-        fig.canvas.draw()
+        _measure(fig)
         renderer = fig.canvas.get_renderer()
     boxes = [
         ax.get_window_extent(renderer)
@@ -3451,7 +3502,7 @@ def _fill_canvas(
     lo = hi = None
     last_side = None
     for _ in range(passes):
-        fig.canvas.draw()
+        _measure(fig)
         width, height = fig.get_size_inches()
         wanted = 0.0
         panels = [

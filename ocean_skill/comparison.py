@@ -1653,7 +1653,7 @@ def _build_shared_slabs(
         _bbox_lon_in_convention,
         _lat_name,
         _lon_name,
-        _nearest_indices,
+        _nearest_indices_many,
     )
     from ocean_skill.catalog import resolve as _resolve
     from ocean_skill.roms import GEOGRAPHIC_VELOCITY_NAMES
@@ -1698,9 +1698,14 @@ def _build_shared_slabs(
         n_eta, n_xi = obj.sizes[eta_dim], obj.sizes[xi_dim]
         eta0 = eta1 = xi0 = xi1 = None
         try:
-            for p_lon, p_lat in positions:
-                wrapped, _ = _bbox_lon_in_convention(lon_values, p_lon, p_lon)
-                iy, ix = _nearest_indices(lon_values, lat_values, wrapped, p_lat)
+            wrapped = [
+                _bbox_lon_in_convention(lon_values, p_lon, p_lon)[0]
+                for p_lon, _ in positions
+            ]
+            snapped_y, snapped_x = _nearest_indices_many(
+                lon_values, lat_values, wrapped, [p_lat for _, p_lat in positions]
+            )
+            for iy, ix in zip(snapped_y.tolist(), snapped_x.tolist(), strict=True):
                 e0, e1 = max(iy - POINT_WINDOW_CELLS, 0), min(
                     iy + POINT_WINDOW_CELLS + 1, n_eta
                 )

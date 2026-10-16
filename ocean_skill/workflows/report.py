@@ -229,7 +229,9 @@ def _tight_bbox(fig: Any, stem: str) -> Any:
     :func:`ocean_skill.workflows.pages._pin_to_page` -- gets a page grown just enough to
     hold it, with this warning, rather than a clipped page.
     """
-    fig.canvas.draw()
+    from ocean_skill.plot.matplotlib_renderer import _measure
+
+    _measure(fig)
     tight = fig.get_tightbbox(fig.canvas.get_renderer())
     if _overflows(tight):
         warnings.warn(

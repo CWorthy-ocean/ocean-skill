@@ -656,11 +656,14 @@ def standardize(
 
     # attach horizontal coords + grid fields AS COORDS (so they are not treated as
     # comparable data variables downstream); moving them to coords also drops h/mask/
-    # Cs_r/sigma_r out of data_vars for a self-contained file.
-    ds = ds.assign_coords(lon=grid["lon_rho"], lat=grid["lat_rho"])
+    # Cs_r/sigma_r out of data_vars for a self-contained file. Loaded, not left lazy:
+    # they are small static fields, but every subset of a lazy one is a new wrapper
+    # that reads the grid file again, and lon/lat are read at every crop, transect and
+    # alignment step -- on a 1858x962 grid that was gigabytes of rereads per lane.
+    ds = ds.assign_coords(lon=grid["lon_rho"].load(), lat=grid["lat_rho"].load())
     for name in ("h", "Cs_r", "sigma_r", "mask_rho", "angle"):
         if name in grid.variables:
-            ds = ds.assign_coords({name: grid[name]})
+            ds = ds.assign_coords({name: grid[name].load()})
 
     # true cell area, for an area-weighted spatial mean (ocean_skill.operators
     # aggregate); absent from a grid that ships no pm/pn, in which case a spatial
@@ -669,7 +672,7 @@ def standardize(
         ds = ds.assign_coords(
             {
                 AREA_COORD: (
-                    1.0 / (grid["pm"] * grid["pn"])
+                    1.0 / (grid["pm"] * grid["pn"]).load()
                 ).assign_attrs(units="m2", long_name="grid cell area (1/(pm*pn))")
             }
         )
