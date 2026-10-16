@@ -50,6 +50,64 @@ so the same suite stays correct against a run that is still writing output -- se
 below. Because that shared reference is overwritten by every later run, each report
 directory keeps its own copy under `refs/` -- see Output layout.
 
+## Starting a suite from a run folder
+
+The three suites that ship with the package -- `mid-run-check`, `final-report`,
+`model-comparison` -- live in one place, `ocean_skill/workflows/templates/*.yaml`
+(inside the installed package, so `pip install` brings them; find the folder with
+`python -c "import ocean_skill.workflows as w, pathlib; print(pathlib.Path(w.__file__).parent / 'templates')"`).
+Each file is a complete, runnable suite for the PACMED run it was written for, with its
+run-specific block (names, paths, dates) between `# >>> setup` and `# <<< setup` marker
+comments. For your own run, copy the file and edit that block by hand (mainly
+`refresh:`, `defaults.test`, the dates, `output_dir`, `cache_dir`,
+`catalog_search_paths`); that is the only route for `final-report` and
+`model-comparison`. For `mid-run-check`, `ocean-skill-suite new` fills the block from a
+C-Star run folder and keeps everything else, pages and comments included, as the shipped
+file has it:
+
+```bash
+ocean-skill-suite new mid-run-check \
+    --run /scratch/cstar/my_run --name my_run --output-dir /projects/me/diagnostics \
+    -o my-run-check.yaml
+ocean-skill-run my-run-check.yaml --list
+ocean-skill-run my-run-check.yaml --smoke 2 --self-check --strict
+ocean-skill-run my-run-check.yaml
+```
+
+`--run` is the folder holding `tasks/`; repeat it for the segments of a run that was
+restarted in pieces (they become a list of globs under `files:`). Other options:
+`--files GLOB ...` (name the restarts yourself), `--grid FILE`, `--catalog-dir DIR`
+(where this suite's own catalog goes; default `<output-dir>/catalogs`),
+`--shared-catalogs DIR` (the observation catalogs; default the Anvil directory) and
+`--force` (replace an existing `-o` file; default `./mid-run-check.yaml`). The command
+reads only file names and the grid's `eta_rho` length and changes nothing but the YAML it
+writes. A missing required flag, or another template name, is an error.
+
+**What is discovered**, from the layout C-Star writes (`<run>/tasks/<task>/{input/
+input_datasets,output,work}`):
+
+- the restarts, `tasks/*/output/output_rst.*.nc`, or the folder of symlinks that gathers
+  them (`gathered_output/`, `tasks/rst_files/`) when there is one, since it de-duplicates
+  restarts written by two tasks;
+- the grid: the one `*_grid.nc` in the tasks' input folders (an error naming the
+  candidates when there are none or several with different names);
+- the restart `subchunk:`: one level and the largest divisor of the grid's `eta_rho`
+  between 32 and 128 rows (962 rows give 74). A grid with none (674 = 2 x 337) gets one
+  level and whole rows, with a comment in the YAML and a warning, because a page matched
+  to a depth over many restarts then needs more memory there;
+- the workplan and the newest resolved blueprint, for `run_info:`;
+- `defaults.period.min`, the first restart's day.
+
+**What to check.** Every place the command was not sure is a `# TODO check` comment in
+the YAML (a run folder with no workplan or blueprint, restart dates it could not read).
+The pages are the PACMED ones, so their boxes and dates are the first edit for another
+domain. The written file is loaded with the suite's own schema and every path under
+`refresh:` and `run_info:` must exist; any failure is printed and the exit status is 1.
+
+**Editing a shipped suite.** Edit the file under `ocean_skill/workflows/templates/`;
+there is no second copy to keep in step. Keep the `# >>> setup` / `# <<< setup` markers
+intact so `ocean-skill-suite new` can still fill the block.
+
 ## Schema
 
 ```yaml
@@ -1042,8 +1100,8 @@ so a suite whose only data pages skipped is `1` however many dividers it has.
 ## CLI
 
 ```
-ocean-skill-run SUITE.yaml [--list] [--no-refresh] [--smoke [N]] [--self-check]
-                [--only GLOB] [--strict]
+ocean-skill-run SUITE.yaml [--list] [--no-refresh] [--smoke [N]] [--smoke-stride K]
+                [--self-check] [--only GLOB] [--strict]
 ```
 
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
@@ -1091,6 +1149,29 @@ Every `latest`/`month: run` lookup made while the suite is expanded sees the sho
 record too, so the pages expand and draw consistently, just over very little data. Write
 the count right after the flag (`--smoke 3` or `--smoke=3`) and put the suite path first.
 
+`--smoke` is also **test mode**: shortening the time axis alone saves little on a big suite (pages pin
+most of their dates, every map reads and draws the whole grid, figures render at up to 320 dpi), and a
+test run should take minutes, not as long as the real one. So it also:
+
+- keeps only the **first and last entry of a page's `times:` list** (a 16-date seasonal page runs two
+  dates) and of a `for_each: {month: ...}` fan; variables, depths and every other fan stay complete, since they
+  exercise different code. The pins above are collected after this cut, so fewer steps are kept. The run's page list
+  and log mark each such page, e.g. `(test: 2 of 16 dates)`, and the log's `smoke:` line counts them.
+  A compare page that sets no `min_pairs` gets `min_pairs: 1`: the few steps kept cannot reach the default of 5,
+  which would mask every cell of a per-cell skill map;
+- reads every truncated model source on **every `--smoke-stride K`-th horizontal cell** (default 4, about
+  1/16 of the cells to read and draw; `1` keeps the whole grid). The rho dims (`xi_rho`, `eta_rho`) take every
+  Kth cell, the staggered `xi_u`/`eta_v` are cut so they stay one shorter than their rho dim (the velocity code
+  relies on it), and the grid coordinates (lon/lat, `h`, mask, angle, cell area) are strided with the data. A dimension
+  the stride would leave under 3 cells is kept whole, with a warning. The values are physically inconsistent
+  (u/v no longer sit between the strided cells, cell areas describe the full cells), so this tests the code paths, not the
+  numbers. Observations, climatologies, initial conditions and boundary forcing are read whole and regridded to
+  the coarser model lane as usual;
+- saves figures at **no more than 100 dpi** (PNGs, the PDF's rasterized maps, and the enlarged pages' renders).
+
+Nothing changes without `--smoke`. The stride is part of the smoke-cache hash, so runs with different strides
+never share results.
+
 A smoke run never touches the real results:
 
 - its report goes to `<output_dir>/<name>-smoke/` (not `<name>/`), and `latest.txt`/
@@ -1099,7 +1180,7 @@ A smoke run never touches the real results:
   `<cache base dir>/smoke-cache/<hash>/` -- `cache_dir:` if the suite sets one, else the
   default -- because the cache key knows nothing about the truncation and a shortened result
   must never be served to a full run. `<hash>` is a short hash of everything the key cannot
-  see: each truncated source's name, N and the time stamps actually kept, pinned ones included (so
+  see: each truncated source's name, N, the stride and the time stamps actually kept, pinned ones included (so
   a run that has grown, or pages that now name other dates, keep different steps and start fresh), and the code version
   (the package version, the git `HEAD`, and, if the tree has uncommitted changes, a hash of
   them). A repeat run on the same steps with the same code **reuses the folder** (the run log

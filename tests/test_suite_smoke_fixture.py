@@ -1,7 +1,7 @@
 """The PACMED suites, expanded and drawn end to end against a synthetic PACMED.
 
-``suites/mid-run-check.yaml`` (and its CCS copy), ``final-report.yaml`` and
-``model-comparison.yaml`` used
+The shipped ``mid-run-check``, ``final-report`` and ``model-comparison`` suites (under
+``ocean_skill/workflows/templates/``) and ``suites/ccs-mid-run-check.yaml`` used
 to be debugged one failure at a time, hours into an HPC run. ``_suite_fixture`` builds a
 small stand-in for every input they read (UCLA restart files, roms-tools forcing, WOA23,
 GLODAP, Holte & Talley, Copernicus, Cravatte -- see its docstring for the quirks it
@@ -35,13 +35,16 @@ import xarray as xr
 from ocean_skill.workflows.run import run_suite
 from tests import _suite_fixture as fx
 
-SUITES = Path(__file__).resolve().parents[1] / "suites"
-PACMED_SUITES = (
-    "mid-run-check",
-    "ccs-mid-run-check",
-    "final-report",
-    "model-comparison",
-)
+ROOT = Path(__file__).resolve().parents[1]
+#: Where each suite under test lives: the three shipped ones are the package's own
+#: templates; the CCS run's instance of mid-run-check stays in ``suites/``.
+SUITE_FILES = {
+    "mid-run-check": ROOT / "ocean_skill/workflows/templates/mid-run-check.yaml",
+    "ccs-mid-run-check": ROOT / "suites/ccs-mid-run-check.yaml",
+    "final-report": ROOT / "ocean_skill/workflows/templates/final-report.yaml",
+    "model-comparison": ROOT / "ocean_skill/workflows/templates/model-comparison.yaml",
+}
+PACMED_SUITES = tuple(SUITE_FILES)
 
 
 @dataclass(frozen=True)
@@ -93,7 +96,7 @@ def localized(pacmed, isolated_catalogs, tmp_path):
     """
 
     def localize(name: str) -> Path:
-        return fx.localize_suite(SUITES / f"{name}.yaml", tmp_path, pacmed)
+        return fx.localize_suite(SUITE_FILES[name], tmp_path, pacmed)
 
     return localize
 
@@ -210,7 +213,7 @@ def test_localizing_a_suite_points_every_path_at_the_fixture(pacmed, tmp_path, n
     import yaml
 
     out = yaml.safe_load(
-        fx.localize_suite(SUITES / f"{name}.yaml", tmp_path, pacmed).read_text()
+        fx.localize_suite(SUITE_FILES[name], tmp_path, pacmed).read_text()
     )
     assert out["output_dir"].startswith(str(tmp_path))
     assert out.get("cache_dir", str(tmp_path)).startswith(str(tmp_path))
@@ -257,7 +260,7 @@ def test_localizing_fits_dates_regions_and_subchunks_to_the_fixture(pacmed, tmp_
     import yaml
 
     out = yaml.safe_load(
-        fx.localize_suite(SUITES / "final-report.yaml", tmp_path, pacmed).read_text()
+        fx.localize_suite(SUITE_FILES["final-report"], tmp_path, pacmed).read_text()
     )
     assert out["defaults"]["obs_period"]["max"] == fx.RUN_WINDOW[1]
     assert out["defaults"]["restart_days"] == pacmed.restart_days

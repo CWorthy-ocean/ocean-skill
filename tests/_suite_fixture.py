@@ -1,10 +1,11 @@
 """A small synthetic PACMED, so the real suites can be expanded *and drawn* off-line.
 
-``suites/mid-run-check.yaml``, ``final-report.yaml`` and ``model-comparison.yaml`` read
-a UCLA-ROMS run's monthly restarts, roms-tools forcing files and a dozen observational
-products. Their bugs used to be found one at a time, hours into an HPC run. This module
-builds a tiny stand-in for every input -- same layouts, same names, same units, same
-awkward corners -- plus :func:`localize_suite`, which points a suite at it. The test
+The shipped ``mid-run-check``, ``final-report`` and ``model-comparison`` suites
+(``ocean_skill/workflows/templates/``) read a UCLA-ROMS run's monthly restarts,
+roms-tools forcing files and a dozen observational products. Their bugs used to be
+found one at a time, hours into an HPC run. This module builds a tiny stand-in for
+every input -- same layouts, same names, same units, same awkward corners -- plus
+:func:`localize_suite`, which points a suite at it. The test
 (``test_suite_smoke_fixture.py``) then runs the real suite file end to end.
 
 What the stand-in reproduces (each of these was a bug that cost an HPC round trip):

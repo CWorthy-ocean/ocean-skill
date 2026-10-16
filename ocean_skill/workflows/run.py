@@ -32,8 +32,10 @@ tied to the exact data it was drawn from even after the shared reference is
 overwritten by a later run.
 
 Guardrails against finding a bug only after hours of compute (see "Guardrails" in
-``docs/suites.md``): ``smoke=N`` reads every model source of the ``refresh:`` block
-with only its first and last N steps (own output directory and results cache),
+``docs/suites.md``): ``smoke=N`` ("test mode") reads every model source of the
+``refresh:`` block with only its first and last N steps, on every ``smoke_stride``-th
+grid cell, with each page's date list cut to its first and last entry and figures drawn
+at a lower dpi (own output directory and results cache),
 ``self_check`` redraws every ``compare:`` page against itself and flags any difference,
 ``only=GLOB`` draws just the matching pages, and ``strict`` counts a layout warning as
 a problem. Whatever goes wrong -- a skipped or failed page, a self-check mismatch, a
@@ -833,6 +835,10 @@ def _page_problems(
     return found
 
 
+#: Test mode's default horizontal stride: every 4th cell of each model source, ~1/16 of
+#: the cells to read and draw (``run_suite(smoke_stride=...)``, ``--smoke-stride``).
+SMOKE_STRIDE = 4
+
 #: How many ``<base_dir>/smoke-cache/<hash>/`` folders a smoke run leaves behind (the
 #: current one plus the newest others, by last use); older ones are deleted.
 SMOKE_CACHE_KEEP = 3
@@ -888,35 +894,45 @@ def _code_identity() -> str | None:
     return "|".join(parts)
 
 
-def _smoke_pins(suite: Any, only: str | None) -> Any:
-    """Return the time steps the suite's pages name, for ``--smoke`` to keep.
+def _smoke_expand(suite: Any, only: str | None) -> list[Any] | None:
+    """Expand the suite once, as test mode will, *before* the truncation is set.
 
-    Expands the suite once *before* the truncation is set, so month windows and other
-    placeholders resolve against the whole run (expansion itself reads the time index,
-    so collecting from inside the truncation would see only the steps it is about to
-    choose).
-    Output and warnings of this throwaway pass are dropped -- the real expansion repeats
-    them. A suite that will not expand here keeps only its first and last steps.
+    Month windows and other placeholders then resolve against the whole run (expansion
+    itself reads the time index, so expanding from inside the truncation would see only
+    the steps it is about to choose). The date lists are already thinned
+    (``thin_dates``), so the steps pinned from these pages are only the ones the real
+    expansion will ask for. Output and warnings of this throwaway pass are dropped --
+    the real expansion repeats them. ``None`` for a suite that will not expand here.
     """
     import io
 
-    from ocean_skill import sources as _sources
     from ocean_skill.workflows import pages as _pages
 
     try:
         with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
             warnings.simplefilter("ignore")
-            expanded = _pages.expand(suite)
+            expanded = _pages.expand(suite, thin_dates=True)
     except Exception as exc:  # noqa: BLE001 -- any failure only costs the pins
         warnings.warn(
             f"smoke: could not collect the time steps the pages name "
             f"({type(exc).__name__}: {exc}); keeping only the first and last steps",
             stacklevel=2,
         )
-        return _sources.TimePins()
-    if only is not None:
-        expanded = _select_pages(expanded, only)
-    return _pages.time_pins(expanded)
+        return None
+    return _select_pages(expanded, only) if only is not None else expanded
+
+
+def _smoke_pins(suite: Any, only: str | None) -> Any:
+    """Return the time steps the suite's pages name, for ``--smoke`` to keep.
+
+    Taken from the thinned throwaway expansion of :func:`_smoke_expand`; a suite that
+    will not expand keeps only its first and last steps.
+    """
+    from ocean_skill import sources as _sources
+    from ocean_skill.workflows import pages as _pages
+
+    expanded = _smoke_expand(suite, only)
+    return _sources.TimePins() if expanded is None else _pages.time_pins(expanded)
 
 
 def _smoke_stamps(
@@ -1016,19 +1032,26 @@ def _smoke_data_stamps(refresh: Any) -> list[Any]:
 def _smoke_cache_key(
     stamps: list[tuple[str, int, str, str, int, str]],
     data: list[Any] | None = None,
+    stride: int = 1,
 ) -> tuple[str, str | None]:
     """Return the smoke-cache folder name and the code identity it was built from.
 
     A short hash of the truncation (``stamps``), the data on disk behind it (``data``,
-    :func:`_smoke_data_stamps`) and the code (:func:`_code_identity`). With no code
-    identity the name carries a fresh nonce, so it is never found again.
+    :func:`_smoke_data_stamps`), the horizontal ``stride`` (the stamps name only the
+    time steps, and a result on every 4th cell is not one on every 2nd) and the code
+    (:func:`_code_identity`). A stride of 1 adds nothing to the hash, so a run that does
+    not stride finds the folder it always did. With no code identity the name carries a
+    fresh nonce, so it is never found again.
     """
     import hashlib
     import uuid
 
     identity = _code_identity()
     nonce = None if identity else uuid.uuid4().hex
-    payload = json.dumps([stamps, data or [], identity or nonce])
+    parts = [stamps, data or [], identity or nonce]
+    if stride != 1:
+        parts.append({"stride": stride})
+    payload = json.dumps(parts)
     return hashlib.sha256(payload.encode()).hexdigest()[:12], identity
 
 
@@ -1083,6 +1106,7 @@ def run_suite(
     list_only: bool = False,
     refresh: bool = True,
     smoke: int | None = None,
+    smoke_stride: int = SMOKE_STRIDE,
     self_check: bool = False,
     only: str | None = None,
     strict: bool = False,
@@ -1116,6 +1140,19 @@ def run_suite(
         code version
         (:func:`_code_identity`), so an identical run reuses it and any change starts
         cold; old folders are pruned (:data:`SMOKE_CACHE_KEEP`).
+
+        This is "test mode", and it cuts three more things so a suite's bugs show up in
+        minutes, not as long as the real run: each compare page's ``times:`` list and
+        each ``for_each: {month: ...}`` fan keep only their first and last entry
+        (``thin_dates``; the pins are collected after that, so fewer steps are kept);
+        every truncated model source is read on every ``smoke_stride``-th horizontal
+        cell (:func:`ocean_skill.sources.truncate_time`); and figures are saved at no
+        more than :data:`~ocean_skill.workflows.report.SMOKE_DPI` dpi. The strided
+        values are physically inconsistent (staggering, cell areas) -- it is a test of
+        the code paths, not of the numbers. The stride is part of the smoke-cache hash.
+    ``smoke_stride``
+        The horizontal stride of test mode (default :data:`SMOKE_STRIDE`; 1 leaves the
+        grid whole). Ignored without ``smoke``.
     ``self_check``
         Every ``compare:`` page is redrawn with the reference replaced by the test
         source (:func:`ocean_skill.workflows.pages.self_check_page`) and any bias, error
@@ -1142,6 +1179,8 @@ def run_suite(
 
     if smoke is not None and smoke < 1:
         raise ValueError(f"smoke: need at least 1 time step, got {smoke}")
+    if smoke is not None and smoke_stride < 1:
+        raise ValueError(f"smoke: stride must be at least 1, got {smoke_stride}")
 
     # Only the options that are set. A run that is not the whole suite as written must
     # not replace the real report, so these also name its directory (``mode_tag``).
@@ -1212,6 +1251,7 @@ def run_suite(
         if smoke is not None:
             from ocean_skill import cache as _smoke_cache
             from ocean_skill import sources as _sources
+            from ocean_skill.workflows.report import SMOKE_DPI
 
             test = suite.defaults.get("test")
             smoke_sources = (
@@ -1225,23 +1265,40 @@ def run_suite(
                     "refresh.sources or set defaults.test"
                 )
             modes["smoke_sources"] = smoke_sources
+            modes["smoke_stride"] = smoke_stride
             # the other sources are cut to end where the test source does, so a
             # reference run that continues past the suite's window stays inside it
             anchor = test if isinstance(test, str) else smoke_sources[0]
-            # plus the steps the pages name (collected before the cut, see _smoke_pins)
-            pins = _smoke_pins(suite, only)
+            # plus the steps the pages name, once their date lists are thinned
+            # (collected before the cut, see _smoke_expand)
+            throwaway = _smoke_expand(suite, only)
+            pins = (
+                _sources.TimePins()
+                if throwaway is None
+                else _pages.time_pins(throwaway)
+            )
+            n_thinned = sum(1 for p in throwaway or () if p.thinned)
             modes["smoke_pins"] = {
                 "instants": len(pins.instants),
                 "windows": len(pins.windows),
             }
+            modes["smoke_thinned_pages"] = n_thinned
             stack.enter_context(
-                _sources.truncate_time(smoke_sources, smoke, anchor=anchor, pins=pins)
+                _sources.truncate_time(
+                    smoke_sources,
+                    smoke,
+                    anchor=anchor,
+                    pins=pins,
+                    stride=smoke_stride,
+                )
             )
             # Its keys know neither N nor how far the model has grown, so the cache is
             # named for the truncation (what it keeps) and the code, and a change to
             # either starts a new, cold one.
             stamps = _smoke_stamps(smoke_sources, smoke)
-            key, identity = _smoke_cache_key(stamps, _smoke_data_stamps(suite.refresh))
+            key, identity = _smoke_cache_key(
+                stamps, _smoke_data_stamps(suite.refresh), smoke_stride
+            )
             smoke_dir = stack.enter_context(_smoke_cache.scoped(f"smoke-cache/{key}"))
             reused = smoke_dir.is_dir()
             if not list_only:
@@ -1252,11 +1309,15 @@ def run_suite(
             modes["smoke_cache_key"] = key
             modes["smoke_cache_reused"] = reused
             kept = ", ".join(f"{st[0]} {st[4]} step(s)" for st in stamps)
+            grid = "whole grid" if smoke_stride == 1 else f"every {smoke_stride}th cell"
             print(
                 f"smoke: reading the first and last {smoke} time step(s) of "
                 f"{smoke_sources}, plus the steps the pages pin "
                 f"({len(pins.instants)} instant(s), {len(pins.windows)} short "
-                f"window(s)); kept {kept}; results cached in {smoke_dir}"
+                f"window(s)); kept {kept}; test mode: model grid {grid} "
+                f"(stride {smoke_stride}), date lists cut to first and last on "
+                f"{n_thinned} page(s), figures at most {SMOKE_DPI} dpi; "
+                f"results cached in {smoke_dir}"
             )
             print(f"smoke cache: {smoke_dir} ({'reused' if reused else 'new'})")
             if identity is None:
@@ -1265,7 +1326,7 @@ def run_suite(
                     "run starts cold"
                 )
 
-        expanded = _pages.expand(suite)
+        expanded = _pages.expand(suite, thin_dates=smoke is not None)
         if only is not None:
             expanded = _select_pages(expanded, only)
         if self_check:
@@ -1320,7 +1381,10 @@ def run_suite(
                     chain += " + contours"
                 if p.draw not in (None, "plot"):
                     chain += f" + draw: {p.draw}"
-                print(f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){chain}")
+                thinned = f"  ({p.thinned})" if p.thinned else ""
+                print(
+                    f"{i:2d}. [{p.kind:7s}] {p.title}  ({cache_note}){thinned}{chain}"
+                )
                 if p.problem:
                     print(f"      will be skipped: {p.problem}")
             return SuiteResult(pages=expanded)
@@ -1386,9 +1450,14 @@ def run_suite(
         # where the records since the last ``section:`` divider begin
         section_start = 0
 
-        from ocean_skill.workflows.report import PdfReport
+        from ocean_skill.workflows.report import PDF_DPI, PNG_DPI, SMOKE_DPI, PdfReport
 
-        with PdfReport(pdf_path, report_dir / "figures") as report:
+        # test mode caps the figures' resolution: drawing, saving and the PDF's
+        # rasterized maps all scale with it
+        dpi = {"png_dpi": PNG_DPI, "pdf_dpi": PDF_DPI}
+        if smoke is not None:
+            dpi = {k: min(v, SMOKE_DPI) for k, v in dpi.items()}
+        with PdfReport(pdf_path, report_dir / "figures", **dpi) as report:
             if suite.cover and pdf_path is not None and info is not None:
                 try:
                     report.cover(cover.cover_figures(info))
@@ -1406,7 +1475,8 @@ def run_suite(
                     report.section(i, page.title, page.kwargs["text"])
                     section_start = len(pooled_records)
                     continue
-                print(f"== page {i}/{n}: {page.title} ==")
+                note = f" ({page.thinned})" if page.thinned else ""
+                print(f"== page {i}/{n}: {page.title}{note} ==")
                 if page.problem:
                     # found while expanding (its source could not be read), so not
                     # tried again here: that read can itself be the slow part
@@ -1565,10 +1635,10 @@ def run_suite(
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
-    ``ocean-skill-run suite.yaml [--list] [--no-refresh] [--smoke [N]] [--self-check]
-    [--only GLOB] [--strict]``. Put ``--smoke``'s count right after it
-    (``--smoke 3``, or ``--smoke=3``), and the suite path before it, or the path is
-    taken as the count.
+    ``ocean-skill-run suite.yaml [--list] [--no-refresh] [--smoke [N]]
+    [--smoke-stride K] [--self-check] [--only GLOB] [--strict]``. Put ``--smoke``'s
+    count right after it (``--smoke 3``, or ``--smoke=3``), and the suite path before
+    it, or the path is taken as the count.
     """
     import matplotlib
 
@@ -1596,8 +1666,19 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         type=int,
         metavar="N",
-        help="read only the first and last N (default 2) time steps of the suite's "
-        "model sources; report in <name>-smoke/, results in a separate smoke-cache",
+        help="test mode: read only the first and last N (default 2) time steps of the "
+        "suite's model sources, on every Kth cell (--smoke-stride), with date lists "
+        "cut to first and last and figures at low dpi; report in <name>-smoke/, "
+        "results in a separate smoke-cache",
+    )
+    parser.add_argument(
+        "--smoke-stride",
+        type=int,
+        default=SMOKE_STRIDE,
+        metavar="K",
+        help=f"with --smoke, read every Kth cell of the model grid (default "
+        f"{SMOKE_STRIDE}; 1 keeps the whole grid): values are then physically "
+        "inconsistent, which is fine for a test of the code paths",
     )
     parser.add_argument(
         "--self-check",
@@ -1628,6 +1709,7 @@ def main(argv: list[str] | None = None) -> int:
             list_only=args.list,
             refresh=not args.no_refresh,
             smoke=args.smoke,
+            smoke_stride=args.smoke_stride,
             self_check=args.self_check,
             only=args.only,
             strict=args.strict,

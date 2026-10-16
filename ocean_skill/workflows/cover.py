@@ -25,7 +25,13 @@ from ocean_skill.config import SuiteConfig
 from ocean_skill.plot.typography import PAGE_H, PAGE_W, STEP, reference_scale
 from ocean_skill.workflows.report import _wrap_lines
 
-__all__ = ["RunInfo", "cover_figures", "gather"]
+__all__ = [
+    "RunInfo",
+    "cover_figures",
+    "find_workplan",
+    "gather",
+    "newest_blueprint",
+]
 
 #: Page geometry, in figure fractions: text starts at ``MARGIN_X`` and a value column
 #: begins at ``VALUE_X`` (labels sit between), and a page ends at ``BOTTOM`` -- the next
@@ -118,7 +124,7 @@ def _run_dir(suite: SuiteConfig) -> Path | None:
     return None
 
 
-def _newest_blueprint(run_dir: Path) -> Path | None:
+def newest_blueprint(run_dir: Path) -> Path | None:
     """Find the newest ``work/*.yaml`` that looks like a (resolved) blueprint."""
     files = [
         p for p in (run_dir / "work").glob("*.yaml") if p.name != "directives.yaml"
@@ -149,7 +155,7 @@ def _step_for(workplan: dict, run_dir: Path | None) -> dict:
     return steps[0] if len(steps) == 1 else {}
 
 
-def _find_workplan(run_dir: Path) -> Path | None:
+def find_workplan(run_dir: Path) -> Path | None:
     """Find the one workplan beside ``tasks/`` with a step running in ``run_dir``."""
     hits = []
     for path in sorted(run_dir.parent.parent.glob("*.yaml")):
@@ -314,9 +320,9 @@ def gather(
     if not (bp_path and wp_path):
         run_dir = _run_dir(suite)
         if run_dir is not None:
-            if not bp_path and (found := _newest_blueprint(run_dir)):
+            if not bp_path and (found := newest_blueprint(run_dir)):
                 bp_path, bp = found, _load(found)
-            if not wp_path and (found := _find_workplan(run_dir)):
+            if not wp_path and (found := find_workplan(run_dir)):
                 wp_path, wp = found, _load(found)
     bp = bp or {}
     wp = wp or {}

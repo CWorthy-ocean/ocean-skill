@@ -467,12 +467,51 @@ def _lacks_time_axis(source: str) -> bool:
 # -- for_each expansion -------------------------------------------------------------
 
 
-def _months_in(index: Any, spec: Any) -> list[tuple[int, int]]:
+def _thin(values: list[Any]) -> list[Any]:
+    """Return the first and last of ``values`` (all of them when two or fewer).
+
+    Test mode (``ocean-skill-run --smoke``) keeps the ends of a date list: the first and
+    last dates exercise every code path the middle ones do, at a fraction of the reads.
+    """
+    return [values[0], values[-1]] if len(values) > 2 else list(values)
+
+
+#: ``min_pairs`` a compare page gets in test mode unless it sets its own. A test run
+#: keeps only the first and last few steps, so a window that holds fewer than the real
+#: default's valid pairs (``comparison.DEFAULT_MIN_PAIRS``) would mask every cell of a
+#: per-cell skill map and read as NaN lanes; the threshold is what the data can reach,
+#: not part of what the page exercises.
+TEST_MIN_PAIRS = 1
+
+
+def _thin_times(kwargs: dict[str, Any]) -> str | None:
+    """Cut a compare page's ``times:`` list to its first and last date, in place.
+
+    Returns the note for :attr:`ExpandedPage.thinned` (``"2 of 16 dates"``), or ``None``
+    when nothing was cut: no ``times:``, a resample/bins mapping (it bins whatever is
+    kept) or a list of two or fewer. The list is replaced, never edited -- it may be the
+    suite's own ``defaults`` list, shared by other pages.
+    """
+    times = kwargs.get("times")
+    if not isinstance(times, list) or len(times) <= 2:
+        return None
+    kwargs["times"] = _thin(times)
+    return f"{len(kwargs['times'])} of {len(times)} dates"
+
+
+def _months_in(index: Any, spec: Any, *, thin: bool = False) -> list[tuple[int, int]]:
     """Every ``(year, month)`` on ``index``, or a suffix of it.
 
     ``spec="run"`` -> every calendar month the axis touches, oldest first.
     ``spec={"run": {"last": N}}`` -> just the last ``N`` of those.
+    ``thin`` keeps only the first and last of whichever months that gives (test mode).
     """
+    months = _months_in_all(index, spec)
+    return _thin(months) if thin else months
+
+
+def _months_in_all(index: Any, spec: Any) -> list[tuple[int, int]]:
+    """:func:`_months_in` without thinning."""
     months = sorted({(int(t.year), int(t.month)) for t in index})
     if spec == "run":
         return months
@@ -498,17 +537,21 @@ def _for_each_values(
     defaults: dict[str, Any],
     test_index: Any,
     index_error: Exception | None = None,
+    thin_months: bool = False,
 ) -> list[Any]:
     """Return the concrete list of raw values one ``for_each`` name iterates over.
 
     ``index_error`` is why ``test_index`` is missing (a source with no time axis, or
     one that could not be read): raised only when ``month: run`` needs the index, so
-    every other ``for_each`` name still expands.
+    every other ``for_each`` name still expands. ``thin_months`` keeps only the first
+    and last month of a ``month`` fan (test mode); every other name stays complete.
     """
     if name == "month":
         if index_error is not None:
             raise index_error
-        return [_MonthNS(y, m) for y, m in _months_in(test_index, spec)]
+        return [
+            _MonthNS(y, m) for y, m in _months_in(test_index, spec, thin=thin_months)
+        ]
     if isinstance(spec, str):
         m = _EXACT_PLACEHOLDER_RE.match(spec)
         if m:
@@ -534,6 +577,7 @@ def _expand_for_each(
     defaults: dict[str, Any],
     test_index: Any,
     index_error: Exception | None = None,
+    thin_months: bool = False,
 ) -> list[dict[str, Any]]:
     """One namespace dict per combination, in YAML key order then product order."""
     if not for_each:
@@ -552,6 +596,7 @@ def _expand_for_each(
             defaults=defaults,
             test_index=test_index,
             index_error=index_error,
+            thin_months=thin_months,
         )
         for name in names
     ]
@@ -930,6 +975,10 @@ class ExpandedPage:
     #: cached) so the run can list it and skip it with this reason. Part of
     #: ``as_dict()`` only when set, so every other page's dict is unchanged.
     problem: str | None = None
+    #: What test mode (``ocean-skill-run --smoke``) cut from this page's dates, as text
+    #: for the page list (``"test: 2 of 16 dates"``); ``None`` for a page left whole.
+    #: Not part of ``as_dict()``.
+    thinned: str | None = None
     status: str = "pending"
     reason: str | None = None
     elapsed: float | None = None
@@ -1489,7 +1538,7 @@ def _contour_overrides(
     return merged
 
 
-def expand(suite: Any) -> list[ExpandedPage]:
+def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
     """Turn ``suite.pages`` into a flat, fully-resolved list of :class:`ExpandedPage`.
 
     ``suite`` is a :class:`~ocean_skill.config.SuiteConfig`. Reads the test
@@ -1504,6 +1553,14 @@ def expand(suite: Any) -> list[ExpandedPage]:
     time axis (a monthly climatology) is static -- its pages get no window and are
     cacheable -- and one that cannot be read at all leaves its pages unwindowed with
     :attr:`ExpandedPage.problem` set, for the run to list and skip.
+
+    ``thin_dates=True`` is test mode (``ocean-skill-run --smoke``): a compare page's
+    ``times:`` list and a ``for_each: {month: ...}`` fan keep only their first and last
+    entry, and each page so cut says so in :attr:`ExpandedPage.thinned`. Variables,
+    depths and every other fan stay complete -- they exercise different code. A compare
+    page that sets no ``min_pairs`` gets :data:`TEST_MIN_PAIRS`, since the few steps
+    kept cannot reach the real default. Left off (the default), the pages are exactly
+    what the suite says.
     """
     from ocean_skill import extrema
     from ocean_skill.comparison import _ANY_VERTICAL_KEYS
@@ -1587,6 +1644,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         f"of {page_source!r}, but it has none (a climatology has no "
                         "run to take months from) -- list the months explicitly"
                     )
+        month_note = None
         try:
             combos = _expand_for_each(
                 page.title,
@@ -1594,7 +1652,13 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 defaults=defaults,
                 test_index=test_index,
                 index_error=index_error,
+                thin_months=thin_dates,
             )
+            if thin_dates and "month" in (page.for_each or {}):
+                n_months = len(_months_in_all(test_index, page.for_each["month"]))
+                kept = len({str(c["month"]) for c in combos})
+                if kept < n_months:
+                    month_note = f"{kept} of {n_months} months"
         except _SourceUnreadable as exc:
             # ``month: run`` is the only thing that reads the index, and without it
             # there are no combinations to name: one placeholder carries the reason.
@@ -1613,6 +1677,7 @@ def expand(suite: Any) -> list[ExpandedPage]:
         plot_defaults = defaults.get("plot", {})
 
         for combo in combos:
+            date_note = None
             namespace = {
                 **defaults,
                 **{k: _Item(v) if isinstance(v, dict) else v for k, v in combo.items()},
@@ -1725,6 +1790,9 @@ def expand(suite: Any) -> list[ExpandedPage]:
             elif page.kind == "compare":
                 # See the field branch above for why this is deep-copied.
                 raw = _template_value(dict(page.compare), namespace, title=title)
+                if thin_dates:
+                    date_note = _thin_times(raw)
+                    raw.setdefault("min_pairs", TEST_MIN_PAIRS)
                 kwargs, cacheable, problem = _resolve_compare_kwargs(
                     copy.deepcopy(raw),
                     title=title,
@@ -1743,13 +1811,14 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 )
                 if isinstance(contours, dict):
                     # Same treatment as the page (see the field branch above).
+                    overrides = _contour_overrides(
+                        contours, raw, kind="compare", title=title
+                    )
+                    if thin_dates:
+                        _thin_times(overrides)  # the lines pair with the fill's bins
                     contours, contour_cacheable, contour_problem = (
                         _resolve_compare_kwargs(
-                            copy.deepcopy(
-                                _contour_overrides(
-                                    contours, raw, kind="compare", title=title
-                                )
-                            ),
+                            copy.deepcopy(overrides),
                             title=title,
                             test_source=test_source,
                             get_index=get_index,
@@ -1807,7 +1876,14 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 )
             out[-1].caption = caption
             out[-1].default_plot = default_plot
+            out[-1].thinned = _thinned_note(date_note, month_note)
     return out
+
+
+def _thinned_note(*notes: str | None) -> str | None:
+    """``"test: ..."`` text for the notes that apply to a page, or ``None`` for none."""
+    parts = [n for n in notes if n]
+    return f"test: {', '.join(parts)}" if parts else None
 
 
 def time_pins(pages: list[ExpandedPage]) -> Any:

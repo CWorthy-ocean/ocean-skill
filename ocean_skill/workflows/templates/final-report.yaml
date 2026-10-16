@@ -9,8 +9,8 @@
 # standard deviation (ddof 1) across the twelve monthly means.
 #
 # Run it:
-#     ocean-skill-run suites/final-report.yaml --list   # check the page list first
-#     ocean-skill-run suites/final-report.yaml
+#     ocean-skill-run final-report.yaml --list   # check the page list first
+#     ocean-skill-run final-report.yaml
 # Note that --list also runs refresh:, which rebuilds the kerchunk reference and the model
 # catalog before it expands the pages.
 #
@@ -43,10 +43,14 @@
 #   Fig. 24     CO2/N2O fluxes: no flux output.
 #   Fig. 20     NPP: not in restart files (chlorophyll is drawn).
 #
-# Lines to edit for your own run: refresh: (output and grid paths), defaults.test (must
-# match a name under refresh.sources), defaults.obs_period (the run's dates), output_dir,
-# cache_dir, catalog_search_paths.
+# This file is the shipped `final-report` suite, the one copy `ocean-skill-suite new`
+# starts from. Copied by hand it runs as the suite for the PACMED run it was written
+# for; `ocean-skill-suite new` rewrites the block between the "setup" markers below for
+# your run (names, paths, dates, forcing files) and keeps everything else as it is.
+# By hand, edit that block: mainly refresh: (output and grid paths), defaults.test, the
+# dates, output_dir, cache_dir and catalog_search_paths.
 
+# >>> setup: written by ocean-skill-suite new
 name: final-report
 output_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
 cache_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
@@ -79,13 +83,6 @@ refresh:
 # stays a dict).
 defaults:
   test: pacmed_pyesper
-  # Every page's plot: options start from these (a page's own plot: wins). Robust color
-  # limits clip each panel to its central 80%, so river mouths and coastal extremes don't
-  # wash out the open ocean; difference panels follow the same rule.
-  plot: {robust: true}
-  woa_depths: [surface, 200]
-  # 1 m is all-NaN against WOA's 0 m cell, so the sections start at 5 m.
-  section_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
   # The run's dates, for references that have dates (DUACS, chlorophyll). Edit with the run.
   obs_period: {min: "2011-01-01", max: "2013-12-31"}
   # The restart dates, for the satellite chlorophyll page: the model's month-end
@@ -96,6 +93,15 @@ defaults:
                  "2012-07-31", "2012-08-31", "2012-09-30", "2012-10-31", "2012-11-30", "2012-12-31",
                  "2013-01-31", "2013-02-28", "2013-03-31", "2013-04-30", "2013-05-31", "2013-06-30",
                  "2013-07-31", "2013-08-31", "2013-09-30", "2013-10-31", "2013-11-30", "2013-12-31"]
+# <<< setup
+  # (the rest of defaults: is the same for every run)
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80%, so river mouths and coastal extremes don't
+  # wash out the open ocean; difference panels follow the same rule.
+  plot: {robust: true}
+  woa_depths: [surface, 200]
+  # 1 m is all-NaN against WOA's 0 m cell, so the sections start at 5 m.
+  section_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
   # The three sections of Figs. 8, 18, 19, stacked as the rows of one figure per variable
   # (a page's selects:). Each entry is laid over the page's own select: (the depths) and
   # carries its own aggregate: the equator is a transect, so only time is averaged; the

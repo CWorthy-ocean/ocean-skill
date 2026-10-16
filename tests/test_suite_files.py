@@ -1,8 +1,9 @@
-"""Every suite YAML shipped under ``suites/`` still loads and expands.
+"""Every suite YAML shipped in the repository still loads and expands.
 
 A suite is data, and nothing else exercises the real files: the other workflow tests
-build their suites inline. This parametrizes over ``suites/*.yaml`` (found from this
-file's own location, so it works from any working directory) and, for each, does
+build their suites inline. This parametrizes over ``suites/*.yaml`` and the three
+shipped suites under ``ocean_skill/workflows/templates/`` (found from this file's own
+location, so it works from any working directory) and, for each, does
 exactly what :func:`ocean_skill.workflows.run.run_suite` does before it touches any
 data -- ``yaml.safe_load`` then ``SuiteConfig.model_validate`` (schema errors, e.g. a
 ``section:`` carrying a ``plot:``, surface here) -- followed by
@@ -29,8 +30,10 @@ import yaml
 from ocean_skill.config import SuiteConfig
 from ocean_skill.workflows import pages as P
 
-SUITES_DIR = Path(__file__).resolve().parents[1] / "suites"
-SUITE_FILES = sorted(SUITES_DIR.glob("*.yaml"))
+ROOT = Path(__file__).resolve().parents[1]
+SUITES_DIR = ROOT / "suites"
+TEMPLATES_DIR = ROOT / "ocean_skill/workflows/templates"
+SUITE_FILES = sorted([*SUITES_DIR.glob("*.yaml"), *TEMPLATES_DIR.glob("*.yaml")])
 
 #: Four month-end restart snapshots, standing in for any suite's test source.
 RESTART_INDEX = pd.DatetimeIndex(
@@ -59,7 +62,12 @@ def _expand(path: Path) -> tuple[SuiteConfig, list[P.ExpandedPage]]:
 
 def test_suites_directory_is_found():
     # Guards the parametrization below: an empty glob would pass vacuously.
-    assert SUITE_FILES, f"no suites/*.yaml found under {SUITES_DIR}"
+    assert SUITE_FILES, f"no suite YAML found under {SUITES_DIR} or {TEMPLATES_DIR}"
+    assert {p.name for p in TEMPLATES_DIR.glob("*.yaml")} == {
+        "mid-run-check.yaml",
+        "final-report.yaml",
+        "model-comparison.yaml",
+    }
 
 
 #: Shipped suites that do not expand at HEAD, and why. ``strict`` xfail, so the moment

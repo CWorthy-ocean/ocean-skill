@@ -643,8 +643,8 @@ def test_a_failed_page_is_a_problem_with_its_time_and_memory(tmp_path, monkeypat
 def test_an_expand_time_problem_page_is_listed_as_skipped(tmp_path, monkeypatch):
     real = _pages.expand
 
-    def expand(suite):
-        pages = real(suite)
+    def expand(suite, **kwargs):
+        pages = real(suite, **kwargs)
         pages[1].problem = "source 'x' could not be read at expand time"
         return pages
 

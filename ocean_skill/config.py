@@ -8,8 +8,8 @@ optional live-run refresh step. :mod:`ocean_skill.workflows.pages` expands a
 :class:`SuiteConfig` into a flat list of fully-resolved page dicts (``for_each``
 fanned out, ``{placeholder}``\ s filled in, ``time: latest``/``month: run`` resolved
 to literal values); :mod:`ocean_skill.workflows.run` draws each one and assembles a
-report directory. See ``docs/suites.md`` for the full grammar and ``suites/*.yaml``
-for worked examples.
+report directory. See ``docs/suites.md`` for the full grammar and ``suites/*.yaml`` and
+``ocean_skill/workflows/templates/*.yaml`` for worked examples.
 """
 
 from __future__ import annotations

@@ -1,8 +1,7 @@
 """``read()`` under ``truncate_time`` cuts each source once, not once per call.
 
-Cutting a large dask-backed model (``isel`` with an integer list, plus reading the
-anchor source) costs seconds, and a page reads the same source dozens of times, so the
-cut result is memoized beside the read memo (``sources._TRUNCATED_CACHE``).
+The cut result is memoized beside the read memo (``sources._TRUNCATED_CACHE``) because a
+page reads the same source dozens of times and a cut of a large model costs seconds.
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ import pytest
 import xarray as xr
 
 import ocean_skill as osk
+from ocean_skill import cache
 from ocean_skill import sources as _sources
 
 
@@ -27,11 +27,7 @@ def _model(n=10):
 
 @pytest.fixture
 def memo_sources(monkeypatch, tmp_path):
-    """Stub sources ``m`` (10 daily steps) and ``anchor`` with a real catalog file.
-
-    The read memo only stores a source whose catalog file can be stat'd, so the ref
-    points at a real path; ``_read_uncached`` counts how often it is reopened.
-    """
+    """Stub sources with a real catalog file (the read memo stats it); count reopens."""
     path = tmp_path / "c.yaml"
     path.write_text("x")
     monkeypatch.setattr(
@@ -62,12 +58,9 @@ def test_a_second_read_does_not_cut_again(memo_sources, monkeypatch):
         _sources, "_truncated", lambda ref, obj: cuts.append(ref.name) or real(ref, obj)
     )
     with _sources.truncate_time(["m"], 2):
-        first = osk.read("m")
-        second = osk.read("m")
-        third = osk.read("m")
-    assert cuts == ["m"]
-    assert memo_sources == ["m"]
-    assert _days(first) == _days(second) == _days(third) == [1, 2, 9, 10]
+        reads = [osk.read("m") for _ in range(3)]
+    assert cuts == ["m"] and memo_sources == ["m"]
+    assert all(_days(r) == [1, 2, 9, 10] for r in reads)
 
 
 def test_the_anchor_is_consulted_once(memo_sources, monkeypatch):
@@ -82,17 +75,14 @@ def test_the_anchor_is_consulted_once(memo_sources, monkeypatch):
     assert ends == ["anchor"]
 
 
-def test_a_different_truncation_gets_its_own_cut(memo_sources):
+def test_nested_truncations_get_their_own_cut_and_the_memo_clears_on_exit(
+    memo_sources,
+):
     with _sources.truncate_time(["m"], 1):
         assert _days(osk.read("m")) == [1, 10]
         with _sources.truncate_time(["m"], 3):
             assert _days(osk.read("m")) == [1, 2, 3, 8, 9, 10]
         assert _days(osk.read("m")) == [1, 10]
-
-
-def test_leaving_truncate_time_empties_the_cut_memo(memo_sources):
-    with _sources.truncate_time(["m"], 2):
-        osk.read("m")
         assert _sources._TRUNCATED_CACHE
     assert not _sources._TRUNCATED_CACHE
     assert osk.read("m").sizes["time"] == 10
@@ -101,7 +91,6 @@ def test_leaving_truncate_time_empties_the_cut_memo(memo_sources):
 def test_cache_clear_empties_the_cut_memo(memo_sources):
     with _sources.truncate_time(["m"], 2):
         osk.read("m")
-        assert _sources._TRUNCATED_CACHE
         osk.read.cache_clear()
         assert not _sources._TRUNCATED_CACHE
         assert _days(osk.read("m")) == [1, 2, 9, 10]
@@ -114,43 +103,38 @@ def test_cut_results_are_independent_shallow_copies(memo_sources):
         a.attrs["mine"] = 1
         a.coords["extra"] = ("time", np.arange(a.sizes["time"]))
         b = osk.read("m")
-    assert "mine" not in b.attrs
-    assert "extra" not in b.coords
-    assert a is not b
+    assert "mine" not in b.attrs and "extra" not in b.coords and a is not b
 
 
-def test_a_disabled_memo_still_truncates_without_storing(memo_sources):
-    from ocean_skill import cache
-
-    cache.disable()
-    try:
-        with _sources.truncate_time(["m"], 2):
-            assert _days(osk.read("m")) == [1, 2, 9, 10]
-            assert not _sources._TRUNCATED_CACHE
-    finally:
-        cache.enable()
-
-
-def test_an_unnamed_source_is_not_memoized_as_cut(memo_sources):
+def test_a_disabled_memo_and_an_unnamed_source_are_not_stored(memo_sources):
     with _sources.truncate_time(["m"], 2):
-        assert osk.read("other").sizes["time"] == 10
+        assert osk.read("other").sizes["time"] == 10  # not named: uncut
         assert not _sources._TRUNCATED_CACHE
+        cache.disable()
+        try:
+            assert _days(osk.read("m")) == [1, 2, 9, 10]  # still cut
+            assert not _sources._TRUNCATED_CACHE
+        finally:
+            cache.enable()
 
 
 @pytest.mark.parametrize(
     ("positions", "expected"),
     [
-        ([3, 4, 5], slice(3, 6)),
-        ([0], slice(0, 1)),
-        ([0, 1, 8, 9], [0, 1, 8, 9]),
+        ([3, 4, 5], [slice(3, 6)]),
+        ([0, 1, 8, 9], [slice(0, 2), slice(8, 10)]),
+        ([2, 5, 6, 9], [slice(2, 3), slice(5, 7), slice(9, 10)]),
         ([], []),
     ],
 )
-def test_contiguous_positions_become_a_slice(positions, expected):
+def test_contiguous_runs_become_slices(positions, expected):
     assert _sources._as_slices(positions) == expected
 
 
-def test_a_contiguous_cut_is_selected_with_a_slice(memo_sources, monkeypatch):
+@pytest.mark.parametrize("keep", [5, 2])  # first/last N of 10: all, or two runs
+def test_the_cut_is_selected_with_slices_never_an_integer_list(
+    memo_sources, monkeypatch, keep
+):
     seen = []
     real = xr.Dataset.isel
 
@@ -159,6 +143,8 @@ def test_a_contiguous_cut_is_selected_with_a_slice(memo_sources, monkeypatch):
         return real(self, indexers, **kw)
 
     monkeypatch.setattr(xr.Dataset, "isel", spy)
-    with _sources.truncate_time(["m"], 5):  # first and last 5 of 10: all of it
-        assert _days(osk.read("m")) == list(range(1, 11))
-    assert seen == [{"time": slice(0, 10)}]
+    with _sources.truncate_time(["m"], keep):
+        assert len(_days(osk.read("m"))) == min(2 * keep, 10)
+    assert seen and all(isinstance(v, slice) for ix in seen if ix for v in ix.values())
+    if keep == 5:
+        assert seen == [{"time": slice(0, 10)}]
