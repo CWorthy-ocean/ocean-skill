@@ -39,17 +39,32 @@ __all__ = ["TimePins", "erddap_constraints", "read", "truncate_time"]
 _READ_CACHE: OrderedDict[tuple, Any] = OrderedDict()
 _READ_CACHE_MAXSIZE = 8
 
-#: Entry name -> ``(steps, anchor, pins)``: how many time steps :func:`read` keeps at
-#: each end of it, the source whose last time bounds them (or ``None``), and the
-#: :class:`TimePins` of further steps to keep. Set only inside :func:`truncate_time`
-#: (``ocean-skill-run --smoke``). Applied to every result *after* the memo above, never
-#: before it: the memo and the on-disk cache keys know nothing about it, so what they
-#: hold must stay the full record.
-_TRUNCATE: dict[str, tuple[int, str | None, TimePins]] = {}
+#: Entry name -> ``(steps, anchor, pins, stride)``: how many time steps :func:`read`
+#: keeps at each end of it, the source whose last time bounds them (or ``None``), the
+#: :class:`TimePins` of further steps to keep, and the horizontal stride (1 = whole
+#: grid). Set only inside :func:`truncate_time` (``ocean-skill-run --smoke``). Applied
+#: to every result *after* the memo above, never before it: the memo and the on-disk
+#: cache keys know nothing about it, so what they hold must stay the full record.
+_TRUNCATE: dict[str, tuple[int, str | None, TimePins, int]] = {}
+
+#: The staggered horizontal dims of a ROMS grid and the rho dim each sits between:
+#: a staggered dim is one shorter than its rho dim (``len(xi_u) == len(xi_rho) - 1``),
+#: which the velocity code (``roms._average_to_rho``) relies on. Used by
+#: :func:`_strided`.
+_STAGGERED = {
+    "xi_u": "xi_rho",
+    "xi_psi": "xi_rho",
+    "eta_v": "eta_rho",
+    "eta_psi": "eta_rho",
+}
+
+#: The fewest cells a strided horizontal dim may be left with; below it a transect,
+#: a boundary strip or a regridding has nothing to work on.
+_STRIDE_MIN_CELLS = 3
 
 #: In-process memo of the *truncated* result of :func:`read`, keyed on the read memo's
-#: key plus the source's :data:`_TRUNCATE` entry (``(steps, anchor, pins)`` -- all
-#: hashable, :class:`TimePins` being a frozen dataclass of tuples). Exists because
+#: key plus the source's :data:`_TRUNCATE` entry (``(steps, anchor, pins, stride)`` --
+#: all hashable, :class:`TimePins` being a frozen dataclass of tuples). Exists because
 #: cutting is not free: working out the kept steps may read the anchor source, and an
 #: ``isel`` on a dask-backed model with ~100k chunks builds a new graph every call, so
 #: a page that reads the same source a few dozen times spent minutes cutting it. Keeps
@@ -154,7 +169,12 @@ class TimePins:
 
 @contextlib.contextmanager
 def truncate_time(
-    names, steps: int, *, anchor: str | None = None, pins: TimePins | None = None
+    names,
+    steps: int,
+    *,
+    anchor: str | None = None,
+    pins: TimePins | None = None,
+    stride: int = 1,
 ):
     """Make :func:`read` return only the first and last ``steps`` steps of ``names``.
 
@@ -177,11 +197,21 @@ def truncate_time(
     to each pinned instant (within :data:`PIN_TOLERANCE`, else none) and the first and
     last ``steps`` inside each pinned window. They are chosen from the same steps the
     first-and-last rule draws on, so the anchoring above still bounds them.
+
+    ``stride`` (default 1, the whole grid) also thins the horizontal grid of every named
+    source to every ``stride``-th cell (:func:`_strided`), because a test run that only
+    shortens time still reads and draws the full grid on every page. It is a test
+    device, not a faithful coarsening: staggered u/v points and cell areas no longer
+    describe the strided cells, so the values are physically inconsistent.
     """
     if steps < 1:
         raise ValueError(f"truncate_time: steps must be at least 1, got {steps}")
+    if stride < 1:
+        raise ValueError(f"truncate_time: stride must be at least 1, got {stride}")
     saved = dict(_TRUNCATE)
-    _TRUNCATE.update(dict.fromkeys(names, (int(steps), anchor, pins or TimePins())))
+    _TRUNCATE.update(
+        dict.fromkeys(names, (int(steps), anchor, pins or TimePins(), int(stride)))
+    )
     try:
         yield
     finally:
@@ -202,11 +232,57 @@ def _anchor_end(anchor: str):
 
 
 def _truncated(ref: SourceRef, obj):
-    """Cut ``obj`` to the steps :data:`_TRUNCATE` keeps, if ``ref`` is named there."""
+    """Cut ``obj`` to the steps and cells :data:`_TRUNCATE` keeps, if ``ref`` is named.
+
+    Time first, then the horizontal stride: the time cut may join several runs of steps,
+    and striding that one result is cheaper than striding each run.
+    """
     entry = _TRUNCATE.get(ref.name) if _TRUNCATE else None
     if entry is None or not hasattr(obj, "dims"):
         return obj
-    steps, anchor, pins = entry
+    return _strided(_time_cut(ref, obj, entry), entry[3])
+
+
+def _strided(obj, stride: int):
+    """Return ``obj`` on every ``stride``-th horizontal cell (``obj`` itself for 1).
+
+    Rho dims (``xi_rho``/``eta_rho``) take ``slice(0, None, stride)``. A staggered dim
+    (:data:`_STAGGERED`) is cut so it stays one shorter than its strided rho dim, as the
+    velocity code assumes: it takes every ``stride``-th point from the start, the first
+    ``n - 1`` of them. Done on the standardized object, so the grid coordinates attached
+    to it (lon/lat/h/mask/angle, ``cell_area``, the depth coordinate) are strided with
+    the data; vertical dims are untouched. An object with none of these dims (an
+    observation, a forcing file) is returned whole, and so is a dim the stride would
+    leave under :data:`_STRIDE_MIN_CELLS` cells (a warning says so): a transect or a
+    regridding needs something to work on.
+    """
+    if stride <= 1:
+        return obj
+    indexers: dict[str, slice] = {}
+    for rho in ("xi_rho", "eta_rho"):
+        if rho not in obj.dims:
+            continue
+        n = len(range(0, obj.sizes[rho], stride))
+        if n < _STRIDE_MIN_CELLS:
+            warnings.warn(
+                f"smoke: a stride of {stride} would leave only {n} cell(s) along "
+                f"{rho} (of {obj.sizes[rho]}); keeping that dimension whole",
+                stacklevel=2,
+            )
+            continue
+        indexers[rho] = slice(0, None, stride)
+        for stag, owner in _STAGGERED.items():
+            if owner == rho and stag in obj.dims:
+                if obj.sizes[stag] == obj.sizes[rho] - 1:
+                    indexers[stag] = slice(0, (n - 1) * stride, stride)
+                else:  # not the usual C-grid shape: stride it as it stands
+                    indexers[stag] = slice(0, None, stride)
+    return obj.isel(indexers) if indexers else obj
+
+
+def _time_cut(ref: SourceRef, obj, entry):
+    """Cut ``obj`` to the time steps ``entry`` (a :data:`_TRUNCATE` value) keeps."""
+    steps, anchor, pins, _stride = entry
     from ocean_skill import operators
 
     dim = operators.resolve_dim(obj, "time")
@@ -241,19 +317,38 @@ def _truncated(ref: SourceRef, obj):
                 f"{steps} step(s)",
                 stacklevel=2,
             )
-    return obj.isel({dim: _as_slices(sorted(keep))})
+    runs = _as_slices(sorted(keep))
+    if len(runs) <= 1:
+        return obj.isel({dim: runs[0] if runs else slice(0, 0)})
+    # Each run cut by a slice, then joined: an integer list would be a dask ``take``,
+    # whose shuffle layer over ~100k chunks is rebuilt at every later compute (a
+    # minute a lane on a full ROMS run). Variables without the time axis ride along.
+    import xarray as xr
+
+    return xr.concat(
+        [obj.isel({dim: run}) for run in runs],
+        dim=dim,
+        data_vars="minimal",
+        coords="minimal",
+        compat="override",
+        join="override",
+    )
 
 
-def _as_slices(positions: list[int]):
-    """``positions`` (sorted, distinct) as a ``slice`` if contiguous, else unchanged.
+def _as_slices(positions: list[int]) -> list[slice]:
+    """``positions`` (sorted, distinct) as the slices of its contiguous runs.
 
     A slice of a dask-backed object keeps its chunks as they are, whereas an integer
     list is a ``take`` that builds a far larger graph (for ~100k chunks, seconds per
-    call). Several separate runs stay a list: the cut is memoized, so it happens once.
+    compute). ``[0, 1, 5, 6, 7]`` -> ``[slice(0, 2), slice(5, 8)]``.
     """
-    if positions and positions[-1] - positions[0] == len(positions) - 1:
-        return slice(positions[0], positions[-1] + 1)
-    return positions
+    runs: list[slice] = []
+    for pos in positions:
+        if runs and runs[-1].stop == pos:
+            runs[-1] = slice(runs[-1].start, pos + 1)
+        else:
+            runs.append(slice(pos, pos + 1))
+    return runs
 
 
 def _ends(index: list[int], steps: int) -> list[int]:

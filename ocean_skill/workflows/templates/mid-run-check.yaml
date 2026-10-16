@@ -6,8 +6,8 @@
 # PDF sections with divider pages.
 #
 # Run it:
-#     ocean-skill-run suites/mid-run-check.yaml --list    # check the page list first
-#     ocean-skill-run suites/mid-run-check.yaml
+#     ocean-skill-run mid-run-check.yaml --list    # check the page list first
+#     ocean-skill-run mid-run-check.yaml
 # Note that --list also runs the refresh: block, so it rebuilds the kerchunk reference
 # and the catalog entry for the restart files written so far (it draws nothing).
 #
@@ -36,10 +36,14 @@
 # of the domain-mean and extremum pages, and the times of the snapshot pages, are set
 # once under defaults: below.
 #
-# Lines to edit for your own run: refresh: (output and grid paths), defaults.test
-# (must match a name under refresh.sources), defaults.period / defaults.snapshot_depths,
-# output_dir, cache_dir, catalog_search_paths.
+# This file is the shipped `mid-run-check` suite, the one copy `ocean-skill-suite new`
+# starts from. Copied by hand it runs as the suite for the PACMED run it was written
+# for; `ocean-skill-suite new` rewrites the block between the "setup" markers below for
+# your run (names, paths, dates, forcing files) and keeps everything else as it is.
+# By hand, edit that block: mainly refresh: (output and grid paths), defaults.test, the
+# dates, output_dir, cache_dir and catalog_search_paths.
 
+# >>> setup: written by ocean-skill-suite new
 name: mid-run-check
 output_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
 pdf_images: jpeg
@@ -68,16 +72,18 @@ refresh:
 
 defaults:
   test: pacmed_pyesper
-  # Every page's plot: options start from these (a page's own plot: wins). Robust color
-  # limits clip each panel to its central 80% (difference panels too), so coastal and
-  # river-mouth extremes don't wash out the open ocean.
-  plot: {robust: true}
-  depths: [surface, 100]
   # The time window for the extremum and domain-mean pages. Open-ended (no max) means
   # through the newest restart, so by default it is the whole simulation and follows the
   # run as it grows. Add `max: "2012-06-30"` or move `min:` to narrow it. It is a
   # placeholder (time: "{period}") used by those pages so it is edited in one place.
   period: {min: "2011-01-01"}
+# <<< setup
+  # (the rest of defaults: is the same for every run)
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80% (difference panels too), so coastal and
+  # river-mouth extremes don't wash out the open ocean.
+  plot: {robust: true}
+  depths: [surface, 100]
   # Depths of the latest-snapshot pages, one page each.
   snapshot_depths: [surface, 200]
 
@@ -262,5 +268,5 @@ pages:
   - title: "Summary"
     summary: {kind: both, color_by: variable}   # every comparison of the report
 
-  # T-S diagrams and the zonal-velocity sections are in final-report.yaml: they are slow
+  # T-S diagrams and the zonal-velocity sections are in the final-report suite: they are slow
   # (the T-S page took ~12 min, the velocity sections ~30 GB of memory) for a quick check.

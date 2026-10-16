@@ -1,6 +1,6 @@
 # PACMED suite comparisons
 
-Every page each suite draws (section dividers left out), from the suite YAMLs in this folder. "Last Anvil run" is the 2026-10-14 run on Anvil: drawn, skipped (reason in run.log), killed (out of memory on that page), or not reached (after the kill). Chlorophyll in final-report now reads the 36 restart days only.
+Every page each suite draws (section dividers left out), from the suite YAMLs (mid-run-check, model-comparison and final-report are in `ocean_skill/workflows/templates/`; the others in this folder). "Last Anvil run" is the 2026-10-14 run on Anvil: drawn, skipped (reason in run.log), killed (out of memory on that page), or not reached (after the kill). Chlorophyll in final-report now reads the 36 restart days only.
 
 ## mid-run-check (19 pages)
 

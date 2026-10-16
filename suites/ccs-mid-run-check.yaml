@@ -1,8 +1,10 @@
-# Mid-run check of the CCS 4 km run (Sam's ccs_4km_works, 2013): the same pages as
-# mid-run-check.yaml -- bathymetry, domain-mean time series, the surface alkalinity
-# extremes, the latest restart at the surface and 200 m, and the latest month against
-# satellite chlorophyll, Holte & Talley MLD, WOA23 nutrients and GLODAPv2 carbon -- for a
-# different domain. Only the block from `name:` to `defaults:` differs from that file.
+# Mid-run check of the CCS 4 km run (Sam's ccs_4km_works, 2013): the same pages as the
+# shipped mid-run-check suite (ocean_skill/workflows/templates/mid-run-check.yaml, or
+# `ocean-skill-suite new mid-run-check`) -- bathymetry, domain-mean time series, the
+# surface alkalinity extremes, the latest restart at the surface and 200 m, and the
+# latest month against satellite chlorophyll, Holte & Talley MLD, WOA23 nutrients and
+# GLODAPv2 carbon -- for a different domain. Only the block from `name:` to `defaults:`
+# differs from that suite.
 #
 # Run it:
 #     ocean-skill-run suites/ccs-mid-run-check.yaml --list    # check the page list first
@@ -16,7 +18,7 @@
 # levels, every MARBL tracer), so the reference stores one level per chunk and a page
 # reads only the levels it needs.
 #
-# Before you run it: see mid-run-check.yaml (Holte & Talley month dimension, Copernicus
+# Before you run it: see the mid-run-check template's header (Holte & Talley month dimension, Copernicus
 # login, WOA downloads, Ghostscript).
 
 name: ccs-mid-run-check
@@ -240,5 +242,5 @@ pages:
   - title: "Summary"
     summary: {kind: both, color_by: variable}   # every comparison of the report
 
-  # T-S diagrams and the zonal-velocity sections are in final-report.yaml: they are slow
+  # T-S diagrams and the zonal-velocity sections are in the final-report suite: they are slow
   # (the T-S page took ~12 min, the velocity sections ~30 GB of memory) for a quick check.

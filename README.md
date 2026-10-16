@@ -1413,6 +1413,8 @@ tests/             pytest suite
 docs/              MyST / Jupyter Book docs + notebooks
 examples/          short runnable scripts
 suites/            declarative multi-page suites (YAML) -- run with ocean-skill-run
+                   (the shipped mid-run-check / final-report / model-comparison live in
+                   ocean_skill/workflows/templates/; see docs/suites.md)
 environment.yml    conda scientific stack (source of truth)
 ```
 

@@ -44,6 +44,7 @@ dependencies = [
 
 [project.scripts]
 ocean-skill-run = "ocean_skill.workflows.run:main"
+ocean-skill-suite = "ocean_skill.workflows.new:main"
 
 [project.optional-dependencies]
 test = ["pytest", "pytest-cov", "pytest-xdist"]
@@ -64,6 +65,9 @@ include = ["ocean_skill*"]
     # so the folder can move to its own home unchanged.
     "vocab/*.yaml", "vocab/*.txt", "vocab/README.md",
 ]
+# The suite templates `ocean-skill-suite new` fills in: data inside a package
+# (ocean_skill.workflows has an __init__.py), so they ship as its package data.
+"ocean_skill.workflows" = ["templates/*.yaml"]
 
 # --- ruff: linter + formatter (mirrors cstar-forge / roms-tools house style) ---
 [tool.ruff]

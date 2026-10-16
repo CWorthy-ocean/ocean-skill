@@ -32,22 +32,26 @@
 #   F  each run against WOA23
 #
 # Run it:
-#     ocean-skill-run suites/model-comparison.yaml --list    # check the page list first
-#     ocean-skill-run suites/model-comparison.yaml --smoke 2 --self-check
+#     ocean-skill-run model-comparison.yaml --list    # check the page list first
+#     ocean-skill-run model-comparison.yaml --smoke 2 --self-check
 #       (--smoke keeps only the first and last N restarts of each run, so every page that
 #       names a date in between -- the end of January, the seasons, the January/July
 #       boundary means -- finds no data under it and is reported; use --smoke for the
 #       first-pass check of the other pages, and --only to redraw the dated ones.)
-#     ocean-skill-run suites/model-comparison.yaml
+#     ocean-skill-run model-comparison.yaml
 # --list also runs the refresh: block, which builds every entry the pages read into
 # one catalog (pacmed-pyesper-2015.yaml): both runs from 2010 (each joined from its
 # task folders), their initial conditions, and both runs' boundary forcing with a
 # west+south strip entry each.
 #
-# Lines to edit for another pair: refresh: (both runs' output folders, initial
-# conditions, forcing files, grid), defaults.test / defaults.reference, defaults.period,
-# defaults.last_year, defaults.season_days, output_dir, cache_dir.
+# This file is the shipped `model-comparison` suite, the one copy `ocean-skill-suite new`
+# starts from. Copied by hand it runs as the suite for the PACMED run it was written
+# for; `ocean-skill-suite new` rewrites the block between the "setup" markers below for
+# your run (names, paths, dates, forcing files) and keeps everything else as it is.
+# By hand, edit that block: mainly refresh: (output and grid paths), defaults.test, the
+# dates, output_dir, cache_dir and catalog_search_paths.
 
+# >>> setup: written by ocean-skill-suite new
 name: model-comparison
 output_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
 cache_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
@@ -145,13 +149,31 @@ refresh:
 defaults:
   test: pyesper
   reference: mld_interp
-  # Every page's plot: options start from these (a page's own plot: wins).
-  plot: {robust: true}
+  # How the pages name the two runs, so another pair changes only these lines:
+  #   {test}, {reference}                 the source names (above)
+  #   {test_label}, {reference_label}     the runs in titles, captions and section text
+  #   {test_forcing}, {reference_forcing} prefix of each run's forcing entries
+  #                                       (<prefix>_ic, <prefix>_bry_phys, ...)
+  #   runs                                both sources, for the section F loop
+  test_label: pyesper
+  reference_label: MLD-interp
+  test_forcing: pyesper
+  reference_forcing: mld
+  runs: [pyesper, mld_interp]
   # Both runs from their initial conditions to the end of the pyesper run.
   period: {min: "2010-01-01", max: "2013-12-31"}
   last_year: {min: "2013-01-01", max: "2013-12-31"}
   first_month: {min: "2010-01-01", max: "2010-02-01T12:00"}
   end_of_jan: "2010-01-31"
+  # End of Jan / Apr / Jul / Oct, 2010-2013: the years x seasons grids (4 columns).
+  season_days: ["2010-01-31", "2010-04-30", "2010-07-31", "2010-10-31",
+                "2011-01-31", "2011-04-30", "2011-07-31", "2011-10-31",
+                "2012-01-31", "2012-04-30", "2012-07-31", "2012-10-31",
+                "2013-01-31", "2013-04-30", "2013-07-31", "2013-10-31"]
+# <<< setup
+  # (the rest of defaults: is the same for every run)
+  # Every page's plot: options start from these (a page's own plot: wins).
+  plot: {robust: true}
   depths: [surface, 200]
   # Abigale's six variables, at most three per figure.
   groups:
@@ -187,11 +209,6 @@ defaults:
                "oxygen · along-boundary mean, 0–500 m"]
   # The boundary sections: upper 1000 m.
   strip_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
-  # End of Jan / Apr / Jul / Oct, 2010-2013: the years x seasons grids (4 columns).
-  season_days: ["2010-01-31", "2010-04-30", "2010-07-31", "2010-10-31",
-                "2011-01-31", "2011-04-30", "2011-07-31", "2011-10-31",
-                "2012-01-31", "2012-04-30", "2012-07-31", "2012-10-31",
-                "2013-01-31", "2013-04-30", "2013-07-31", "2013-10-31"]
 
 pages:
   # == A. Domain ==========================================================================
@@ -203,7 +220,7 @@ pages:
       east; the dotted vertical line marks the south-west corner.
 
   - title: "Bathymetry"
-    field: {source: mld_interp, variables: [h]}
+    field: {source: "{reference}", variables: [h]}
     caption: Grid depth h (m), the grid file both runs use.
     plot: {robust: false}
 
@@ -214,7 +231,7 @@ pages:
       200 m, then the boundary forcing along the west+south strip: monthly means for
       January and July 2010, and the upper-500 m strip mean through time. Temperature and
       salinity come from the physics boundary files; nitrate, alkalinity and oxygen from
-      the ESPER files (pyesper) and the MLD-interpolated climatology (MLD-interp, its
+      the ESPER files ({test_label}) and the MLD-interpolated climatology ({reference_label}, its
       calendar month).
 
   - title: "Initial conditions — {group.name} ({depth.label})"
@@ -222,20 +239,20 @@ pages:
       group: "{groups}"
       depth: "{depths}"
     compare:
-      test: pyesper_ic
-      reference: [mld_ic]
+      test: "{test_forcing}_ic"
+      reference: ["{reference_forcing}_ic"]
       variables: "{group.vars}"
       depths: ["{depth}"]
     caption: >-
-      2010-01-01 initial conditions at {depth.label}: pyesper, MLD-interp, and pyesper
-      minus MLD-interp.
+      2010-01-01 initial conditions at {depth.label}: {test_label}, {reference_label}, and {test_label}
+      minus {reference_label}.
 
   - title: "Boundary forcing along the strip — {variable} (January and July 2010)"
     for_each:
       variable: [temperature, salinity]
     compare:
-      test: pyesper_bry_phys_strip
-      reference: [mld_bry_phys_strip]
+      test: "{test_forcing}_bry_phys_strip"
+      reference: ["{reference_forcing}_bry_phys_strip"]
       variables: ["{variable}"]
       select: {transect: {eta_rho: 0}, depth: "{strip_depths}"}
       times: ["2010-01", "2010-07"]
@@ -248,29 +265,29 @@ pages:
     for_each:
       variable: [nitrate, alkalinity, oxygen]
     compare:
-      test: pyesper_bry_bgc_strip
-      reference: [mld_bry_bgc_strip]
+      test: "{test_forcing}_bry_bgc_strip"
+      reference: ["{reference_forcing}_bry_bgc_strip"]
       variables: ["{variable}"]
       select: {transect: {eta_rho: 0}, depth: "{strip_depths}"}
       times: ["2010-01", "2010-07"]
       aggregate: {time: mean}
     caption: >-
-      ESPER (pyesper, monthly mean of the daily files) against the MLD-interpolated
-      climatology for the same calendar month (MLD-interp), upper 1000 m along the strip.
+      ESPER ({test_label}, monthly mean of the daily files) against the MLD-interpolated
+      climatology for the same calendar month ({reference_label}), upper 1000 m along the strip.
 
   - title: "Boundary forcing through time — upper 500 m strip mean ({group.name})"
     for_each:
       group: "{strip_groups}"
     compare:
-      test: "pyesper_bry_{group.src}_strip"
-      reference: ["mld_bry_{group.src}_strip"]
+      test: "{test_forcing}_bry_{group.src}_strip"
+      reference: ["{reference_forcing}_bry_{group.src}_strip"]
       variables: "{group.vars}"
       select: {depth: {min: 0, max: 500}, time: "{period}"}
       aggregate: {Z: mean, lon: mean, lat: mean, time: {resample: 1MS, reduce: mean}}
     plot: {residual: true, titles: "{group.titles}"}
     caption: >-
       Thickness- and length-weighted mean over the upper 500 m of the west+south strip,
-      monthly; the strip below each panel is pyesper minus MLD-interp.
+      monthly; the strip below each panel is {test_label} minus {reference_label}.
 
   - title: "B. Input differences — metrics"
     summary: {scope: section, kind: [table]}
@@ -293,14 +310,14 @@ pages:
       select: {time: "{end_of_jan}"}
       aggregate: {time: mean}
     caption: >-
-      The 2010-01-31 restart at {depth.label}: pyesper, MLD-interp, and the difference.
+      The 2010-01-31 restart at {depth.label}: {test_label}, {reference_label}, and the difference.
 
   - title: "Initial conditions along the boundary — {group.name}"
     for_each:
       group: "{groups}"
     compare:
-      test: pyesper_ic
-      reference: [mld_ic]
+      test: "{test_forcing}_ic"
+      reference: ["{reference_forcing}_ic"]
       variables: "{group.vars}"
       select: {transect: {boundary: [west, south]}, depth: "{strip_depths}"}
     caption: >-
@@ -324,7 +341,7 @@ pages:
   # == D. Seasonal differences ==============================================================
   - title: "D. Seasonal differences"
     section: >-
-      pyesper minus MLD-interp at the end of January, April, July and October of each
+      {test_label} minus {reference_label} at the end of January, April, July and October of each
       year (rows: 2010-2013), difference only on one colour scale per figure: maps at
       the surface and 200 m, then the west+south boundary sections.
 
@@ -354,7 +371,7 @@ pages:
   # == E. How the runs diverge ==============================================================
   - title: "E. How the runs diverge"
     section: >-
-      Skill of pyesper against MLD-interp at every grid cell over the time series of
+      Skill of {test_label} against {reference_label} at every grid cell over the time series of
       restarts (bias, centered RMS difference, correlation, standard-deviation ratio),
       over the whole run and over its last year, and the whole-domain mean of every
       restart. The next section follows how the skill changes from year to year, month
@@ -370,7 +387,7 @@ pages:
       select: {time: "{period}"}
       over: time
     caption: >-
-      {variable.name}: at each grid cell, pyesper scored against MLD-interp over every
+      {variable.name}: at each grid cell, {test_label} scored against {reference_label} over every
       restart from 2010-01 to 2013-12. Rows: surface and 200 m.
 
   - title: "Per-cell skill over the last year — {variable.name}"
@@ -397,7 +414,7 @@ pages:
     plot: {residual: true}
     caption: >-
       {depth.label}: area-weighted whole-domain means of every restart; the strip below
-      each panel is pyesper minus MLD-interp.
+      each panel is {test_label} minus {reference_label}.
 
   - title: "E. How the runs diverge — metrics"
     summary: {scope: section, kind: [table]}
@@ -489,7 +506,7 @@ pages:
 
   - title: "{run} vs WOA23 — mean and seasonal variability ({depth.label})"
     for_each:
-      run: [pyesper, mld_interp]
+      run: "{runs}"
       depth: "{depths}"
     compare:
       test: "{run}"

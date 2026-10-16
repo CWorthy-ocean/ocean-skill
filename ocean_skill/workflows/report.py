@@ -78,6 +78,7 @@ __all__ = [
     "MAX_FILL_SCALE",
     "MIN_FILL_GAIN",
     "MIN_FIT_SCALE",
+    "SMOKE_DPI",
     "PdfReport",
     "compress_pdf_images",
 ]
@@ -128,6 +129,12 @@ HEADER_BOTTOM_GAP = 0.3
 #: since the PDF copy is rasterized/downsampled separately at its own dpi.
 PNG_DPI = 200
 PDF_DPI = 150
+
+#: Test mode (``ocean-skill-run --smoke``) saves figures and rasterizes the PDF's maps
+#: at no more than this: drawing a 1858 x 962 map at 320 dpi is a large share of a
+#: page's time, and a test run only needs to see that the page draws (see
+#: :class:`PdfReport`'s ``png_dpi``/``pdf_dpi``).
+SMOKE_DPI = 100
 
 #: A section divider's title is the suptitle role of the report's reference type scale
 #: (:func:`~ocean_skill.plot.typography.reference_scale`; the largest type any figure
@@ -583,6 +590,11 @@ class PdfReport:
 
     pdf_path: Path | None
     figures_dir: Path
+    #: The resolution of the PNGs (and of the high-resolution render that an enlarged
+    #: page is made from, ``png_dpi`` x up to :data:`MAX_FILL_SCALE`) and of the PDF's
+    #: own rasterized maps. Test mode lowers both (:data:`SMOKE_DPI`).
+    png_dpi: float = PNG_DPI
+    pdf_dpi: float = PDF_DPI
     _pdf: Any = _dc_field(default=None, repr=False)
     _index: int = 0
     _pdf_pages: int = 0
@@ -693,7 +705,7 @@ class PdfReport:
             bottom -= _caption_height(item.caption)
         page = _page_bbox(Bbox([[tight.x0, bottom], [tight.x1, top]]))
         _rasterize(fig)
-        self._pdf.savefig(fig, dpi=PDF_DPI, bbox_inches=page)
+        self._pdf.savefig(fig, dpi=self.pdf_dpi, bbox_inches=page)
 
     def _write_packed(
         self,
@@ -753,7 +765,7 @@ class PdfReport:
         """
         self._index += 1
         png = self.figures_dir / f"{self._index:02d}_{stem}.png"
-        fig.savefig(png, dpi=PNG_DPI, bbox_inches="tight")
+        fig.savefig(png, dpi=self.png_dpi, bbox_inches="tight")
         self.png_paths.append(png)
         if self._pdf is None:
             fig.clear()
@@ -762,7 +774,7 @@ class PdfReport:
 
         tight = _tight_bbox(fig, stem)
         with Image.open(png) as img:
-            w, h = (px / PNG_DPI for px in img.size)
+            w, h = (px / self.png_dpi for px in img.size)
         scale = min(1.0, (PAGE_W - 2 * SIDE_MARGIN) / w)
         wide = tight.width > PAGE_W
         item = _Item(
@@ -783,7 +795,7 @@ class PdfReport:
         # made after the figure is cleared, and a page's factor is never above its
         # figures' own (more content only takes room).
         if (cap := _fill_scale([item], None)) > 1.0:
-            item.hires = self._render_hires(fig, PNG_DPI * cap)
+            item.hires = self._render_hires(fig, self.png_dpi * cap)
         self._place(item)
         return png
 
