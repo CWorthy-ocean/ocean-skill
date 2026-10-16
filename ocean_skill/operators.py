@@ -1765,6 +1765,12 @@ def aggregate(da, spec: dict[str, Any] | None):
     be skipped without a word. Only the plain mean does this, and only when the
     other horizontal axis is not in the spec too.
 
+    ``depth`` also names the vertical axis when the data has no dimension or
+    coordinate of that name (native ROMS output, whose levels are a bare ``s_rho``), so
+    ``{"depth": "min"}`` reads the same on every product. ``Z`` is unchanged. A plain
+    ``mean`` over such bare levels is refused rather than silently unweighted, unless a
+    depth-band selection attached the cell thicknesses.
+
     Dimensions absent from ``da`` are skipped rather than raising: a selection may
     already have collapsed one, and a spec shared across variables should not fail on
     the one that has no depth axis.
@@ -1784,6 +1790,14 @@ def aggregate(da, spec: dict[str, Any] | None):
         da = _horizontal_mean(da)
     for name, how in spec.items():
         dim = resolve_dim(da, name)
+        if dim is None and name == "depth":
+            # ``depth`` is the vertical axis whatever the product calls it: WOA's own
+            # dimension, or on native ROMS output a bare ``s_rho``. Only a fallback,
+            # reached after a literal ``depth`` dimension/coordinate is ruled out, so
+            # nothing that already resolved moves; ``Z`` is untouched.
+            dim = resolve_dim(da, "Z")
+            if dim is not None:
+                _refuse_unweighted_level_mean(da, dim, how)
         if dim is None or dim not in da.dims:
             # A lone lon/lat mean on a curvilinear grid names no dimension to
             # reduce along -- binned instead of skipped (see _binned_mean). Only
@@ -1806,6 +1820,38 @@ def aggregate(da, spec: dict[str, Any] | None):
         else:
             da = _reduce_dim(da, dim, how)
     return da
+
+
+def _refuse_unweighted_level_mean(da, dim: str, how: Any) -> None:
+    """Refuse a plain mean over bare native levels that carry no cell thickness.
+
+    Reached only when ``{"depth": ...}`` fell back to the vertical axis of data whose
+    levels are native model levels (ROMS ``s_rho``, whether bare indices or a
+    dimensionless sigma coordinate -- either way not depths): their thickness is
+    uneven (a few metres at the surface, hundreds near the bottom), so a mean over
+    them is not a depth mean.
+    The reductions that ignore spacing (min, max, ...) are fine; a mean is fine too
+    once a depth-band selection has attached the cell weights.
+    """
+    # Native levels are a bare dimension, or a ROMS ``s_rho``/``s_w`` -- which classic
+    # (Rutgers) output and anything with a stored sigma coordinate *does* carry as a
+    # coordinate, of dimensionless stretching values rather than depths. So the
+    # check is on what the dimension is, not on whether a coordinate of that name
+    # exists. A dimension with real depth values of its own is an ordinary axis.
+    native = dim in ("s_rho", "s_w") or dim not in da.coords
+    if not native or _weights_for(da, dim) is not None:
+        return
+    for step in how if isinstance(how, (list, tuple)) else [how]:
+        opts = _step_options(step, where="depth aggregate")
+        plain = not (opts.get("groupby") or opts.get("resample"))
+        if opts.get("reduce") == "mean" and plain:
+            raise ValueError(
+                f"aggregate {{'depth': 'mean'}} over {dim!r}: these are native model "
+                "levels of uneven thickness, so an unweighted mean is not a depth "
+                "mean. Select a depth band first (select={'depth': {'min': 0, "
+                "'max': 100}}), which attaches the cell thicknesses and makes the "
+                "mean thickness-weighted, or reduce with min/max."
+            )
 
 
 def _step_options(step: Any, *, where: str) -> dict[str, Any]:

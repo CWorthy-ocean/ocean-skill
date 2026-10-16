@@ -501,6 +501,29 @@ def _outline_of(source: str, convention: str | None = None) -> np.ndarray | None
     return ring
 
 
+def _fill_missing_positions(values: Any) -> np.ndarray:
+    """``values`` (one coordinate along a path) with its NaNs interpolated linearly.
+
+    Interpolated by column index between the nearest finite neighbours and held at
+    the nearest finite value past either end. The finite values are unwrapped
+    (period 360) for the interpolation, so a gap straddling the antimeridian
+    interpolates through it rather than the long way round -- harmless for a
+    latitude, which never jumps that far -- and only the missing entries are
+    replaced (the sampler wraps positions into the grid's convention itself).
+    Returned unchanged when nothing is missing, and all-NaN when nothing at all is
+    finite (the caller's path validation then names it).
+    """
+    arr = np.asarray(values, dtype="float64")
+    missing = ~np.isfinite(arr)
+    if not missing.any() or missing.all():
+        return arr
+    index = np.arange(arr.size)
+    unwrapped = np.unwrap(arr[~missing], period=360.0)
+    filled = arr.copy()
+    filled[missing] = np.interp(index[missing], index[~missing], unwrapped)
+    return filled
+
+
 def _domain_of(source: str) -> tuple[float, float, float, float] | None:
     """Return ``(lon_min, lat_min, lon_max, lat_max)`` for a source's catalog extent.
 
@@ -3391,7 +3414,15 @@ def _prepare(
             # dropped by to_dataset. They are exactly what depth_average needs.
             for grid_var in ("sigma_w", "Cs_w", "sigma_r", "Cs_r", "h"):
                 if grid_var in obj.variables and grid_var not in sub.variables:
-                    sub = sub.assign({grid_var: obj[grid_var]})
+                    grid_values = obj[grid_var]
+                    if horizontal and grid_values.ndim == 2:
+                        # the bathymetry, cut to the same box as the field (a box
+                        # narrower than the domain leaves it on columns the field
+                        # no longer has)
+                        grid_values = _select_horizontal_then_aggregate(
+                            grid_values, horizontal, None, source
+                        )
+                    sub = sub.assign({grid_var: grid_values})
             # The free surface too, reduced as the field was (see _with_free_surface):
             # a depth is matched in a frame built from it -- below the instantaneous
             # surface, per time step, or in the frame of the time-mean field -- and a
@@ -5728,6 +5759,13 @@ class Comparison:
         from the unrounded positions -- the union of the path and the snapped
         cells, so the reference crop (which :func:`ocean_skill.align.
         subset_to_bbox` pads further) covers both.
+
+        A column with no position (a land-masked cell on a boundary row, whose
+        ``lon``/``lat`` are NaN) is not dropped -- the two lanes stay column for
+        column -- its position is interpolated from the nearest positioned
+        columns along the path (:func:`_fill_missing_positions`), so the
+        reference is still sampled there and simply has no data wherever it has
+        land of its own.
         """
         from ocean_skill.align import _lat_name, _lon_name
 
@@ -5740,7 +5778,10 @@ class Comparison:
         else:
             lons, lats = cell_lons, cell_lats
         points = [
-            [round(float(lo), 4), round(float(la), 4)] for lo, la in zip(lons, lats)
+            [round(float(lo), 4), round(float(la), 4)]
+            for lo, la in zip(
+                _fill_missing_positions(lons), _fill_missing_positions(lats)
+            )
         ]
         extra_select = {
             "transect": {"points": points, "method": troute.get("method", "nearest")}
@@ -5748,10 +5789,10 @@ class Comparison:
         all_lons = np.concatenate([lons, cell_lons])
         all_lats = np.concatenate([lats, cell_lats])
         bbox = (
-            float(all_lons.min()),
-            float(all_lats.min()),
-            float(all_lons.max()),
-            float(all_lats.max()),
+            float(np.nanmin(all_lons)),
+            float(np.nanmin(all_lats)),
+            float(np.nanmax(all_lons)),
+            float(np.nanmax(all_lats)),
         )
         return extra_select, bbox
 
@@ -10427,6 +10468,14 @@ class ComparisonSet:
         an aligned trio per row, so it draws the ``skill_map`` family instead: metrics
         across the columns, comparisons down the rows, exactly as ``field_grid`` stacks
         rows for the unscored case.
+
+        Map and section grids also take ``panels="difference"`` -- only each
+        comparison's difference panel, titled by its label, on one shared symmetric
+        colorbar -- with ``ncols=N`` to wrap those panels into N columns (rows of years
+        against columns of seasons, say), and ``diff_quantile=q`` (a fraction, default
+        0.98; ``robust=`` sets it too when it is not given) for the share of
+        ``|difference|`` the difference limits span. The default ``panels="all"`` is the
+        ``test | reference | difference`` row per comparison.
         """
         from ocean_skill.plot.registry import render
         from ocean_skill.plot.spec import PlotSpec
@@ -10479,8 +10528,13 @@ class ComparisonSet:
         # A set of exactly one comparison *is* that comparison: draw it as a single
         # titled row (variable · depth · time up top), not a one-row grid whose only
         # identity is a rotated left-edge row label. The grid is what more than one
-        # comparison needs; one does not.
-        single_row = family == "field_row" and len(self.comparisons) == 1
+        # comparison needs; one does not. (panels="difference" is a grid option: its
+        # one panel is drawn by the grid.)
+        single_row = (
+            family == "field_row"
+            and len(self.comparisons) == 1
+            and kwargs.get("panels") != "difference"
+        )
         stacked = len(self.comparisons) > 1 and family in (
             "field_row",
             "time_depth",
@@ -13161,6 +13215,93 @@ def _compare_aggregate_fan(kwargs: dict[str, Any]) -> ComparisonSet:
     return ComparisonSet(members)
 
 
+def _merged_select(base: Any, labelled: Any) -> Any:
+    """``labelled`` laid over ``base``: two normalized selects, either a pair-spec.
+
+    A plain dict over a plain dict is the dict union, the labelled entry winning
+    axis by axis. Where either is a ``{"test", "reference"}`` pair-spec the result
+    is one, each lane merged from its own side (a plain one standing for both
+    lanes), so a base pair-spec -- which is what a suite page's time window makes of
+    ``select`` -- still takes a plain labelled entry.
+    """
+    if not (is_pair_spec(base) or is_pair_spec(labelled)):
+        return {**base, **labelled}
+    return {
+        role: {**select_for(base, role), **select_for(labelled, role)}
+        for role in ("test", "reference")
+    }
+
+
+def selects_entry_parts(entry: Any) -> tuple[Any, Any]:
+    """Split one ``selects=`` entry into ``(select, own_aggregate)``.
+
+    The ``{"select": ..., "aggregate": ...}`` form is a non-empty dict whose keys are
+    only ``select`` and/or ``aggregate`` -- neither is an axis, so it cannot be a plain
+    select; its ``aggregate`` (``None`` when absent) replaces the call's for that entry.
+    Anything else is a plain select with no aggregate of its own.
+    """
+    if isinstance(entry, dict) and entry and set(entry) <= {"select", "aggregate"}:
+        return entry.get("select"), entry.get("aggregate")
+    return entry, None
+
+
+def _compare_selects_fan(kwargs: dict[str, Any]) -> ComparisonSet:
+    """Run :func:`compare` once per labelled select of ``selects={label: select}``.
+
+    ``kwargs`` is the caller's whole argument set. Each entry is validated and
+    normalized the way ``select=`` is, merged over the shared ``select=``
+    (:func:`_merged_select`) and run through the whole call on its own -- so a member
+    is exactly the comparison the same call with that one merged select (and
+    aggregate) would have built, cache key included -- and its members are labelled
+    with the entry's label:
+    exactly it when the entry formed one comparison, else appended to each member's
+    own (``"temperature Equator"``), so a stacked section plot's rows read as the
+    labelled selects. Entries are run in the order given; one that forms nothing
+    (every pair skipped) contributes nothing, like any other skipped pair.
+
+    This fan is outermost: an entry's aggregate (its own ``{"select", "aggregate"}``
+    one, else the call's) goes to its comparison as given, so a list -- the call's
+    ``aggregate=[...]`` or one an entry carries -- fans *within* that entry (see
+    :func:`_compare_aggregate_fan`), an entry with its own aggregate never inheriting
+    the call's list. The pooled set is therefore ordered entry by entry, then by
+    each entry's own aggregate fan; an entry fanning to several members labels them
+    ``"<member label> <entry label>"``.
+    """
+    selects = kwargs["selects"]
+    if not isinstance(selects, dict) or not selects:
+        raise ValueError(
+            "compare() takes selects={label: select, ...}, a non-empty dict of "
+            f"labelled selects, got {selects!r}."
+        )
+    base = _normalize_pair(kwargs.get("select"), "select", normalize_side=as_select)
+    # every entry is checked before the first one runs, so a bad one is not found
+    # only after the earlier ones have been aligned
+    entries: list[tuple[str, Any, Any]] = []
+    for label, raw in selects.items():
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                f"compare() selects= labels must be non-empty strings, got {label!r}."
+            )
+        raw, own_aggregate = selects_entry_parts(raw)
+        aggregate = kwargs.get("aggregate") if own_aggregate is None else own_aggregate
+        entry = _normalize_pair(raw, f"selects[{label!r}]", normalize_side=as_select)
+        if isinstance(aggregate, list | tuple):
+            # a list fans inside the entry; validate it here, before anything runs
+            _aggregate_fan(aggregate, caller=f"compare() selects[{label!r}]")
+        entries.append((label, _merged_select(base, entry), aggregate))
+    members: list[Comparison] = []
+    for n, (label, merged, aggregate) in enumerate(entries, start=1):
+        if len(entries) > 1:
+            print(f"  select {n}/{len(entries)}: {label}")
+        sub = compare(
+            **{**kwargs, "select": merged, "aggregate": aggregate, "selects": None}
+        )
+        for c in sub:
+            c.label = label if len(sub) == 1 else f"{c.label} {label}"
+            members.append(c)
+    return ComparisonSet(members)
+
+
 #: Numbers (``0.0022``, ``2024-08-01``, ``51``) vary pair to pair in an otherwise
 #: identical warning, so they are masked when deciding two warnings are the same one.
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
@@ -13440,6 +13581,7 @@ def compare(
     depths=None,
     times: dict[str, Any] | list | tuple | str | None = None,
     select: dict[str, Any] | None = None,
+    selects: dict[str, dict[str, Any]] | None = None,
     aggregate: dict[str, Any] | list[dict[str, Any]] | None = None,
     method: str = "conservative_normed",
     over: str | None = None,
@@ -13518,6 +13660,39 @@ def compare(
         *test* source's time axis, resolved to its date when the comparison is
         built (both lanes then get that instant); it is refused on a pair-spec's
         ``reference`` side. ``None`` (default) selects nothing.
+    selects
+        ``{label: select}`` -- one comparison per labelled select, fanned like
+        ``variables=``/``depths=`` (``None``, the default, is no fan). Each entry is
+        a select as above (a plain dict or a pair-spec), merged *over* ``select=``,
+        which keeps meaning the base every entry shares (a time window, a depth):
+        an axis named in both takes the labelled entry's value. An entry may instead
+        be ``{"select": <select>, "aggregate": <aggregate>}`` (exactly those keys,
+        ``aggregate`` optional) to carry its own aggregate: it *replaces* the call's
+        ``aggregate=`` for that entry as a whole -- no per-axis merge -- and may be
+        a pair-spec or a list, like ``aggregate=`` itself. That is how a lon-mean
+        slab (``{"time": "mean", "lon": "mean"}``) sits beside a plain time-mean
+        transect in one call. Members are ordered entry by entry, then by the
+        call's own variable/depth fan. Each member's label
+        is the entry's label, so a section plot stacks them as rows titled by it in
+        one figure -- the three transects of one variable on one page::
+
+            osk.compare(
+                reference="woa23_temperature_monthly", test="his",
+                variables=["temperature"], select={"depth": [0, 50, 100, 200]},
+                aggregate={"time": "mean"},
+                selects={
+                    "Equator": {"transect": {"lat": 0}},
+                    "180-160W": {
+                        "select": {"lon": {"min": 180, "max": 200},
+                                   "lat": {"min": -30, "max": 30}},
+                        "aggregate": {"time": "mean", "lon": "mean"},
+                    },
+                },
+            ).plot()
+
+        With more variables, depths or aggregates the label follows the member's own
+        (``"temperature Equator"``). Empty, a non-dict entry or an empty label is
+        refused.
     aggregate
         Dict of axis -> reduction (e.g. ``{"time": "mean"}``), or the same
         ``{"test": ..., "reference": ...}`` pair-spec shape as ``select``.
@@ -14122,10 +14297,19 @@ def compare(
     if isinstance(variables, str | dict):
         variables = [variables]
 
+    # selects={label: select} fans one comparison per labelled select (see
+    # _compare_selects_fan), each re-entering with that select merged over the
+    # shared select=, selects=None and that entry's aggregate -- its own when it
+    # has one, else the call's. This fan is the outermost, so an aggregate list
+    # below fans *within* each entry (which may itself carry a list) rather than
+    # re-running entries whose own aggregate replaces it. Taken before anything
+    # else is computed, so `locals()` is still just the arguments.
+    if selects is not None:
+        return _compare_selects_fan(dict(locals()))
+
     # A top-level list of whole aggregate specs fans like variables=/depths= do --
     # see _compare_aggregate_fan, which re-enters this function once per spec with
-    # every other argument exactly as given. Taken before anything else is
-    # computed, so `locals()` is still just the arguments.
+    # every other argument exactly as given.
     if isinstance(aggregate, list | tuple):
         return _compare_aggregate_fan(dict(locals()))
 

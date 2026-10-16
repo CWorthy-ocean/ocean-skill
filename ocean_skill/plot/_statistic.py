@@ -76,13 +76,15 @@ def statistic_of(obj) -> str | None:
 def units_text(units, statistic=None) -> str:
     """Return ``units`` as a colour bar or axis should print it.
 
-    Unchanged for a plain field, so no existing label moves. For a *spread* statistic
-    (:func:`ocean_skill.units.is_spread`) the units are the machine spelling
-    ``for_statistic`` left (``delta_degC^2``) and are shown readably instead
-    (:func:`ocean_skill.units.display`: ``°C²``). ``None``/empty units give ``""``.
+    Always through :func:`ocean_skill.units.display`, so one unit reads one way however
+    the file spelled it (``degrees_celsius`` and ``degree_Celsius`` are both ``°C``,
+    ``mmol m-3`` is ``mmol/m³``) and the machine spelling of a spread statistic
+    (``delta_degC^2``, from ``for_statistic``) reads ``°C²``. ``statistic`` is kept so
+    callers need not change; display is the same for every statistic. ``None``/empty
+    units give ``""``.
     """
     if not units:
         return ""
-    from ocean_skill.units import display, is_spread
+    from ocean_skill.units import display
 
-    return display(str(units)) if is_spread(statistic) else str(units)
+    return display(str(units))

@@ -509,7 +509,7 @@ def test_bad_limits_are_refused():
 def test_axis_labels_use_short_names_and_agreed_units():
     layout = _xy.compose(_ts_items())
     assert layout.xlabel == "salinity"  # no units to give
-    assert layout.ylabel == "temperature [degC]"
+    assert layout.ylabel == "temperature [°C]"
     # a dimensionless "1" is not worth a bracket
     assert _xy.compose([_item(x_units="1")]).xlabel == "salinity"
     assert _xy.compose([_item(x_units="PSU")]).xlabel == "salinity [PSU]"
@@ -534,7 +534,7 @@ def test_label_units_compare_by_unit_not_spelling():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         layout = _xy.compose(items)
-    assert layout.ylabel == "temperature [degC]"  # the first member's spelling
+    assert layout.ylabel == "temperature [°C]"  # one display spelling
     assert layout.xlabel == "salinity [PSU]"  # a bare number is not shown
     numbers_only = [_item("A", x_units="1"), _item("B", x_units="1e-3")]
     assert _xy.compose(numbers_only).xlabel == "salinity"
@@ -837,7 +837,7 @@ def test_one_panel_draws_a_cloud_and_two_profiles():
         tuple(np.round(line.get_xdata()[:1], 6)) for line in ax.lines
     ]  # drawn, in data order
     assert ax.get_title() == "North West Pacific"
-    assert (ax.get_xlabel(), ax.get_ylabel()) == ("salinity", "temperature [degC]")
+    assert (ax.get_xlabel(), ax.get_ylabel()) == ("salinity", "temperature [°C]")
     assert not _contours(ax)  # density is off unless asked for
 
 
@@ -1014,7 +1014,7 @@ def test_density_with_temperature_on_x():
     (ax,) = _panel_axes(fig)
     (contours,) = _contours(ax)
     assert list(contours.levels) == [25.0, 26.0, 27.0]
-    assert (ax.get_xlabel(), ax.get_ylabel()) == ("temperature [degC]", "salinity")
+    assert (ax.get_xlabel(), ax.get_ylabel()) == ("temperature [°C]", "salinity")
 
 
 def test_density_for_other_variables_is_a_clear_error():
@@ -1024,7 +1024,7 @@ def test_density_for_other_variables_is_a_clear_error():
     # but the same plot without density draws
     fig = _draw(nutrients)
     (ax,) = _panel_axes(fig)
-    assert (ax.get_xlabel(), ax.get_ylabel()) == ("phosphate", "nitrate [degC]")
+    assert (ax.get_xlabel(), ax.get_ylabel()) == ("phosphate", "nitrate [°C]")
 
 
 # --- renderer: color_by ---------------------------------------------------------------

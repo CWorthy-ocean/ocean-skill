@@ -31,6 +31,7 @@ has seen yet still parses if it follows the conventions; only genuine typos
 
 from __future__ import annotations
 
+import functools
 import importlib.resources
 import re
 import warnings
@@ -517,25 +518,222 @@ def for_statistic(unit_string, statistic: str | None):
 #: ``^2`` / ``**2`` -> ``²``: the exponent characters a label can use.
 _SUPERSCRIPTS = str.maketrans("0123456789-", "⁰¹²³⁴⁵⁶⁷⁸⁹⁻")
 _EXPONENT = re.compile(r"(?:\^|\*\*)(-?\d+)")
-_DELTA_DEGREE = re.compile(r"\bdelta_(?:degree_)?(?:deg)?(C|Celsius|F|Fahrenheit)\b")
-_DEGREE = re.compile(r"\bdeg(?:ree)?s?_?(C|Celsius|F|Fahrenheit)\b")
+#: ``delta_degC`` / ``Δ°C``: the prefix :func:`for_statistic` puts on a difference.
+_DELTA = re.compile(r"\b(?:delta_|Δ)", re.IGNORECASE)
+#: Every spelling of degrees Celsius / Fahrenheit seen in CF, pint, WOA and ROMS files
+#: -- ``degC``, ``deg_C``, ``degrees_Celsius``, ``Degree Celsius``, ``celsius``, the
+#: ``celcius`` misspelling in real WOA-derived files -- in any case. A bare ``C`` or
+#: ``F`` is a coulomb or a farad, so a letter only counts after ``deg``/``degree(s)``.
+_DEGREE = re.compile(
+    r"(?<![\w°])(?:deg(?:ree)?s?[_ ]?(?P<letter>[CF])"
+    r"|(?:deg(?:ree)?s?[_ ]?)?(?P<word>celsius|celcius|centigrade|fahrenheit))"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
+)
+#: ``(<units>)^2`` and ``<symbol>^2``: a power of something :func:`display` can spell
+#: recursively. The bare-symbol form excludes ``/``, spaces and brackets so ``mg/m^3``
+#: is left to :func:`_display_unit` whole.
+_POWER = r"(?:(?:\^|\*\*)\s*(?P<n>-?\d+)|(?P<sup>[⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+))$"
+_POWER_OF_GROUP = re.compile(r"^\((?P<base>.+)\)\s*" + _POWER)
+_POWER_OF_SYMBOL = re.compile(r"^(?P<base>[^/()\s*^⁻⁰¹²³⁴⁵⁶⁷⁸⁹]+)\s*" + _POWER)
+#: pint prints litres as a lowercase ``l`` (``mmol/l``, ``ml``); oceanographers write
+#: ``L`` (``mL/L``, ``µg/L``). Only the unit ``l`` with an optional SI prefix.
+_LITRE = re.compile(r"(?<![A-Za-z])([munpµkcd]?)l(?![A-Za-z])")
+#: pint's symbol for the sverdrup is ``sv`` (``Sv`` is the sievert there); ocean
+#: transports are written ``Sv``.
+_SVERDRUP = re.compile(r"(?<![A-Za-z])sv(?![A-Za-z])")
+
+
+def _superscript(text: str) -> str:
+    return _EXPONENT.sub(lambda m: m.group(1).translate(_SUPERSCRIPTS), text)
+
+
+def _compose(unit) -> str:
+    """Spell ``unit`` as ``num/den`` in pint's symbols, factors as they were written.
+
+    pint's own ``~P`` sorts the denominator into a chain (``mmol/d/m³``); a label reads
+    ``mmol/(m³ d)``. ``""`` for a dimensionless unit.
+    """
+    ureg = registry()
+
+    def side(factors) -> str:
+        return " ".join(
+            format(ureg.Unit(name), "~P")
+            + (str(abs(power)).translate(_SUPERSCRIPTS) if abs(power) != 1 else "")
+            for name, power in factors
+        )
+
+    items = list(unit._units.items())
+    top = side((n, p) for n, p in items if p > 0)
+    bottom = side((n, p) for n, p in items if p < 0)
+    if not bottom:
+        return top
+    if " " in bottom:
+        bottom = f"({bottom})"
+    return f"{top or '1'}/{bottom}"
+
+
+def _pint_symbols(text: str) -> str | None:
+    """Return the compact symbol form of ``text`` (``mmol m-3`` -> ``mmol/m³``).
+
+    ``None`` when pint cannot read it, when the result would not read back as the same
+    unit (a label must never change what the number means), or when the unit is
+    dimensionless (``1``, ``1e-3``: nothing to print). Tried as written first and then
+    lower-cased, so ``MMOL/M3`` still lands; the as-written reading wins because case
+    is meaningful (``M`` is molar, ``m`` is meters).
+    """
+    # The lower-cased retry is for an ALL-CAPS string (``MMOL/M3``) or whole words in
+    # title case (``Kelvin``, ``Meters_per_second``) only: any other capital is
+    # meaningful (``Fe``, ``N``, ``M``) and lower-casing it reads another unit.
+    words = re.findall(r"[A-Za-z]+", text)
+    retry = text.isupper() or all(
+        w.islower() or (w.istitle() and len(w) > 3) for w in words
+    )
+    for candidate in (text, text.lower()) if retry else (text,):
+        unit = parse(candidate)
+        if unit is None:
+            continue
+        symbols = _compose(unit)
+        if not symbols:
+            return None
+        symbols = _SVERDRUP.sub("Sv", _LITRE.sub(lambda m: m.group(1) + "L", symbols))
+        if parse(symbols) != unit:
+            return None
+        return symbols
+    return None
+
+
+#: A leading numeric factor, ``1e9 kg/s``: kept as written, never read as a unit.
+_FACTOR = re.compile(
+    r"^(?P<factor>[0-9.]+(?:[eE][-+]?\d+)?)(?:\s+|\s*[x×*]\s*)(?P<rest>[A-Za-zµμ(].*)$"
+)
+#: The PSU spellings (case-insensitive). Other things :func:`normalize` also maps onto
+#: PSU for *comparison* (``ppt``, ``parts per thousand``) are the same number but not
+#: the same label, so they are shown as written.
+_PSU_SPELLINGS = frozenset(
+    {"psu", "practical salinity units", "practical_salinity_units"}
+)
+#: Words whose pint reading differs from what the label means: ``kt`` is the knot to
+#: pint and a kiloton to a carbon budget; ``ppt`` is pico-pint to pint and parts per
+#: thousand to a salinity; ``units`` is micro-"nit". A string containing one is left as
+#: written.
+_AMBIGUOUS_WORDS = frozenset(
+    {"kt", "ppt", "ppth", "unit", "units", "unitless", "dimensionless", "ph"}
+)
+_WORD_SPLIT = re.compile(r"[\s/*.^()]+")
+#: An element or compound written *as a label on a mass or amount* (``mg C m-3``,
+#: ``mmol N m-2 d-1``, ``mg Chl m-3``, ``mmol CaCO3 m-3``). To pint a bare ``C`` is
+#: degC, ``N`` a newton, ``P`` a poise, and ``Fe`` an unreadable femto-something, so
+#: these words are lifted out before pint reads the rest and put back after the
+#: first unit. ``(?<=\S)\s+`` means a leading ``N m-2`` is still the newton.
+_LABEL_WORD = (
+    r"(?:[Cc]hl(?:[-_ ]?a)?|CaCO3|NO3|NO2|NH4|PO4|SiO[234]|CO2|O2|"
+    r"Si|Fe|Zn|Mn|Cu|Cd|Ni|Co|Al|C|N|P|O)"
+)
+_LABEL = re.compile(r"(?<=\S)\s+(?P<label>" + _LABEL_WORD + r")(?=$|[\s/*.])")
+#: Evidence that a unit really is a temperature, as opposed to carbon spelled ``C``.
+_TEMPERATURE_WORD = re.compile(
+    r"deg|celsius|celcius|centigrade|fahrenheit|°", re.IGNORECASE
+)
+
+
+def _is_mass_or_amount(unit_string: str) -> bool:
+    """Whether ``unit_string`` is a mass, amount or volume unit (``mg``, ``mL``).
+
+    Those are the units an element or gas word (``mg C``, ``mL O2``) can follow.
+    """
+    unit = parse(unit_string)
+    if unit is None:
+        return False
+    return unit.dimensionality in (
+        registry().Unit("g").dimensionality,
+        registry().Unit("mol").dimensionality,
+        registry().Unit("L").dimensionality,
+    )
+
+
+def _display_labelled(text: str, label: re.Match) -> str:
+    """Spell ``mg C m-3`` as ``mg C/m³``: the element word is kept as written.
+
+    The word goes back right after the leading mass/amount unit. When the text is not
+    that shape (the word follows something else, there are two, or the remainder does
+    not start with the unit it should) it is returned as written, superscripts aside:
+    an unrecognized layout is left alone, never guessed at.
+    """
+    base, rest = text[: label.start()], text[label.end() :]
+    if (
+        not re.fullmatch(r"[A-Za-zµμ]+", base)
+        or not _is_mass_or_amount(base)
+        or _LABEL.search(rest)
+    ):
+        return _superscript(text)
+    head = _display_unit(base)
+    spelled = _display_unit((base + rest).strip())
+    if not spelled.startswith(head):
+        return _superscript(text)
+    return f"{head} {label['label']}{spelled[len(head) :]}"
+
+
+@functools.lru_cache(maxsize=512)
+def _display_unit(text: str) -> str:
+    """:func:`display` for one unit expression (no leading power of a group)."""
+    group = _POWER_OF_GROUP.match(text) or _POWER_OF_SYMBOL.match(text)
+    if group is not None:
+        base = _display_unit(group["base"].strip())
+        inner = f"({base})" if _POWER_OF_GROUP.match(text) else base
+        return inner + (group["sup"] or group["n"].translate(_SUPERSCRIPTS))
+    text = _DELTA.sub("", text)
+    if text.startswith("(") and _NUMERIC.match(text[1:-1]):
+        text = text[1:-1]  # a squared salinity, ``(1e-06)``
+    if _NUMERIC.match(text):
+        return text  # WOA's salinity ``1e-3`` is not a spelling of anything else
+    factor = _FACTOR.match(text)
+    if factor is not None:  # ``1e9 kg/s``: the factor is part of the unit
+        rest = _display_unit(factor["rest"].strip())
+        return rest if float(factor["factor"]) == 1 else f"{factor['factor']} {rest}"
+    text = _DEGREE.sub(lambda m: "°" + (m["letter"] or m["word"])[0].upper(), text)
+    if "°" in text:
+        # An offset unit: pint would turn it into a delta and mangle compound forms.
+        return _superscript(text)
+    if normalize(text) == "PSU":
+        return "PSU" if text.lower() in _PSU_SPELLINGS else _superscript(text)
+    if any(w.lower() in _AMBIGUOUS_WORDS for w in _WORD_SPLIT.split(text) if w):
+        return _superscript(text)
+    label = _LABEL.search(text)
+    if label is not None:
+        return _display_labelled(text, label)
+    if normalize(text) == "oxygen_ml_per_l":
+        return "mL/L"
+    symbols = _pint_symbols(text)
+    if symbols is None or ("°" in symbols and not _TEMPERATURE_WORD.search(text)):
+        return _superscript(text)  # a bare ``C`` is carbon, not degC: say what was said
+    return symbols
 
 
 def display(unit_string) -> str:
-    """Return ``unit_string`` spelled for a colorbar or axis label.
+    """Return ``unit_string`` spelled once, for a colorbar or axis label.
 
-    The strings :func:`for_statistic` produces are written for pint, not for people:
-    ``delta_degC^2`` reads as ``°C²`` here and ``(mg/m^3)^2`` as
-    ``(mg/m³)²``. ``delta_`` is dropped (a spread of temperatures is plainly
-    in degrees), ``degC``/``degF`` become ``°C``/``°F`` and ``^n`` / ``**n``
-    become superscripts. A string with none of those is returned as it came, so it is
-    safe to run over every label; ``None`` is ``""``.
+    Every user-visible unit goes through here, so one quantity reads one way however
+    the file spelled it: ``degrees_celsius``, ``degree_Celsius``, ``Degrees_Celsius``
+    and ``deg_C`` are all ``°C``; ``mmol m-3``, ``mmol/m3`` and ``millimole m-3`` are
+    all ``mmol/m³``; ``umol kg-1`` and ``micromoles_per_kilogram`` are ``µmol/kg``;
+    ``m s-1`` is ``m/s``; ``psu``, ``PSU`` and ``practical_salinity_units`` are
+    ``PSU``.
+
+    Spelling only, never meaning: ``PSU`` is not turned into ``g/kg``, ``ppt`` is not
+    turned into ``PSU``, the bare ``1e-3`` and a leading factor (``1e9 kg/s``) are left
+    exactly as written, and an element word on a mass or amount (``mg C m-3``,
+    ``mmol N m-2``, ``mg Chl m-3``) stays where it was (``mg C/m³``) rather than being
+    read as degC, newton or the like. Only ``deg C``/``degC``/``degrees_Celsius`` and
+    kin are temperatures. A string pint cannot read, or reads ambiguously (``kt``,
+    ``pH units``), is returned as it came, apart from the superscripts. Derived units
+    from :func:`for_statistic` read as people write them: ``delta_degC^2`` is ``°C²``
+    and ``(mg/m^3)^2`` is ``(mg/m³)²`` (``delta_`` is dropped: a spread of
+    temperatures is plainly in degrees). Idempotent, so safe to run over any label;
+    ``None`` or blank is ``""``.
     """
-    text = "" if unit_string is None else str(unit_string)
-    text = _DELTA_DEGREE.sub(lambda m: "°" + m.group(1)[0], text)
-    text = _DEGREE.sub(lambda m: "°" + m.group(1)[0], text)
-    text = re.sub(r"\bdelta_", "", text)
-    return _EXPONENT.sub(lambda m: m.group(1).translate(_SUPERSCRIPTS), text)
+    text = "" if unit_string is None else str(unit_string).strip()
+    return _display_unit(text) if text else ""
 
 
 def convert_units(da, target: str = "mmol/m^3", rho: float = RHO_SEAWATER):

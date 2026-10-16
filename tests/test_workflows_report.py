@@ -30,6 +30,16 @@ def _figure(value: float = 1.0, figsize=None):
     return fig
 
 
+def _small(value: float = 1.0):
+    """A figure about 2.2in tall on a page: four of them (and no more) share one."""
+    return _figure(value, figsize=(6.0, 2.0))
+
+
+def _big(value: float = 1.0):
+    """A figure about 6.2in tall on a page: two of them never fit together."""
+    return _figure(value, figsize=(6.0, 6.0))
+
+
 def _full_bleed_figure(figsize):
     """A figure whose tight bbox is (almost) exactly ``figsize`` -- no default margins."""
     fig = plt.figure(figsize=figsize)
@@ -38,6 +48,11 @@ def _full_bleed_figure(figsize):
     ax.set_xticks([])
     ax.set_yticks([])
     return fig
+
+
+#: Twelve lines of notes: a divider header so tall that a 9.8in figure would have to
+#: shrink below :data:`~ocean_skill.workflows.report.MIN_FIT_SCALE` to fit under it.
+_LONG_NOTES = "\n".join(["A line of notes."] * 12)
 
 
 def _pagecount_by_bytes(pdf_path) -> int:
@@ -56,8 +71,8 @@ def _mediaboxes(pdf_path) -> list[tuple[float, float, float, float]]:
 
 def test_pages_all_land_in_the_pdf(tmp_path):
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
-        report.emit(_figure(), "01_a")
-        report.emit(_figure(2.0), "02_b")
+        report.emit(_big(), "01_a")
+        report.emit(_big(2.0), "02_b")
 
     pdf_path = tmp_path / "report.pdf"
     assert pdf_path.exists()
@@ -120,17 +135,18 @@ def test_every_pdf_page_is_a_fixed_letter_page_regardless_of_figure_shape(tmp_pa
         report.emit(_figure(figsize=(5.0, 5.0)), "square")  # a Taylor/target shape
 
     boxes = _mediaboxes(tmp_path / "report.pdf")
-    assert len(boxes) == 4
+    assert len(boxes) == 3  # default + wide share one page; tall and square do not
     for box in boxes:
         assert box == pytest.approx(_PAGE_PT, abs=0.5)
 
 
 def test_an_oversize_figure_grows_the_page_and_warns_instead_of_clipping(tmp_path):
+    """Too tall even once scaled to the page width (12x20in -> 8x13in)."""
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
-        report.emit(_figure(), "before")
+        report.emit(_small(), "before")
         with pytest.warns(UserWarning, match="does not fit"):
-            report.emit(_full_bleed_figure((12.0, 3.0)), "oversize")
-        report.emit(_figure(), "after")
+            report.emit(_full_bleed_figure((12.0, 20.0)), "oversize")
+        report.emit(_small(), "after")  # room on the first page, but not beside it
 
     boxes = _mediaboxes(tmp_path / "report.pdf")
     oversize_box = boxes[1]
@@ -163,19 +179,31 @@ def test_pngs_stay_tight_crops_not_full_letter_pages(tmp_path):
 def _log_pdf_writes(report):
     """Record every ``PdfPages.savefig`` call as ``"figure"`` or ``"divider:<title>"``.
 
-    A divider is the only page this module draws with text on the figure itself (the
-    figures here are bare ``pcolormesh`` axes), so the figure's own ``texts`` tell the
-    two apart; the title is the first of them.
+    A page with a divider (alone, or the header of figures) is the only one this module
+    draws with a title on the page figure itself (the figures here are bare
+    ``pcolormesh`` axes, and a caption is not a title), so the first of the figure's
+    ``texts`` tells the two apart. ``log.texts`` keeps every page's whole text, for the
+    captions.
     """
-    log: list[str] = []
+    log = _PageLog()
     real = report._pdf.savefig
 
     def savefig(fig, *args, **kwargs):
-        log.append(f"divider:{fig.texts[0].get_text()}" if fig.texts else "figure")
+        texts = [t.get_text() for t in fig.texts]
+        log.texts.append(texts)
+        log.append(f"divider:{texts[0]}" if texts else "figure")
         return real(fig, *args, **kwargs)
 
     report._pdf.savefig = savefig
     return log
+
+
+class _PageLog(list):
+    """The page kinds :func:`_log_pdf_writes` saw, plus each page's texts."""
+
+    def __init__(self):
+        super().__init__()
+        self.texts: list[list[str]] = []
 
 
 def test_a_section_is_buffered_then_written_just_before_the_next_figure(tmp_path):
@@ -184,10 +212,11 @@ def test_a_section_is_buffered_then_written_just_before_the_next_figure(tmp_path
         report.section("s1", "Part one", "Some notes.")
         assert log == []  # queued, not written
         assert report.get_pagecount() == 0
-        report.emit(_figure(), "a")
-        report.emit(_figure(2.0), "b")
+        report.emit(_small(), "a")
+        report.emit(_small(2.0), "b")
 
-    assert log == ["divider:Part one", "figure", "figure"]
+    # one page: the divider's header with both figures under it
+    assert log == ["divider:Part one"]
     assert report.written_sections == {"s1"}
 
 
@@ -196,15 +225,15 @@ def test_a_newer_section_replaces_one_still_pending(tmp_path):
         log = _log_pdf_writes(report)
         report.section("old", "Empty part", "Every page of this one skipped.")
         report.section("new", "Real part", "")
-        report.emit(_figure(), "a")
+        report.emit(_small(), "a")
 
-    assert log == ["divider:Real part", "figure"]
+    assert log == ["divider:Real part"]
     assert report.written_sections == {"new"}  # the older one was never written
 
 
 def test_a_section_still_pending_at_exit_is_dropped(tmp_path):
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
-        report.emit(_figure(), "a")
+        report.emit(_small(), "a")
         report.section("trailing", "Nothing follows", "")
 
     assert report.written_sections == set()
@@ -212,18 +241,31 @@ def test_a_section_still_pending_at_exit_is_dropped(tmp_path):
     assert _pagecount_by_bytes(tmp_path / "report.pdf") == 1
 
 
-def test_only_the_first_figure_after_a_section_gets_the_divider(tmp_path):
-    """A compare page can emit several figures; the divider precedes just the first."""
+def test_a_section_starts_a_new_page_even_when_the_last_one_has_room(tmp_path):
+    """A compare page can emit several figures; the divider heads just the first."""
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         log = _log_pdf_writes(report)
         report.section(1, "Part", "")
-        report.emit(_figure(), "a")
-        report.emit(_figure(), "a_taylor")
+        report.emit(_small(), "a")
+        report.emit(_small(), "a_taylor")
         report.section(2, "Next part", "")
-        report.emit(_figure(), "b")
+        report.emit(_small(), "b")
 
-    assert log == ["divider:Part", "figure", "figure", "divider:Next part", "figure"]
+    assert log == ["divider:Part", "divider:Next part"]
     assert report.written_sections == {1, 2}
+
+
+def test_a_figure_too_tall_to_fit_under_its_divider_leaves_it_a_page_of_its_own(
+    tmp_path,
+):
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        log = _log_pdf_writes(report)
+        report.section(1, "Part one", _LONG_NOTES)
+        report.emit(_full_bleed_figure((5.0, 9.8)), "tall")
+
+    assert log == ["divider:Part one", "figure"]
+    assert report.written_sections == {1}
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 2
 
 
 def test_a_section_is_pdf_only_and_never_shifts_the_png_numbering(tmp_path):
@@ -240,23 +282,34 @@ def test_a_section_is_pdf_only_and_never_shifts_the_png_numbering(tmp_path):
     assert [p.name for p in report.png_paths] == ["01_a.png", "02_b.png"]
 
 
-def test_get_pagecount_counts_the_dividers_actually_written(tmp_path):
+def test_get_pagecount_counts_the_pages_actually_written(tmp_path):
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
-        report.emit(_figure(), "a")
+        report.emit(_big(), "a")
+        assert report.get_pagecount() == 0  # the open page is not written yet
         report.section(1, "Part", "")
-        assert report.get_pagecount() == 1  # still only queued
-        report.emit(_figure(), "b")
-        assert report.get_pagecount() == 3  # figure, divider, figure
+        assert report.get_pagecount() == 1  # a new section closes it; still queued
+        report.emit(_big(), "b")
         report.section(2, "Trailing", "")
+        assert report.get_pagecount() == 2  # b closed by the section; divider queued
 
-    assert report.get_pagecount() == 3
-    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 3
+    assert report.get_pagecount() == 2
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 2
 
 
-def test_a_divider_is_an_exact_letter_page(tmp_path):
+def test_a_divider_with_its_figure_is_an_exact_letter_page(tmp_path):
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.section(1, "Part one", "A paragraph of notes. " * 20)
         report.emit(_figure(figsize=(8.5, 2.7)), "wide")
+
+    boxes = _mediaboxes(tmp_path / "report.pdf")
+    assert len(boxes) == 1  # the figure fits under the divider's header
+    assert boxes[0] == pytest.approx(_PAGE_PT, abs=0.5)
+
+
+def test_a_divider_alone_is_an_exact_letter_page(tmp_path):
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        report.section(1, "Part one", _LONG_NOTES)
+        report.emit(_full_bleed_figure((5.0, 9.8)), "tall")
 
     boxes = _mediaboxes(tmp_path / "report.pdf")
     assert len(boxes) == 2
@@ -296,7 +349,7 @@ def test_a_divider_draws_for_any_notes_shape(tmp_path, text):
         report.emit(_figure(), "a")
 
     assert report.written_sections == {1}
-    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 2
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 1
 
 
 # -- compress_pdf_images -----------------------------------------------------------
@@ -345,14 +398,18 @@ def _leftovers(directory) -> list[str]:
 
 
 @pytest.mark.skipif(shutil.which("gs") is None, reason="Ghostscript (gs) not installed")
-def test_compress_pdf_images_shrinks_a_rasterized_report_and_keeps_its_pages(tmp_path):
+def test_compress_pdf_images_shrinks_a_rasterized_report_and_keeps_its_pages(
+    tmp_path, monkeypatch
+):
+    # unfilled pages: their mesh images are the file's bulk, which is what this is about
+    monkeypatch.setattr(_report, "MAX_FILL_SCALE", 1.0)
     pdf = tmp_path / "report.pdf"
     with PdfReport(pdf, tmp_path / "figures") as report:
         report.emit(_map_like_figure(0), "a")
         report.section(1, "Part two", "Notes.")
         report.emit(_map_like_figure(1), "b")
     pages_before = _gs_pagecount(pdf)
-    assert pages_before == 3
+    assert pages_before == 2  # a, then the divider with b under it
     size_before = pdf.stat().st_size
 
     sizes = compress_pdf_images(pdf)
@@ -547,3 +604,106 @@ def test_rasterize_skips_contour_sets_without_warning():
     assert ax.collections[0].get_rasterized()
     assert not contours.get_rasterized()
     plt.close(fig)
+
+
+# -- __exit__ and the original exception ---------------------------------------------
+
+
+def _fail_the_last_write(monkeypatch):
+    def boom(self, *a, **k):
+        raise OSError("disk full")
+
+    # a lone figure that has room is enlarged and written packed, else alone (vector)
+    monkeypatch.setattr(PdfReport, "_write_alone", boom)
+    monkeypatch.setattr(PdfReport, "_write_packed", boom)
+
+
+def _write_report_raising(tmp_path, error):
+    """Run a report block that emits a figure and then raises ``error``."""
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        report.emit(_small(), "a")
+        raise error
+
+
+def test_a_flush_failure_does_not_replace_the_exception_already_in_flight(
+    tmp_path, monkeypatch
+):
+    _fail_the_last_write(monkeypatch)
+    with (
+        pytest.warns(UserWarning, match=r"last page .*disk full.*while KeyError"),
+        pytest.raises(KeyError, match="the real problem"),
+    ):
+        _write_report_raising(tmp_path, KeyError("the real problem"))
+
+
+def test_the_pdf_is_still_closed_when_the_last_page_could_not_be_written(
+    tmp_path, monkeypatch
+):
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    _fail_the_last_write(monkeypatch)
+    closed = []
+    real_exit = PdfPages.__exit__
+    monkeypatch.setattr(
+        PdfPages,
+        "__exit__",
+        lambda self, *a: (closed.append(a[0]), real_exit(self, *a))[1],
+    )
+    with pytest.warns(UserWarning, match="last page"), pytest.raises(KeyError):
+        _write_report_raising(tmp_path, KeyError("x"))
+    assert closed == [KeyError]  # closed with the original error, not the flush's
+
+
+def test_a_flush_failure_with_nothing_in_flight_is_raised(tmp_path, monkeypatch):
+    _fail_the_last_write(monkeypatch)
+    with (
+        pytest.raises(OSError, match="disk full"),
+        PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report,
+    ):
+        report.emit(_small(), "a")
+
+
+# -- one divider layout --------------------------------------------------------------
+
+
+def _rules(fig):
+    from matplotlib.lines import Line2D
+
+    return [a for a in fig.artists if isinstance(a, Line2D)]
+
+
+def test_a_stand_alone_divider_and_a_packed_pages_header_are_one_layout(monkeypatch):
+    """Both go through ``_draw_header``: same title, rule and notes, same geometry."""
+    title, notes = "Part one", "Some notes about the part."
+
+    alone = _report._section_figure(title, notes)
+    assert alone.get_size_inches() == pytest.approx((_report.PAGE_W, _report.PAGE_H))
+
+    heading = plt.figure(figsize=(_report.PAGE_W, _report.PAGE_H))
+    top = _report.SECTION_TOP_Y * _report.PAGE_H
+    _report._draw_header(heading, _report.PAGE_W / 2, top, title, notes)
+
+    def geometry(fig):
+        return (
+            [(t.get_text(), t.get_position(), t.get_fontsize()) for t in fig.texts],
+            [ln.get_xydata().tolist() for ln in _rules(fig)],
+        )
+
+    assert len(_rules(alone)) == 1
+    assert geometry(alone) == geometry(heading)
+    plt.close(heading)
+
+
+def test_a_stand_alone_divider_hangs_from_the_top_third_with_a_rule_and_notes():
+    fig = _report._section_figure("Part one", "Some notes.")
+    title, notes = fig.texts
+    (rule,) = _rules(fig)
+    assert title.get_text() == "Part one" and title.get_ha() == "center"
+    assert 0.5 < title.get_position()[1] < 0.7  # a little above the page's middle
+    # title, then its rule, then the notes below it
+    assert title.get_position()[1] > rule.get_ydata()[0] > notes.get_position()[1]
+
+
+def test_a_title_only_divider_has_a_title_and_a_rule_and_no_notes():
+    fig = _report._section_figure("Part one", "")
+    assert [t.get_text() for t in fig.texts] == ["Part one"] and len(_rules(fig)) == 1

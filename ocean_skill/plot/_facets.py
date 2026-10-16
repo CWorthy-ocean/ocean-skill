@@ -35,6 +35,15 @@ __all__ = [
 #: fixes the grid's opposite axis.
 _COMPLEMENT = {"variable": "source", "source": "variable"}
 
+#: The two further facts a *map* item carries when a :class:`~ocean_skill.field
+#: .FieldSet` fans one variable over levels and statistics -- ``depth`` (the level the
+#: panel was cut at) and ``statistic`` (the aggregate that made it, spelled as its
+#: member label does: ``"mean"``, ``"std of monthly means"``). Only a set of maps
+#: names them (``extended=True`` below): a ``time_depth`` panel *draws* depth and so
+#: refuses it (see ``axis_hint``). Naming one implies the other for the opposite axis.
+_MAP_FACTS = ("depth", "statistic")
+_MAP_COMPLEMENT = {"depth": "statistic", "statistic": "depth"}
+
 #: ``shared_limits=``'s own accepted spellings, beyond ``True``/``False`` --
 #: the same vocabulary ``rows=``/``cols=`` use (see :func:`facet_key`).
 _LIMIT_VALUES = ("variable", "standard_name", "source")
@@ -44,7 +53,14 @@ def _normalize(by: str) -> str:
     return "variable" if by in ("variable", "standard_name") else by
 
 
-def facet_key(item: dict[str, Any], by: str, *, family: str, axis_hint: bool = False):
+def facet_key(
+    item: dict[str, Any],
+    by: str,
+    *,
+    family: str,
+    axis_hint: bool = False,
+    extended: bool = False,
+):
     """Return the value ``item`` is grouped by, for a one-item-per-panel grid's
     ``rows=``/``cols=``/``shared_limits=``.
 
@@ -55,8 +71,16 @@ def facet_key(item: dict[str, Any], by: str, *, family: str, axis_hint: bool = F
     no drawn time/depth axis to protect the same way) gives ``time``/``depth``
     their own dedicated refusal, mirroring
     :func:`ocean_skill.plot.profile._group_key`'s identical one for ``depth``.
+    ``extended=True`` (a set of maps) adds ``depth`` and ``statistic`` to the
+    vocabulary, read off the item's own ``depth`` and ``aggregate``/statistic.
     """
     normalized = _normalize(by)
+    if extended and by in _MAP_FACTS:
+        if by == "depth":
+            return item.get("depth")
+        from ocean_skill.plot._statistic import statistic_of
+
+        return item.get("aggregate") or statistic_of(item)
     if normalized == "variable":
         return item.get("standard_name") or item.get("label")
     if normalized == "source":
@@ -67,9 +91,8 @@ def facet_key(item: dict[str, Any], by: str, *, family: str, axis_hint: bool = F
             "already draws against, not a fact to split panels on. Facet on "
             "variable or source instead."
         )
-    raise ValueError(
-        f"cannot facet {family} by {by!r}; expected one of variable, source."
-    )
+    expected = "variable, source, depth, statistic" if extended else "variable, source"
+    raise ValueError(f"cannot facet {family} by {by!r}; expected one of {expected}.")
 
 
 def resolve_facets(
@@ -79,6 +102,7 @@ def resolve_facets(
     *,
     family: str,
     axis_hint: bool = False,
+    extended: bool = False,
 ):
     """Return ``None`` (no facet given) or ``(cells, row_values, col_values,
     eff_rows, eff_cols)`` for a ``rows=``/``cols=`` pair on a one-item-per-panel
@@ -98,6 +122,9 @@ def resolve_facets(
     :func:`~ocean_skill.plot.series.facet_grid`: a (row, column) combination
     nothing matched is an empty list, for :func:`one_item_cells` to draw as a
     hidden blank panel.
+
+    ``extended=True`` (a set of maps) also accepts ``depth`` and ``statistic`` (see
+    :func:`facet_key`), each implying the other for the opposite axis.
     """
     if rows is None and cols is None:
         return None
@@ -108,9 +135,13 @@ def resolve_facets(
         # complement and blaming the *other* axis instead.
         sample = items[0]
         if rows is not None:
-            facet_key(sample, rows, family=family, axis_hint=axis_hint)
+            facet_key(
+                sample, rows, family=family, axis_hint=axis_hint, extended=extended
+            )
         if cols is not None:
-            facet_key(sample, cols, family=family, axis_hint=axis_hint)
+            facet_key(
+                sample, cols, family=family, axis_hint=axis_hint, extended=extended
+            )
     if rows is not None and cols is not None:
         eff_rows, eff_cols = _normalize(rows), _normalize(cols)
         if eff_rows == eff_cols:
@@ -119,18 +150,24 @@ def resolve_facets(
                 f"a {family} needs two different facts (variable and source) "
                 "to build a grid from."
             )
-    elif rows is not None:
-        eff_rows = _normalize(rows)
-        eff_cols = _COMPLEMENT[eff_rows]
     else:
-        eff_cols = _normalize(cols)
-        eff_rows = _COMPLEMENT[eff_cols]
+        complement = {**_COMPLEMENT, **(_MAP_COMPLEMENT if extended else {})}
+        if rows is not None:
+            eff_rows = _normalize(rows)
+            eff_cols = complement[eff_rows]
+        else:
+            eff_cols = _normalize(cols)
+            eff_rows = complement[eff_cols]
 
     indexed = list(enumerate(items))
     cells, row_values, col_values = facet_grid(
         indexed,
-        lambda n, item: facet_key(item, eff_rows, family=family, axis_hint=axis_hint),
-        lambda n, item: facet_key(item, eff_cols, family=family, axis_hint=axis_hint),
+        lambda n, item: facet_key(
+            item, eff_rows, family=family, axis_hint=axis_hint, extended=extended
+        ),
+        lambda n, item: facet_key(
+            item, eff_cols, family=family, axis_hint=axis_hint, extended=extended
+        ),
     )
     return cells, row_values, col_values, eff_rows, eff_cols
 
@@ -240,7 +277,7 @@ def facet_grid_titles(
 
 
 def resolve_limit_groups(
-    items: list[dict[str, Any]], shared_limits: bool | str
+    items: list[dict[str, Any]], shared_limits: bool | str, *, extended: bool = False
 ) -> list[list[int]] | None:
     """Return ``None`` for ``shared_limits=False``; one group holding every
     item's index for ``True``; otherwise groups of indices sharing one
@@ -256,6 +293,9 @@ def resolve_limit_groups(
     colour scale -- impossible by construction for ``"variable"`` itself (a
     group's key *is* that fact), so only ``True`` or ``"source"`` can trigger
     it; ``True``'s own message text is unchanged from before this existed.
+    ``extended=True`` (a set of maps) also pools by ``"depth"`` or ``"statistic"`` (see
+    :func:`facet_key`) -- ``"statistic"`` is one scale per column of a
+    depth-by-statistic grid.
     """
     import warnings
 
@@ -265,11 +305,13 @@ def resolve_limit_groups(
         return None
     if shared_limits is True:
         groups = [list(range(len(items)))]
-    elif shared_limits in _LIMIT_VALUES:
+    elif shared_limits in _LIMIT_VALUES or (extended and shared_limits in _MAP_FACTS):
         order: list[Any] = []
         by_key: dict[Any, list[int]] = {}
         for i, item in enumerate(items):
-            key = facet_key(item, shared_limits, family="shared_limits")
+            key = facet_key(
+                item, shared_limits, family="shared_limits", extended=extended
+            )
             if key not in by_key:
                 order.append(key)
                 by_key[key] = []

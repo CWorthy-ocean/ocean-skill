@@ -116,7 +116,34 @@ pages:
     plot: {...}            # optional: kwargs forwarded to .plot()/.summary(), merged over defaults.plot
                             # (size:/zoom:/figsize: are pinned to the page canvas and warned
                             # about instead while pdf: true -- see Page size, below)
+    caption: "..."         # optional, any page but section:: text under the figure in report.pdf (see Captions)
 ```
+
+### Suite-wide plot options: `defaults.plot`
+
+`defaults: {plot: {...}}` is merged under every page's own `plot:` (the page's keys win),
+so a setting every figure should share is written once:
+
+```yaml
+defaults:
+  test: pac_dt_ramp
+  plot: {robust: true}        # every figure that has a robust color scale gets it
+pages:
+  - title: "Temperature"
+    field: {variables: [temperature]}
+  - title: "Salinity, full range"
+    field: {variables: [salinity]}
+    plot: {robust: false}     # this page's own value wins
+```
+
+A default only fills in where the page's draw method takes it. A page whose method does
+not (`robust` means nothing to a `draw: metrics_series` page or a T-S diagram) is drawn
+without it and a warning names the skipped option; the same option written in that
+page's own `plot:` is still an error. `summary:` pages take their keywords from the
+`summary:` dict alone, so `defaults.plot` never reaches them, and a `section:` has no plot.
+`defaults.plot.size/zoom/figsize` are pinned to the page canvas like a page's own (see
+Page size). `max_rows` (see `compare:`) is a plot default that is dropped on the pages it
+does not suit without a warning.
 
 `defaults.test` must be a single source name, not a list: `time: latest`, `month: run`,
 and the report directory's own time range are all read off *one* source's time axis,
@@ -232,6 +259,75 @@ page-size pinning under `pdf: true` (see Page size) applies the same way.
   draw: target
   plot: {arrows: true, color_by: variable}
 ```
+
+**`max_rows:` -- a long grid becomes several figures.** One row per comparison is
+readable up to a few rows; six variables at two statistics is twelve rows, each too small
+to read. A compare page that would draw a row grid (maps, sections, `time_depth` stations
+or `over:` skill maps: not the profile or series families, which overlay everything on
+one panel) with more than `plot: {max_rows: N}` rows (default `4`) is drawn as several
+figures of at most `N` rows each, in the set's own order, so a variable's two statistics
+stay together when `N` is a multiple of two. The first keeps the page's PNG name; the
+next ones get `_part2`, `_part3`, ... (after the family suffix, if there is one) and a
+title ending `(cont.)` -- an explicit `plot: {title: ...}` is extended, else the figure's
+own suptitle, else the figure is titled just `(cont.)`. `max_rows: null` (or `0`) draws
+one figure whatever the number of rows. It applies to `draw: plot` pages only (anywhere
+else a page's own `max_rows` is a schema error, and one from `defaults.plot` is ignored),
+and is not forwarded to `.plot()`. Everything else sees the whole set once: the metrics
+records, `--self-check`, the all-NaN drop and the summary pool are computed before it is
+cut, so cutting changes neither the CSV nor the problems list. A `contours:` overlay is
+cut with the fill.
+
+```yaml
+- title: "Seasonal mean and variance vs WOA23"
+  compare: {reference: [woa23_temperature_monthly, ...], variables: [temperature, salinity, nitrate], aggregate: [...]}
+  plot: {max_rows: 2}          # one variable (two statistics) per figure
+```
+
+**`over:` -- skill maps.** `over: time` (or `Z`) is forwarded to `compare(over=)`: each
+metric is computed cell by cell along that axis and drawn as a map instead of a test /
+reference / difference row (see [skill_maps.md](skill_maps.md)). A page with it needs no
+other key; the figure is one row of metric maps per comparison, so `max_rows` cuts it too.
+`--self-check`, the all-NaN skip and the metrics CSV treat it like any compare page (each
+record carries `over`).
+
+```yaml
+- title: "Chlorophyll skill against satellite"
+  compare: {reference: [modis_chl_daily], variables: [chlorophyll], select: {test: {depth: surface}, reference: {}}, over: time}
+```
+
+**`selects:`.** `compare(selects={label: select})`: one comparison per labelled select,
+each merged over the page's `select:` (stacked transects, say). A page whose `selects:`
+name a `transect` needs a flat `select:` (even `select: {depth: [0, 50, 100]}`): without
+one the page would get the run window as a `{test, reference}` pair-spec, which `compare()`
+refuses beside a transect, so it is an error naming the page. A flat select is used for
+both lanes as written and gets no run window. Other `selects:` get the window as usual, and
+an entry that names a `time` of its own must be closed against the run to be cached (see
+Caching).
+
+An entry may carry its own aggregate as `{select: {...}, aggregate: {...}}` (only those two
+keys), which replaces the page's `aggregate:` for that entry as a whole (no per-axis
+merge). That lets a transect and lon-mean box slabs stack in one figure:
+
+```yaml
+- title: "{variable} sections vs WOA23"
+  for_each: {variable: [temperature, salinity]}
+  compare:
+    reference: ["woa23_{variable}_annual"]
+    variables: ["{variable}"]
+    select: {depth: [5, 50, 100, 200, 500]}      # the shared base: depths
+    selects:
+      Equator:
+        select: {transect: {lat: 0, lon: {min: 143, max: 267}}}
+        aggregate: {time: mean}
+      180-160W mean:
+        select: {lon: {min: 180, max: 200}, lat: {min: -30, max: 30}}
+        aggregate: {time: mean, lon: mean}
+  contours: true
+```
+
+Rows run entry by entry, then variable by variable, each titled by its entry's label (or
+`"<variable> <label>"` when an entry gives several comparisons). A `contours:` overlay on
+such a page needs as many members as the fill: the same number of variables.
 
 An optional `notes:` string is display text for a later [`osk.table()`](tables.md): it
 goes to `compare(notes=)`, is stored on each comparison and in its metrics record, and
@@ -355,9 +451,55 @@ member is: see Caching.
 summary: {kind: both, color_by: variable}
 ```
 
-Pools the metric records from every `compare:` page that produced results (Taylor +
-target by default; `kind: portrait` for the scorecard heatmap). Skipped when no
-compare page succeeded.
+Pools the metric records of the `compare:` pages that produced results and draws them
+as overview figures. Skipped when no compare page succeeded. Besides the keywords
+`osk.summary` takes (`color_by`, `marker_by`, `legend_style`, `title`, ...), a summary
+page has three of its own:
+
+- **`kind:`** -- one kind or a list, each drawn as its own figure, in the order given:
+  `both` (Taylor and target side by side), `taylor`, `target`, `portrait` (the scorecard
+  heatmap) or `table` (the pooled metrics as a table). Default: `[both, table]` -- the
+  diagram a summary always drew, and the table under it. A page with one kind keeps the
+  plain `figures/NN_<title>.png`; with several, each PNG is suffixed with its kind
+  (`..._table.png`, `..._target.png`). A duplicate or unknown kind is a schema error.
+- **`scope:`** -- `all` (default) pools every compare page drawn so far; `section`
+  pools only those since the last `section:` divider (everything so far, if there is
+  none). A suite can then close each part with its own summary.
+- **`max_rows:`** -- for `table`: comparisons per table figure (default 25, about a
+  page); a longer table continues in further figures titled `... (cont.)` (PNGs
+  suffixed `_part2`, ...), with the header repeated. A figure also ends early when its
+  rows would no longer fit a Letter page -- long labels make tall rows -- so
+  `max_rows: 0` means "as many as fit a page". The diagram kinds ignore it, and `table` ignores `color_by` and
+  the other diagram options (only `title:`, default the page title, is shared).
+
+```yaml
+pages:
+  - title: "Part 1 -- temperature and salinity"
+    section: "Physics against WOA23."
+  - title: "Temperature profiles"
+    compare: {reference: [woa23_temperature_annual], variables: [temperature], select: {depth: [0, 50, 200]}}
+  - title: "Salinity profiles"
+    compare: {reference: [woa23_salinity_annual], variables: [salinity], select: {depth: [0, 50, 200]}}
+  - title: "Physics skill"
+    summary: {scope: section, kind: [table, target], color_by: variable}
+```
+
+The table has one row per pooled comparison (named as its Taylor/target point is, with
+depth and time window in a Notes column) and the columns bias, RMSE, CRMSD,
+correlation, standard-deviation ratio and n, in the same number formatting as
+`osk.table()` (three significant figures for dimensional metrics, two decimals for
+dimensionless ones, whole numbers for counts), whose layout it is. Units come from each
+record, spelled as the plots do: in the column headers when every row shares them, or
+in a `Units` column when they differ. Summary pages are static (matplotlib) like every
+suite page, so the table has no interactive form.
+
+Each page that draws a `table` also writes its numbers, unformatted and with a `units`
+column, to `metrics/<suite name>_<page title slug>.csv` beside the whole-suite
+`metrics/<suite name>.csv` (two summary pages with the same title overwrite each other's
+file). Records are pooled once per compare page, however many figures the page was cut
+into with `plot: {max_rows}`, and a comparison dropped as all-NaN is not pooled at all
+-- so a `--self-check` or partial run's summary counts exactly the comparisons its
+compare pages drew.
 
 ### `section:` -- a divider page
 
@@ -371,7 +513,9 @@ compare page succeeded.
 ```
 
 A page that is only text: `title:` as a large heading, centred, with the `section:`
-string wrapped beneath it, on a US Letter page of its own in `report.pdf`. It lets a long
+string wrapped beneath it. It heads the PDF page of the figure(s) that follow it when they
+fit under it (see Page size) and has a US Letter page of its own, with its text centred,
+when the next figure does not. It lets a long
 report have chapters. `section: ""` is a title-only divider; a YAML block scalar (`>-`
 folds the lines into one paragraph, `|` keeps your own line breaks, and a long line wraps
 either way) is the natural way to write longer notes. `{placeholder}`s in the title and
@@ -379,8 +523,8 @@ the text resolve against `defaults:` -- there is no `for_each:` to bind anything
 and a literal brace needs the usual `{{ }}`.
 
 - **A divider is only drawn when a page after it draws.** It is buffered and written
-  into the PDF immediately before the next figure. A later `section:` page replaces one
-  still waiting, so a section whose pages all skipped leaves no empty divider behind, and
+  into the PDF with the next figure: above it on the same page when it fits under it. A
+  later `section:` page replaces one still waiting, so a section whose pages all skipped leaves no empty divider behind, and
   one at the very end of the suite is dropped. A run where nothing draws still writes no
   PDF at all.
 - **PDF only.** A divider never gets a PNG and does not take a number: the
@@ -391,10 +535,27 @@ and a literal brace needs the usual `{{ }}`.
   `skipped` with a reason -- `no page after this section drew`, or `pdf: false -- section
   pages appear only in report.pdf`. `run.log` heads it `== section: <title> ==`, and
   `--list` prints `NN. [section] <title>`.
-- **`for_each:`, `then:` and a non-empty `plot:` are schema errors** on a section page,
-  naming it: there is no data to fan out, chain, or plot. A bare `section:` with nothing
+- **`for_each:`, `then:`, `caption:` and a non-empty `plot:` are schema errors** on a
+  section page, naming it: there is no data to fan out, chain, plot or caption. A bare `section:` with nothing
   after it is YAML for null, which is no kind at all and so is refused too -- write
   `section: ""`.
+
+### Captions
+
+`caption: "..."` on a `field:`, `compare:`, `summary:`, `XY:` or `TS:` page puts a few
+lines of text under its figure in `report.pdf` -- small type, wrapped to the page -- and
+records it as `"caption"` in the page's `manifest.json` entry. It is templated like
+`title:` (`for_each` placeholders, `defaults`), and must come out as text. The PNG is the
+bare figure. A page drawn as several figures (a plot-family split, or `max_rows`) carries
+its caption under the first. A `section:` page takes no caption (its text is its
+`section:` string).
+
+```yaml
+- title: "Nitrate, {depth.label}"
+  field: {variables: [nitrate], select: {depth: "{depth}"}}
+  for_each: {depth: [surface, 100]}
+  caption: "Nitrate at {depth.label}, mean over the run. Gray cells are land."
+```
 
 ## `for_each`: one page becomes several
 
@@ -412,8 +573,8 @@ keeps only the last `N` (use this on a long run to bound the WOA page count). A
 
 ## `{placeholder}` templating
 
-A page's `title`, and every string inside its `field:`/`compare:`/`summary:`/`XY:`/`TS:`/
-`plot:` dict, may contain placeholders resolved against `defaults` plus whatever `for_each`
+A page's `title` and `caption`, and every string inside its `field:`/`compare:`/`summary:`/
+`XY:`/`TS:`/`plot:` dict, may contain placeholders resolved against `defaults` plus whatever `for_each`
 bound for that combination:
 
 - **Exactly one placeholder and nothing else** (`"{depths}"`, `"{month.window}"`) is
@@ -646,7 +807,7 @@ overwrites an earlier report; use it if two runs of the same suite might overlap
 ```
 <output_dir>/<name>/      (timestamped_dir: true -> <name>_<test>_<t0>_to_<t1>_<run-time>_<id>/)
     report.pdf                (unless pdf: false, or no page drew at all)
-    figures/NN_<slug(title)>[_<family>].png      (figures only: section: and the cover have none)
+    figures/NN_<slug(title)>[_<family>][_partN].png      (figures only: section: and the cover have none)
     metrics/<name>.csv (+ .txt)
     suite.yaml                 -- byte-identical copy of the input
     manifest.json
@@ -686,24 +847,48 @@ written if some page after it drew -- a run where nothing draws still writes no 
 
 ### Page size
 
-`report.pdf`'s pages are all a fixed US Letter portrait (8.5x11in): each figure's own
-ink is placed at the top of the page, horizontally centred, with a small margin above
-it -- a wide figure (a time series, three maps in a row) leaves white space below
-rather than growing the page, and a tall one (a profile) is unaffected. This is what
-makes the report paginate and print like a document regardless of what any one page
-draws.
+`report.pdf`'s pages are all a fixed US Letter portrait (8.5x11in), so the report
+paginates and prints like a document regardless of what any one page draws.
 
-Because of this, `size:`/`zoom:`/`figsize:` in a page's `plot:` (or a `summary:`
+**Packing.** Consecutive figures share a page when they fit: each is stacked under the one
+before it, in the order drawn, until the next would not fit in what is left (greedy; a
+figure never moves to an earlier page). A figure wider than the page is scaled down to
+its width (keeping its aspect, side margins kept) and then packed like any other. A
+`section:` divider is put at the top of the page its first figure lands on; when that
+figure does not fit under it, it is scaled down to fit, centred, as long as that keeps
+it at 0.7 or more of its size (`MIN_FIT_SCALE`) -- otherwise the divider gets a page of
+its own, as before. A figure's caption counts towards the room it takes, so it never
+runs off the page or into the next figure. A figure alone on its page (nothing packed
+with it, and not scaled) is written exactly as before -- its ink at the top, horizontally
+centred, text kept as vector -- unless its page has room to enlarge it (below). A page of
+several figures, one whose figure was scaled, or one that is enlarged, is assembled from
+the figures' own PNGs (`PNG_DPI` 200), so its text is raster rather
+than vector. The PNGs are unaffected, one per figure. Only a figure that is still too
+tall for a page after scaling to its width (see below) gets a page of its own.
+
+**Filling.** After a page's figures are chosen (packing does not change for this), they
+are all scaled up by one factor so the page's stack -- divider header, figures, captions
+and the gaps between them -- fills the usable page height, with no figure wider than the
+usable width (8.0in); narrower figures stay centred and proportions are kept. The factor
+is capped at 1.6 (`MAX_FILL_SCALE`), so a small figure is not blown up into a poster,
+and a page that would gain under 10% (`MIN_FILL_GAIN`) is left alone and stays vector.
+Captions and the header keep their type size; only figures grow. An enlarged page is
+raster by necessity (matplotlib cannot scale a vector page without reflowing it), so such
+a figure is rendered a second time at 200 dpi times its factor (up to 320 dpi), keeping
+its text as sharp on paper as its PNG; the cost is that extra render and a larger PDF.
+
+Because pages are laid out this way, `size:`/`zoom:`/`figsize:` in a page's `plot:` (or a `summary:`
 page's own kwargs) are ignored while `pdf: true` -- pinned to the `"page"` canvas
 instead, with a warning naming the ignored kwarg (once per suite run, not once per
 page). Set `pdf: false` to size figures freely; PNGs are still written, as tight crops
 around each figure rather than letter pages. A figure whose own ink still doesn't fit
 8.5x11 even after pinning (rare -- only an explicit `figsize:` outside this grammar
 could do it) grows the page rather than clipping the figure, with its own warning.
-A `section:` divider is always an exact letter page.
+A page holding only a `section:` divider is an exact letter page too.
 
 **Smaller PDFs: `pdf_images: jpeg`.** About 95% of a map report's bytes are its
-rasterized map images, which matplotlib's PDF backend can only store losslessly.
+rasterized map images, which matplotlib's PDF backend can only store losslessly (a packed
+page's figures are rasterized whole, so the pass recompresses their text too).
 `pdf_images: jpeg` (the default, `lossless`, is today's output byte-for-byte) re-encodes
 them as JPEG in a post-pass through Ghostscript (`gs`, found on `PATH`), after the PDF is
 closed. On the 13-page report it was tuned on, 7.6 MB became 4.8 MB with no visible

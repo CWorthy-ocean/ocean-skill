@@ -514,7 +514,7 @@ def test_interactive_row_marks_test_and_reference_bars_alike():
         colorbar_label_clipped=True,
     )
     # the difference bar is titled differently; the other two share the scale's units
-    test_bar, ref_bar = [b for b in _color_bars(obj) if b.title == "degC"]
+    test_bar, ref_bar = [b for b in _color_bars(obj) if b.title == "°C"]
     assert test_bar.major_label_overrides == ref_bar.major_label_overrides
     assert "(max 900)" in " ".join(test_bar.major_label_overrides.values())
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["FAMILIES", "PlotSpec"]
+__all__ = ["FAMILIES", "PlotSpec", "UnusableOptions"]
 
 #: Plot families a renderer may implement. A renderer need not support all of them —
 #: :func:`ocean_skill.plot.registry.render` reports clearly when one is missing, and the
@@ -54,6 +54,20 @@ FAMILIES = (
     "metrics_series",
     "locations",
 )
+
+
+class UnusableOptions(TypeError):
+    """A draw call was given options the figure it resolved to does not take.
+
+    A ``TypeError`` -- so a caller that never heard of it still sees the usual error --
+    that also says *which* options in :attr:`options`, so one that can tell them apart
+    (a suite's ``defaults.plot`` options, which suit some pages and not others) does not
+    have to read them back out of the message.
+    """
+
+    def __init__(self, message: str, options: tuple[str, ...] = ()) -> None:
+        super().__init__(message)
+        self.options = tuple(options)
 
 
 @dataclass

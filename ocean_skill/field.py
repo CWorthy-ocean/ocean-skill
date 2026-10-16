@@ -1418,32 +1418,66 @@ class Field:
         same way that solo call would draw it instead: ``select=`` to one
         instant, or ``aggregate=`` to collapse it.
         """
+        return self._map_items_of(levels=False)[0]
+
+    def _map_items_of(self, *, levels: bool) -> list[dict[str, Any]]:
+        """:meth:`_map_item`'s work, for ``levels=True`` one item per level standing.
+
+        ``levels=False`` is :meth:`_map_item` exactly: a list of one, refusing anything
+        that is not a single map. ``levels=True`` is what a :class:`FieldSet` asks of
+        its members (:meth:`FieldSet._map_items`): a vertical axis standing with a
+        coordinate to name its levels (``select={"depth": [0, 200]}``) is not refused
+        but split, one map per level, each carrying its own ``depth`` label -- so a set
+        fanned over statistics *and* levels is a set of maps like any other. Any other
+        standing axis (time, still) is refused as before.
+
+        Each item also carries the two facts a set of maps is titled and faceted by
+        beyond its variable: ``aggregate``, the member's statistic spelled as its label
+        spells it (``"mean"``, ``"std of monthly means"``; ``None`` unaggregated), and
+        ``source_label``, the label less that statistic -- see
+        :func:`ocean_skill.plot._titles.map_panel_titles`.
+        """
+        from ocean_skill.comparison import _aggregate_label
+        from ocean_skill.operators import resolve_dim
+
         grid_meta = self._grid_metadata_if_eligible()
         if grid_meta is not None:
             if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
-                return self._surfaced()._map_item()
+                return self._surfaced()._map_items_of(levels=levels)
             self._refuse_bare_multistep_time_precheck()
 
         item = self._facet_item_or_refuse()
         field = item["field"]
-        standing = next(
-            (
-                d
-                for d in (item["facet_dim"], item["row_dim"])
-                if d is not None and field.sizes[d] > 1
-            ),
-            None,
-        )
-        if standing is not None:
+        standing = [
+            d
+            for d in (item["facet_dim"], item["row_dim"])
+            if d is not None and field.sizes[d] > 1
+        ]
+        zdim = resolve_dim(field, "Z") if levels else None
+        split = zdim if zdim in standing and zdim in field.coords else None
+        remaining = [d for d in standing if d != split]
+        if remaining:
+            standing_dim = remaining[0]
             raise ValueError(
-                f"{self.source!r} still has {standing!r}={field.sizes[standing]} "
+                f"{self.source!r} still has "
+                f"{standing_dim!r}={field.sizes[standing_dim]} "
                 "standing beyond its map, so it is not a single map to place "
                 f"beside the others in this set. Narrow it with select= to one "
-                f"{standing} (e.g. select={{{standing!r}: ...}}) or collapse it "
-                f"with aggregate= (e.g. aggregate={{{standing!r}: 'mean'}}), so "
+                f"{standing_dim} (e.g. select={{{standing_dim!r}: ...}}) or "
+                "collapse it "
+                f"with aggregate= (e.g. aggregate={{{standing_dim!r}: 'mean'}}), so "
                 "every member is one map."
             )
-        axes = [d for d in (item["facet_dim"], item["row_dim"]) if d is not None]
+        phrase = _aggregate_label(self.aggregate) if self.aggregate else None
+        label = self.label or self.source
+        if phrase and label.endswith(f" {phrase}"):
+            label = label[: -len(phrase) - 1]
+        item = {**item, "aggregate": phrase, "source_label": label}
+        axes = [
+            d
+            for d in (item["facet_dim"], item["row_dim"])
+            if d is not None and d != split
+        ]
         if axes:
             # Every named axis survives, but only at size one -- field_facet's own
             # single panel already isels exactly this away (see the loop over
@@ -1452,17 +1486,33 @@ class Field:
             # the scalar coordinate field_suptitle/grid_suptitle already know how
             # to read for context (e.g. a WOA climatology's bare "time").
             field = field.squeeze(axes, drop=False)
-            item = {
-                **item,
-                "field": field,
-                "facet_dim": None,
-                "row_dim": None,
+        item = {**item, "facet_dim": None, "row_dim": None}
+        if split is None:
+            if axes:
                 # Recomputed against the now-squeezed field: a size-one facet/row
                 # axis just became the scalar coordinate _map_time_label reads,
                 # so this member's item can say when for the first time.
-                "time": _map_time_label(field, self.select, self.aggregate),
-            }
-        return item
+                item = {
+                    **item,
+                    "field": field,
+                    "time": _map_time_label(field, self.select, self.aggregate),
+                }
+            return [item]
+        from ocean_skill.plot.matplotlib_renderer import facet_labels
+
+        names = facet_labels(field[split])
+        out = []
+        for k, name in enumerate(names):
+            level = field.isel({split: k})
+            out.append(
+                {
+                    **item,
+                    "field": level,
+                    "depth": name,
+                    "time": _map_time_label(level, self.select, self.aggregate),
+                }
+            )
+        return out
 
     @graft_plot_options()
     def plot(
@@ -1781,6 +1831,47 @@ class Field:
         )
 
 
+def _depth_by_statistic(items: list[dict[str, Any]], options: dict[str, Any]) -> dict:
+    """Return the grid options laying a set of maps out as levels by statistics.
+
+    A set fanned over statistics (``aggregate=[mean, std]``) and levels
+    (``select={"depth": [0, 200]}``) is one variable's maps that factor into exactly
+    those two axes: ``rows="depth"``, ``cols="statistic"``, a column per statistic on
+    one colour scale with one colorbar (the maps of a statistic share its units and
+    range; those of another do not). Returned only when the items factor *cleanly* --
+    one variable and source, at least two levels and two statistics, every
+    (level, statistic) cell holding exactly one map -- and the caller has not already
+    arranged the grid themselves (``rows``/``cols``/``ncols``/``shared_limits``/
+    ``colorbars``); otherwise ``{}`` and the maps keep the free grid.
+    """
+    if any(
+        key in options
+        for key in ("rows", "cols", "ncols", "shared_limits", "colorbars")
+    ):
+        return {}
+    depths = [item.get("depth") for item in items]
+    stats = [item.get("aggregate") for item in items]
+    if None in depths or None in stats:
+        return {}
+    if len({item.get("standard_name") for item in items}) > 1:
+        return {}
+    if len({item.get("source_label") for item in items}) > 1:
+        return {}
+    levels, kinds = list(dict.fromkeys(depths)), list(dict.fromkeys(stats))
+    if len(levels) < 2 or len(kinds) < 2:
+        return {}
+    if len(set(zip(depths, stats, strict=True))) != len(items) or len(items) != len(
+        levels
+    ) * len(kinds):
+        return {}
+    return {
+        "rows": "depth",
+        "cols": "statistic",
+        "shared_limits": "statistic",
+        "colorbars": "column",
+    }
+
+
 class FieldSet:
     """Several fields -- variables and/or sources -- drawn together as one figure.
 
@@ -1961,9 +2052,19 @@ class FieldSet:
     def _map_items(self) -> list[dict[str, Any]]:
         """Every member's own single map item, one panel each.
 
-        See :meth:`Field._map_item`.
+        See :meth:`Field._map_item`. A member with a vertical axis standing is split
+        into one item per level (:meth:`Field._map_items_of`), so a set fanned over
+        levels and statistics is a set of maps like any other -- but only when every
+        member has the same levels standing; one beside members with none is refused.
         """
-        return [f._map_item() for f in self.fields]
+        per_member = [f._map_items_of(levels=True) for f in self.fields]
+        if len({len(items) for items in per_member}) > 1:
+            # levels standing on some members and not others is not a fan over levels
+            # but a member that is not one map: refused as it always was
+            for f, items in zip(self.fields, per_member, strict=True):
+                if len(items) > 1:
+                    f._map_items_of(levels=False)
+        return [item for items in per_member for item in items]
 
     @graft_plot_options()
     def plot(
@@ -2168,8 +2269,11 @@ class FieldSet:
             # a lone one has no such neighbour to keep level with.
             if len(self.fields) == 1:
                 return self.fields[0].plot(renderer=renderer, **kwargs)
+            items = self._map_items()
             spec = PlotSpec(
-                family="field_map_grid", items=self._map_items(), options=kwargs
+                family="field_map_grid",
+                items=items,
+                options={**_depth_by_statistic(items, kwargs), **kwargs},
             )
             return render(spec, renderer=renderer)
         not_lines = [f for f in self.fields if f.family not in ("series", "profile")]

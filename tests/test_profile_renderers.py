@@ -564,7 +564,7 @@ def test_axis_labels_carry_units_and_depth_identically():
     fig = render(_spec([_profile_item()]), renderer="matplotlib")
     obj = render(_spec([_profile_item()]), renderer="holoviews")
     curve = obj.traverse(lambda x: x, [hv.Curve])[0]
-    assert fig.axes[0].get_xlabel() == curve.kdims[0].label == "temperature [degC]"
+    assert fig.axes[0].get_xlabel() == curve.kdims[0].label == "temperature [°C]"
     assert fig.axes[0].get_ylabel() == curve.vdims[0].label == "Depth [m]"
 
 

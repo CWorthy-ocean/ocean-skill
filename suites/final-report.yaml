@@ -37,8 +37,7 @@
 #               model's up/vp diagnostics; monthly restarts would alias every constituent
 #               silently.
 #   Fig. 16     no N2O in the model or in any catalog.
-#   Fig. 21b-d  no depth-of-minimum, OMZ-thickness or horizontal-gradient calculators yet
-#               (only the minimum oxygen of panel a is drawn).
+#   Fig. 21c    no horizontal-gradient calculator (panels a, b and d are drawn).
 #   Fig. 22     aragonite saturation: no calculator, and the GLODAP mapped product has no
 #               saturation state or pH (DIC and alkalinity are drawn).
 #   Fig. 24     CO2/N2O fluxes: no flux output.
@@ -80,6 +79,10 @@ refresh:
 # stays a dict).
 defaults:
   test: pacmed_pyesper
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80%, so river mouths and coastal extremes don't
+  # wash out the open ocean; difference panels follow the same rule.
+  plot: {robust: true}
   woa_depths: [surface, 200]
   # 1 m is all-NaN against WOA's 0 m cell, so the sections start at 5 m.
   section_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
@@ -93,34 +96,50 @@ defaults:
                  "2012-07-31", "2012-08-31", "2012-09-30", "2012-10-31", "2012-11-30", "2012-12-31",
                  "2013-01-31", "2013-02-28", "2013-03-31", "2013-04-30", "2013-05-31", "2013-06-30",
                  "2013-07-31", "2013-08-31", "2013-09-30", "2013-10-31", "2013-11-30", "2013-12-31"]
-  # Section geometry of Figs. 8, 18, 19. A placeholder cannot sit inside another dict and
-  # still keep its type, so each select writes its depth list out in full.
-  eq_select:      # along the equator: model sampled along a transect, 143E-267E (93W)
-    transect: {lat: 0, lon: {min: 143, max: 267}}
-    depth: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
-  b180_select:    # 180-160W box (longitudes 0-360); averaged over lon in the page's aggregate
-    lon: {min: 180, max: 200}
-    lat: {min: -30, max: 30}
-    depth: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
-  b160_select:    # 160-120W box
-    lon: {min: 200, max: 240}
-    lat: {min: -30, max: 30}
-    depth: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500]
+  # The three sections of Figs. 8, 18, 19, stacked as the rows of one figure per variable
+  # (a page's selects:). Each entry is laid over the page's own select: (the depths) and
+  # carries its own aggregate: the equator is a transect, so only time is averaged; the
+  # two boxes (longitudes 0-360, 30S-30N) are also averaged over longitude.
+  section_selects:
+    Equator (143E-93W):
+      select: {transect: {lat: 0, lon: {min: 143, max: 267}}}
+      aggregate: {time: mean}
+    180-160W mean:
+      select: {lon: {min: 180, max: 200}, lat: {min: -30, max: 30}}
+      aggregate: {time: mean, lon: mean}
+    160-120W mean:
+      select: {lon: {min: 200, max: 240}, lat: {min: -30, max: 30}}
+      aggregate: {time: mean, lon: mean}
+  # What the bathymetry map marks: the three section lines/boxes of Figs. 8, 18, 19 and
+  # the six T-S boxes of Fig. 7 (the same lon/lat as the pages below; longitudes 0-360).
+  map_locations:
+    Equator: {lat: 0, lon: {min: 143, max: 267}}
+    180-160W: {lon: {min: 180, max: 200}, lat: {min: -30, max: 30}}
+    160-120W: {lon: {min: 200, max: 240}, lat: {min: -30, max: 30}}
+    NW Pacific: {lon: {min: 156.16, max: 157.23}, lat: {min: 19.32, max: 20.32}}
+    Subpolar Gyre: {lon: {min: 185.86, max: 186.96}, lat: {min: 44.56, max: 45.34}}
+    CCS: {lon: {min: 233.87, max: 235.07}, lat: {min: 36.39, max: 37.35}}
+    SW Pacific: {lon: {min: 185.18, max: 185.99}, lat: {min: -15.45, max: -14.67}}
+    S Pacific Gyre: {lon: {min: 240.99, max: 242.00}, lat: {min: -21.26, max: -20.31}}
+    Peru Current: {lon: {min: 275.31, max: 276.41}, lat: {min: -11.48, max: -10.40}}
 
 pages:
   # -- Fig. 1: bathymetry -----------------------------------------------------------
   - title: "Fig. 1 — Bathymetry and transect locations"
     section: >-
-      Model bathymetry (grid variable h) over the PACMED domain. The report also marks
-      the equatorial, 180-160W and 160-120W transects and the six T-S boxes on this map;
-      the locations: option below draws labelled catalog entries (here the two Cravatte
-      ADCP bands) and is left commented out until the first run is checked.
+      Model bathymetry (grid variable h) over the PACMED domain, with the equatorial
+      section line and the 180-160W and 160-120W boxes of the section figures, and the
+      six small T-S boxes of Fig. 7.
 
   - title: "Bathymetry"
     field: {variables: [h]}
-    # plot:
-    #   locations: [cravatte_u_179e_160w, cravatte_u_160w_120w]   # only catalog entry names are accepted here
-    #   legend: annotate
+    caption: >-
+      Grid depth h (m). Lines and outlines mark the sections (Equator, 143E-93W; the
+      180-160W and 160-120W boxes, 30S-30N, averaged over longitude) and the T-S boxes.
+    plot:
+      robust: false                 # the full depth range, trenches included
+      locations: "{map_locations}"
+      legend: annotate
 
   # -- Figs. 4, 5, 12-15: temperature, salinity and the nutrients vs WOA23 ---------------
   - title: "Figs. 4, 5, 12–15 — Tracers vs WOA23"
@@ -142,6 +161,13 @@ pages:
         - {time: mean}
         # Std across the twelve monthly means; ddof 1 (sample std) as in the paper.
         - {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
+    caption: >-
+      Rows: the run mean, then the standard deviation (ddof 1) across the twelve monthly
+      means, at the surface and at 200 m. Columns: model, WOA23 monthly climatology
+      reduced the same way, and the difference (model minus WOA23).
+
+  - title: "Tracers vs WOA23 — metrics"
+    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
 
   # -- Fig. 6: mixed layer depth ----------------------------------------------------------
   - title: "Fig. 6 — Mixed layer depth"
@@ -164,7 +190,9 @@ pages:
       aggregate:
         test: {time: [{groupby: month, reduce: mean}, mean]}   # month-balanced mean
         reference: {month: mean}
-    plot: {robust: true}
+    caption: >-
+      Month-balanced annual mean mixed layer depth (m): the model's mean of its monthly
+      means against the mean of Holte & Talley's twelve months.
 
   - title: "MLD vs Holte & Talley — seasonal variability"
     compare:
@@ -174,7 +202,11 @@ pages:
       aggregate:
         test: {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
         reference: {month: {reduce: std, ddof: 1}}
-    plot: {robust: true}
+    caption: >-
+      Standard deviation (ddof 1) across the twelve monthly mean mixed layer depths (m).
+
+  - title: "Mixed layer depth — metrics"
+    summary: {scope: section, kind: [table]}
 
   # -- Fig. 7: T-S diagrams -------------------------------------------------------------------
   - title: "Fig. 7 — Water masses"
@@ -205,6 +237,10 @@ pages:
         South Pacific Gyre: {lon: {min: 240.99, max: 242.00}, lat: {min: -21.26, max: -20.31}}
         Peru Current: {lon: {min: 275.31, max: 276.41}, lat: {min: -11.48, max: -10.40}}
       at_center: [WOA23]                 # WOA's 1-degree grid has no cell centre in two of the boxes
+    caption: >-
+      Black dots: every model cell, level and restart in the box. Red: WOA23 annual at
+      the cell nearest the box center. Blue: GLORYS12 averaged over the box and the run's
+      dates. Grey lines: potential density (sigma-0).
     plot:
       ncols: 3
       colors: {ROMS: black, WOA23: "tab:red", GLORYS12: "tab:blue"}
@@ -248,38 +284,29 @@ pages:
     section: >-
       Temperature and salinity along the equator (143E-267E) and averaged over the two
       longitude boxes 180-160W and 160-120W (30S-30N), 5-500 m, model against the WOA23
-      annual climatology, with contour lines over the fill. The model is averaged over
-      the whole run; the sections start at 5 m because WOA's surface cell is at 0 m.
+      annual climatology, with contour lines over the fill: one figure per variable, the
+      three sections as its rows. The model is averaged over the whole run. The sections
+      start at 5 m because WOA's surface cell is at 0 m, and stop at 500 m as the report's
+      do (edit defaults.section_depths to go deeper).
 
-  # Contour levels: 6 is a count. For explicit levels per variable, e.g. temperature
-  # [10, 15, 20, 25] and salinity [34.5, 35, 35.5, 36], split the page per variable and
-  # write them in plot: {contour_levels: [...]}.
-  - title: "Temperature and salinity along the equator"
+  # One figure per variable, the three sections as its rows. Contour levels: 6 is a
+  # count; for explicit levels write plot: {contour_levels: [...]} on a per-variable page.
+  - title: "{variable} sections vs WOA23"
+    for_each: {variable: [temperature, salinity]}
     compare:
-      reference: [woa23_temperature_annual, woa23_salinity_annual]
-      variables: [temperature, salinity]
-      select: "{eq_select}"
-      aggregate: {time: mean}
+      reference: ["woa23_{variable}_annual"]
+      variables: ["{variable}"]
+      select: {depth: "{section_depths}"}
+      selects: "{section_selects}"
     contours: true
     plot: {contour_levels: 6}
+    caption: >-
+      {variable}, 5-500 m (the depth range of the report's figures). Rows: along the
+      equator, then averaged over 180-160W and 160-120W (30S-30N). Model averaged over
+      the run; WOA23 annual climatology; contours of the plotted field itself.
 
-  - title: "Temperature and salinity — 180-160W mean"
-    compare:
-      reference: [woa23_temperature_annual, woa23_salinity_annual]
-      variables: [temperature, salinity]
-      select: "{b180_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: true
-    plot: {contour_levels: 6}
-
-  - title: "Temperature and salinity — 160-120W mean"
-    compare:
-      reference: [woa23_temperature_annual, woa23_salinity_annual]
-      variables: [temperature, salinity]
-      select: "{b160_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: true
-    plot: {contour_levels: 6}
+  - title: "Temperature and salinity sections — metrics"
+    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
 
   # -- Fig. 9: sea surface height -----------------------------------------------------------
   - title: "Fig. 9 — Sea surface height"
@@ -301,7 +328,13 @@ pages:
       aggregate:
         - {time: mean}
         - {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
-    plot: {robust: true}
+    caption: >-
+      Top: mean sea surface height (m) over the run; bottom: standard deviation (ddof 1)
+      across the twelve monthly means. Model zeta is an instantaneous restart value with
+      tides; expect a constant datum offset against DUACS in the mean.
+
+  - title: "Sea surface height — metrics"
+    summary: {scope: section, kind: [table]}
 
   # -- Fig. 10: zonal currents ----------------------------------------------------------------
   - title: "Fig. 10 — Zonal currents"
@@ -322,6 +355,9 @@ pages:
                 225, 250, 275, 300, 350, 400, 450, 500]
       # only the model is averaged over the box; the obs are already a band mean
       aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}
+    caption: >-
+      Zonal velocity, 180-160W: the model averaged over the run and over longitude;
+      Cravatte et al. (2017) 1999-2016 mean ADCP band. Black line: u = 0.
     contours: true                        # contour the plotted u itself...
     plot:
       contour_levels: [0]                 # ...at u = 0 only
@@ -336,9 +372,15 @@ pages:
         depth: [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 120, 140, 160, 180, 200,
                 225, 250, 275, 300, 350, 400, 450, 500]
       aggregate: {test: {time: mean, lon: mean}, reference: {lon: mean}}
+    caption: >-
+      Zonal velocity, 160-120W, 10S-18N (where the observations have data); as
+      above. Black line: u = 0.
     contours: true
     plot:
       contour_levels: [0]
+
+  - title: "Zonal velocity — metrics"
+    summary: {scope: section, kind: [table]}
 
   # -- Fig. 17: iron (model only) ----------------------------------------------------------------
   - title: "Fig. 17 — Iron"
@@ -348,18 +390,18 @@ pages:
       no iron climatology in WOA23 (the report compared against a separate gridded
       product), so this page has no observations.
 
-  # One page per depth: a depth list beside the two statistics would leave each map
-  # with two levels standing, which a page of maps cannot lay out.
-  - title: "Iron at {depth.label} — mean and seasonal variability"
-    for_each:
-      depth: "{woa_depths}"
+  # One figure: rows are the depths, columns the two statistics, one colorbar per column.
+  - title: "Iron — mean and seasonal variability"
     field:
       variables: [iron]
-      select: {depth: "{depth}"}
+      select: {depth: "{woa_depths}"}
       aggregate:
         - {time: mean}
         - {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
-    plot: {robust: true}   # river-mouth maxima would otherwise wash out the open ocean
+    caption: >-
+      Left: mean over the run. Right: standard deviation (ddof 1) across the twelve
+      monthly means. Top: surface; bottom: 200 m. Robust color limits (central 80%), so
+      river-mouth maxima are clipped.
 
   # -- Figs. 18, 19: BGC sections with isotherms / isohalines -------------------------------------
   - title: "Figs. 18, 19 — Nutrient and oxygen sections"
@@ -371,67 +413,38 @@ pages:
       The contour lines are WOA's own temperature or salinity on the reference panel and
       the model's on the model panel.
 
-  # One variable per page here: contours: pairs its lines with each plotted variable by
-  # position, so a page of two variables would need two contour sets.
-  - title: "{variable} along the equator (isotherms)"
+  # One figure per variable, the three sections as its rows. contours: pairs its lines with
+  # the fill row by row, so the overlay names one variable for the page's one variable.
+  - title: "{variable} sections vs WOA23 (isotherms)"
     for_each: {variable: [nitrate, phosphate]}
     compare:
       reference: ["woa23_{variable}_annual"]
       variables: ["{variable}"]
-      select: "{eq_select}"
-      aggregate: {time: mean}
+      select: {depth: "{section_depths}"}
+      selects: "{section_selects}"
     contours: {reference: [woa23_temperature_annual], variables: [temperature]}
     plot: {contour_levels: 6}
+    caption: >-
+      {variable}, 5-500 m. Rows: along the equator, then averaged over 180-160W and
+      160-120W (30S-30N). Model averaged over the run; WOA23 annual. Lines: temperature
+      (the model's on the model panel, WOA's on the WOA panel).
 
-  - title: "{variable} — 180-160W mean (isotherms)"
-    for_each: {variable: [nitrate, phosphate]}
-    compare:
-      reference: ["woa23_{variable}_annual"]
-      variables: ["{variable}"]
-      select: "{b180_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: {reference: [woa23_temperature_annual], variables: [temperature]}
-    plot: {contour_levels: 6}
-
-  - title: "{variable} — 160-120W mean (isotherms)"
-    for_each: {variable: [nitrate, phosphate]}
-    compare:
-      reference: ["woa23_{variable}_annual"]
-      variables: ["{variable}"]
-      select: "{b160_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: {reference: [woa23_temperature_annual], variables: [temperature]}
-    plot: {contour_levels: 6}
-
-  - title: "{variable} along the equator (isohalines)"
+  - title: "{variable} sections vs WOA23 (isohalines)"
     for_each: {variable: [oxygen, silicate]}
     compare:
       reference: ["woa23_{variable}_annual"]
       variables: ["{variable}"]
-      select: "{eq_select}"
-      aggregate: {time: mean}
+      select: {depth: "{section_depths}"}
+      selects: "{section_selects}"
     contours: {reference: [woa23_salinity_annual], variables: [salinity]}
     plot: {contour_levels: 6}
+    caption: >-
+      {variable}, 5-500 m. Rows: along the equator, then averaged over 180-160W and
+      160-120W (30S-30N). Model averaged over the run; WOA23 annual. Lines: salinity
+      (the model's on the model panel, WOA's on the WOA panel).
 
-  - title: "{variable} — 180-160W mean (isohalines)"
-    for_each: {variable: [oxygen, silicate]}
-    compare:
-      reference: ["woa23_{variable}_annual"]
-      variables: ["{variable}"]
-      select: "{b180_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: {reference: [woa23_salinity_annual], variables: [salinity]}
-    plot: {contour_levels: 6}
-
-  - title: "{variable} — 160-120W mean (isohalines)"
-    for_each: {variable: [oxygen, silicate]}
-    compare:
-      reference: ["woa23_{variable}_annual"]
-      variables: ["{variable}"]
-      select: "{b160_select}"
-      aggregate: {time: mean, lon: mean}
-    contours: {reference: [woa23_salinity_annual], variables: [salinity]}
-    plot: {contour_levels: 6}
+  - title: "Nutrient and oxygen sections — metrics"
+    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
 
   # -- Fig. 20: chlorophyll -------------------------------------------------------------------------
   - title: "Fig. 20 — Surface chlorophyll"
@@ -453,6 +466,10 @@ pages:
       aggregate:
         - {time: mean}
         - {time: [{groupby: month, reduce: mean}, {reduce: std, ddof: 1}]}
+    caption: >-
+      Surface chlorophyll (mg/m³; sum of the three phytoplankton pools) on the 36 restart
+      days against the satellite on the same days. Top: mean; bottom: standard deviation
+      (ddof 1) across the twelve monthly means.
 
   # Alternative: the satellite's own monthly means (Copernicus monthly L4, 36 fields)
   # over the run's months, reduced exactly as the model is. Build the catalog entry once
@@ -468,12 +485,16 @@ pages:
   # The monthly product is not gap-filled: cloudy months have holes the daily gap-free
   # product fills.
 
+  - title: "Chlorophyll — metrics"
+    summary: {scope: section, kind: [table]}
+
   # -- Fig. 21a: oxygen minimum ----------------------------------------------------------------------
   - title: "Fig. 21 — Oxygen minimum zone"
     section: >-
-      The minimum oxygen concentration in the water column, model against WOA23. Only
-      panel a of the report's figure is drawn here: there are no depth-of-minimum,
-      OMZ-thickness or horizontal-gradient calculators yet.
+      Panels a, b and d of the report's figure, model against the WOA23 annual
+      climatology: the minimum oxygen in the water column, the depth of that minimum, and
+      the thickness of the oxygen minimum zone (oxygen below 50). Panel c, the horizontal
+      oxygen gradient at 300 m, is not drawn.
 
   # Every level has to stand on both sides (a compare lane otherwise defaults to the
   # surface, and the minimum of one level is that level). One band over the whole water
@@ -486,8 +507,29 @@ pages:
       variables: [oxygen]
       select: {depth: {min: 0, max: 6000}}
       aggregate:
-        test: {time: mean, Z: min}
+        test: {time: mean, depth: min}
         reference: {depth: min}
+    caption: >-
+      Fig. 21a. The model's run-mean oxygen, then the minimum over each water column;
+      WOA23 annual, the minimum over its standard levels (0-6000 m).
+
+  # Depth of the minimum and OMZ thickness are calculated on each restart snapshot and
+  # then averaged over the run (the minimum oxygen above takes the run mean first).
+  - title: "Depth of the oxygen minimum and OMZ thickness"
+    compare:
+      reference: [woa23_oxygen_annual]
+      variables:
+        - {calculate: depth_of, variable: oxygen, extremum: min}
+        - {calculate: thickness, variable: oxygen, below: 50}
+      aggregate: {time: mean}
+    caption: >-
+      Fig. 21b, d. Top: depth (m) of each column's oxygen minimum. Bottom: total
+      thickness (m) of the water where oxygen is below 50 (the model's mmol/m³; WOA23's
+      µmol/kg, about 2.5% lower). The model's values are calculated on each restart
+      snapshot and then averaged over the run.
+
+  - title: "Oxygen minimum zone — metrics"
+    summary: {scope: section, kind: [table]}
 
   # -- Figs. 22, 23: carbon vs GLODAP ------------------------------------------------------------------
   - title: "Figs. 22, 23 — Carbon vs GLODAPv2"
@@ -504,6 +546,12 @@ pages:
       variables: [alkalinity, dissolved_inorganic_carbon]
       depths: "{woa_depths}"
       aggregate: {time: mean}
+    caption: >-
+      Run-mean alkalinity and DIC against the GLODAPv2.2016b mapped climatology, at the
+      surface and 200 m.
+
+  - title: "Carbon vs GLODAPv2 — metrics"
+    summary: {scope: section, kind: [table]}
 
   # The raw MARBL name: MARBL_PH_3D is not mapped to the `ph` nickname here.
   - title: "Model pH (no observations)"
@@ -511,7 +559,9 @@ pages:
       variables: [MARBL_PH_3D]
       select: {depth: [surface, 200]}
       aggregate: {time: mean}
+    caption: "Mean over the run, surface (left) and 200 m (right)."
+    plot: {ncols: 2}
 
   # -- Fig. 26: summary ---------------------------------------------------------------------------------
   - title: "Fig. 26 — Summary"
-    summary: {kind: both, color_by: variable}
+    summary: {kind: both, color_by: variable}   # every comparison of the report; the tables are per section

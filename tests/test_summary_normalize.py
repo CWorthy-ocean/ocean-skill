@@ -457,8 +457,8 @@ def test_target_absolute_labels_name_units_when_shared():
                           units="psu"),
     ]
     fig = target(comparisons, normalize=False, legend_style=None)
-    assert fig.axes[0].get_ylabel() == "bias [psu]"
-    assert "psu" in fig.axes[0].get_xlabel()
+    assert fig.axes[0].get_ylabel() == "bias [PSU]"
+    assert "PSU" in fig.axes[0].get_xlabel()
 
 
 def test_target_absolute_labels_omit_units_when_missing():
@@ -528,7 +528,7 @@ def test_taylor_normalize_false_labels_radial_axis_with_units():
                           units="psu"),
     ]
     fig = taylor(comparisons, normalize=False, legend_style=None)
-    assert fig.axes[0].axis["left"].label.get_text() == "Standard deviation [psu]"
+    assert fig.axes[0].axis["left"].label.get_text() == "Standard deviation [PSU]"
 
 
 def test_paired_normalize_false_does_not_raise():
@@ -592,7 +592,7 @@ def test_both_renderers_agree_on_absolute_labels():
     obj = _interactive_target(_items(comparisons), normalize=False)
     interactive_ylabel = obj.opts.get().kwargs["ylabel"]
 
-    assert static_ylabel == interactive_ylabel == "bias [psu]"
+    assert static_ylabel == interactive_ylabel == "bias [PSU]"
 
 
 def test_both_renderers_skip_default_rings_on_mixed_sigma():

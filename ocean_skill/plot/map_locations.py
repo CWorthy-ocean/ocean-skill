@@ -27,7 +27,7 @@ schema and both renderers.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 import numpy as np
@@ -703,6 +703,40 @@ def build_map_items(obj: Any, *, domain: Any = _AUTO) -> list[dict[str, Any]]:
     return items
 
 
+def _labelled_select_item(label: Any, select: Any, *, who: str) -> dict[str, Any]:
+    """One ``{label: select}`` entry of a ``locations=`` mapping, as a map item.
+
+    ``select`` is the grammar ``compare(select=...)`` takes, read for its
+    horizontal axes only: a point, a lon/lat box (a lon-mean slab is one), a
+    lone-lon/lat line (``{"lat": 0, "lon": {"min": 140, "max": 280}}``) or a
+    ``{"transect": {...}}`` path. It is drawn exactly as a comparison's own
+    selection would be (:func:`_selection_geometry`/:func:`_selection_item`),
+    seam-split for the map's fixed centre-0 frame, and ``label`` is the item's
+    legend entry -- so ``legend="annotate"`` writes it beside the shape. A select
+    with no horizontal geometry to draw (a depth alone, a grid-index transect)
+    raises ``ValueError`` naming the label.
+    """
+    if not isinstance(label, str) or not label:
+        raise TypeError(
+            f"{who}: a {{label: select}} mapping needs non-empty string labels, "
+            f"got {label!r}."
+        )
+    if not isinstance(select, Mapping):
+        raise TypeError(
+            f"{who}: {label!r} maps to {select!r}, but a labelled location takes a "
+            'select dict -- e.g. {"lat": 0, "lon": {"min": 140, "max": 280}}.'
+        )
+    geo = _selection_geometry(dict(select), (-180.0, -90.0, 180.0, 90.0))
+    if geo is None:
+        raise ValueError(
+            f"{who}: {label!r}: select={dict(select)!r} names no horizontal geometry "
+            "to draw -- give a lon/lat point, a lon/lat box or line, or a "
+            '{"transect": {"waypoints": ...}} path.'
+        )
+    hover = _hover(label, featureType="selection", title=_selection_title(geo))
+    return _selection_item(geo, hover, label)
+
+
 def location_items(
     what: Any = None,
     *,
@@ -717,9 +751,11 @@ def location_items(
     family's own figure. ``what`` follows :func:`map_locations`'s rules -- ``None``
     (everything discoverable), a catalog source name, a
     :func:`~ocean_skill.catalog.find` result, a ``Comparison``/``ComparisonSet``/
-    ``Field``/``FieldSet``, or a list mixing names and objects -- and ``domain`` and
-    ``catalog`` mean what they do there. Catalog names draw from metadata alone;
-    objects draw their *request*. Nothing is opened and nothing is aligned.
+    ``Field``/``FieldSet``, a ``{label: select}`` mapping, or a list mixing those --
+    and ``domain`` and ``catalog`` mean what they do there. Catalog names draw from
+    metadata alone; objects draw their *request*; a mapping draws each labelled
+    select (a transect line, a box, a point -- :func:`_labelled_select_item`)
+    with its label as the legend entry. Nothing is opened and nothing is aligned.
 
     ``who`` names the caller in the error for a list entry that cannot be placed, so
     ``locations=[...]`` on a field map does not blame ``map_locations()``.
@@ -733,13 +769,14 @@ def location_items(
 
     if what is None or isinstance(what, str):
         candidates: Iterable[Any] = [what]
-    elif isinstance(what, object_types):
+    elif isinstance(what, (*object_types, Mapping)):
         candidates = [what]
     else:
         candidates = list(what)
 
     names: list[str] = []
     objects: list[Any] = []
+    selects: list[tuple[str, Any]] = []
     for item in candidates:
         if item is None:
             continue
@@ -747,10 +784,13 @@ def location_items(
             names.append(item)
         elif isinstance(item, object_types):
             objects.append(item)
+        elif isinstance(item, Mapping):
+            selects += list(item.items())
         else:
             raise TypeError(
                 f"{who} cannot place {item!r}: expected a catalog "
-                "source name, or a Comparison/ComparisonSet/Field/FieldSet."
+                "source name, a {label: select} mapping, or a "
+                "Comparison/ComparisonSet/Field/FieldSet."
             )
 
     items: list[dict[str, Any]] = []
@@ -759,6 +799,8 @@ def location_items(
         items += catalog_items
     for obj in objects:
         items += build_map_items(obj, domain=domain)
+    for label, select in selects:
+        items.append(_labelled_select_item(label, select, who=who))
 
     if not items:
         raise ValueError("no datasets with a geospatial extent to map")
@@ -783,7 +825,8 @@ def map_locations(
         :class:`~ocean_skill.comparison.Comparison`,
         :class:`~ocean_skill.comparison.ComparisonSet`,
         :class:`~ocean_skill.field.Field`, :class:`~ocean_skill.field.FieldSet`,
-        or a list mixing names and such objects.
+        a ``{label: select}`` mapping (each select drawn, labelled -- see below), or
+        a list mixing names, such objects and mappings.
     catalog
         Restrict a name-based (metadata-only) lookup to one catalog (``str``), or
         ``None`` (default) to search all discovered catalogs. Ignored for object
@@ -811,6 +854,11 @@ def map_locations(
         osk.map_locations(comparison)              # where a Comparison's data sits
         osk.map_locations(comparison_set)          # a whole ComparisonSet
         osk.map_locations([comparison, "papa"])    # a mix of both
+        osk.map_locations({                        # labelled selections, no data
+            "Equator": {"lat": 0, "lon": {"min": 140, "max": 280}},
+            "180-160W": {"lon": {"min": 180, "max": 200},
+                         "lat": {"min": -30, "max": 30}},
+        }, legend="annotate")
 
     A catalog name (or ``None``, or a whole :func:`~ocean_skill.catalog.find`
     result) draws from metadata alone, exactly as

@@ -345,9 +345,12 @@ def test_holoviews_ragged_unit_split_places_panels_by_row_and_col(hv):
     # corr is unitless (one panel); rmse splits by units into two: a ragged grid whose
     # cells the static figure fills by each panel's (row, col), not in a flat run
     comps = _fan(TEMP, units="°C") + _fan(SALT, units="psu")
-    layout = build_layout(_records(comps), metrics=("corr", "rmse"))
+    # the records a real plot is built from carry display-spelled units (psu -> PSU)
+    from ocean_skill.plot.summary import _records as display_records
+
+    layout = build_layout(display_records(comps), metrics=("corr", "rmse"))
     want = {(p.row, p.col): p.title for p in layout.panels}
-    assert want == {(0, 0): "corr", (1, 0): "rmse (°C)", (1, 1): "rmse (psu)"}
+    assert want == {(0, 0): "corr", (1, 0): "rmse (°C)", (1, 1): "rmse (PSU)"}
 
     obj = ComparisonSet(comps).metrics_series(
         metrics=("corr", "rmse"), renderer="holoviews"

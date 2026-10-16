@@ -62,6 +62,7 @@ from ocean_skill import cache, catalog, outputs, qc
 from ocean_skill import mld as _mld  # noqa: F401  (registers CALCULATORS["mld"])
 from ocean_skill import internal_tides as _internal_tides  # noqa: F401  (registers "baroclinic_pressure_flux")
 from ocean_skill import tides as _tides  # noqa: F401  (registers "tidal_amplitude"/"tidal_phase")
+from ocean_skill import vertical as _vertical  # noqa: F401  (registers "depth_of"/"thickness")
 from ocean_skill.casts import names as cast_names
 from ocean_skill.catalog import (
     Overlap,

@@ -283,7 +283,8 @@ def test_a_movie_frame_is_laid_out_exactly_like_the_still_row():
     from ocean_skill.plot.matplotlib_renderer import field_row
 
     tall = [_tall_frame(i) for i in range(2)]
-    still = field_row(tall[0]["aligned"], units="mmol m-3", title="t")
+    # no suptitle on either: the figure is sized to its content now, and a movie has none
+    still = field_row(tall[0]["aligned"], units="mmol m-3", title="")
     movie_fig = _movie(tall)._fig
 
     assert _bar_orientation(movie_fig) == _bar_orientation(still) == "vertical"

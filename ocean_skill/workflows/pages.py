@@ -52,7 +52,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from ocean_skill.config import COMPARE_DRAWS, check_draw
+from ocean_skill.comparison import (
+    aggregate_for,
+    is_pair_spec,
+    qc_for,
+    select_for,
+    selects_entry_parts,
+    variable_for,
+)
+from ocean_skill.config import COMPARE_DRAWS, check_draw, summary_kinds
+from ocean_skill.plot.spec import UnusableOptions
 
 __all__ = [
     "COMPARE_DRAWS",
@@ -563,7 +572,7 @@ def _inject_compare_window(kwargs: dict[str, Any], t0: str, t1: str) -> None:
         # say -- compare() refuses a select naming just "test" or just "reference".
         kwargs["select"] = {"test": {"time": {"min": t0, "max": t1}}, "reference": {}}
         return
-    if "test" in select or "reference" in select:
+    if is_pair_spec(select):
         # ``select.get(...) or {}`` rather than ``setdefault`` -- a pair-spec
         # naming "test" explicitly as null (``select: {test: null, reference:
         # [...]}}``) leaves the key present with value ``None``, which
@@ -883,6 +892,15 @@ class ExpandedPage:
     #: A compare page's drawing method (one of :data:`COMPARE_DRAWS`; ``"plot"``
     #: unless the page says otherwise), ``None`` for every other kind of page.
     draw: str | None = None
+    #: Text drawn under the page's (first) figure in ``report.pdf`` and recorded in the
+    #: manifest (``None`` for none). Templated like ``title:``; part of ``as_dict()``
+    #: only when set, so every other page's dict is unchanged.
+    caption: str | None = None
+    #: The ``plot:`` keys that came from ``defaults.plot`` and not from the page itself.
+    #: A page whose draw method does not accept one of them drops it with a warning
+    #: instead of failing (:func:`_draw`), so a suite-wide ``defaults.plot: {robust:
+    #: true}`` need not suit every kind of page. Not part of ``as_dict()``.
+    default_plot: tuple[str, ...] = ()
     #: Why this page cannot be drawn, found at expand time -- a source that could not
     #: be read (``"source 'x' could not be read at expand time: KeyError: ..."``).
     #: ``None`` for a healthy page. Such a page is still emitted (unwindowed, never
@@ -900,6 +918,9 @@ class ExpandedPage:
     #: from the rest). Empty for every other page.
     dropped: list[str] = _dc_field(default_factory=list)
     metrics_records: list[dict[str, Any]] = _dc_field(default_factory=list)
+    #: A summary page's table of pooled metrics, as the frame written beside
+    #: ``metrics.csv`` (``None`` unless the page draws ``kind: table``).
+    summary_table: Any = None
     #: What a ``then:`` step actually found once the page was drawn -- e.g. one
     #: record per ``extremum`` step (value, position, snapshot). Data-dependent,
     #: so filled in by :func:`build`, not :func:`expand`; deliberately left out of
@@ -921,7 +942,57 @@ class ExpandedPage:
         }
         if self.problem is not None:
             out["problem"] = self.problem
+        if self.caption is not None:
+            out["caption"] = self.caption
         return out
+
+
+#: Plot families that stack one row per comparison, so a long set can be cut into
+#: figures of ``max_rows`` rows each (:func:`_row_chunks`). The others -- series,
+#: profiles -- draw every comparison on one panel, which cutting would only scatter.
+ROW_FAMILIES = ("field_row", "time_depth", "section_row", "skill_map")
+
+#: A ``compare:`` page's ``plot: {max_rows: ...}`` when it names none.
+DEFAULT_MAX_ROWS = 4
+
+#: How many comparisons a summary page's metrics table draws per figure (``max_rows:``
+#: on the ``summary:``): about what one Letter page holds at a readable type size.
+DEFAULT_TABLE_ROWS = 25
+
+
+def _max_rows_key(
+    plot: dict[str, Any],
+    own_plot: dict[str, Any],
+    *,
+    applies: bool,
+    title: str,
+) -> dict[str, Any]:
+    """Validate ``plot``'s ``max_rows`` (kept in it; :func:`build` pops it).
+
+    ``max_rows`` is the page-level cap of :func:`build`, not a ``.plot()`` option, so it
+    must not reach a draw method that would refuse it. A page whose draw it does not
+    steer (``applies`` false: not a ``compare:`` page, or one with a ``draw:`` other
+    than ``plot``) refuses it when the page wrote it and drops it silently when it
+    only came from ``defaults.plot`` -- a suite-wide cap suits the pages it suits.
+    """
+    if "max_rows" not in plot:
+        return plot
+    if not applies:
+        if "max_rows" in own_plot:
+            raise ValueError(
+                f"page {title!r}: plot: max_rows: only applies to a compare: page "
+                "drawn with draw: plot (it caps the rows of a stacked figure)"
+            )
+        return {k: v for k, v in plot.items() if k != "max_rows"}
+    value = plot["max_rows"]
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+    ):
+        raise ValueError(
+            f"page {title!r}: plot: max_rows: must be a whole number of rows (0 or "
+            f"null for no limit), got {value!r}"
+        )
+    return plot
 
 
 def _pin_to_page(kwargs: dict[str, Any], *, seen: set[str]) -> dict[str, Any]:
@@ -1242,6 +1313,24 @@ def _resolve_field_kwargs(
     return kwargs, select, had_explicit_time, cacheable, index, None
 
 
+def _lane_of(select: Any, role: str) -> dict[str, Any]:
+    """One lane's side of a select as a dict: ``{}`` for a null side or a non-dict."""
+    if not isinstance(select, dict):
+        return {}
+    return dict(select_for(select, role) or {})
+
+
+def _names_transect(select: Any) -> bool:
+    """Whether a select (plain or pair-spec) names a ``transect`` on any lane."""
+    return any("transect" in _lane_of(select, role) for role in ("test", "reference"))
+
+
+def _has_time_key(lane: dict[str, Any]) -> bool:
+    from ocean_skill.sources import _TIME_KEYS
+
+    return any(k in lane for k in _TIME_KEYS)
+
+
 def _resolve_compare_kwargs(
     kwargs: dict[str, Any], *, title: str, test_source: Any, get_index: Any
 ) -> tuple[dict[str, Any], bool, str | None]:
@@ -1265,6 +1354,29 @@ def _resolve_compare_kwargs(
             f"page {title!r}: compare: notes must be a string, got "
             f"{type(kwargs['notes']).__name__} ({kwargs['notes']!r})"
         )
+    select = kwargs.get("select")
+    paired = is_pair_spec(select)
+    selects = kwargs.get("selects")
+    if selects is not None and not isinstance(selects, dict):
+        raise ValueError(
+            f"page {title!r}: compare: selects: must be a mapping of label -> select, "
+            f"got {type(selects).__name__} ({selects!r})"
+        )
+    # The run window of a page with no flat select is a pair-spec (test lane only: the
+    # reference may be a climatology with a time axis of its own), and compare()
+    # refuses a transect inside a pair-spec.
+    if (
+        selects
+        and (select is None or paired)
+        and any(_names_transect(selects_entry_parts(e)[0]) for e in selects.values())
+    ):
+        raise ValueError(
+            f"page {title!r}: compare: selects: names a transect, which compare() "
+            "refuses inside a {test, reference} pair-spec select -- and the "
+            "run window a page without a flat select: gets is one. Give the page "
+            "a flat select: (e.g. select: {depth: [0, 50, 100]}), used for both "
+            "lanes as written; it then gets no run window"
+        )
     try:
         index = get_index(source)
     except _SourceUnreadable as exc:
@@ -1274,13 +1386,9 @@ def _resolve_compare_kwargs(
         # uncacheable (see below).
         return kwargs, kwargs.get("times") is None, None
     t0, t1 = index[0].isoformat(), index[-1].isoformat()
-    select = kwargs.get("select")
-    is_pair_spec = isinstance(select, dict) and (
-        "test" in select or "reference" in select
-    )
     detide_margin = _detide_margin(kwargs.get("detide"), lane="test")
-    if select is None or is_pair_spec:
-        was_latest = is_pair_spec and (
+    if select is None or paired:
+        was_latest = paired and (
             isinstance(select.get("test"), dict)
             and select["test"].get("time") == "latest"
         )
@@ -1292,12 +1400,26 @@ def _resolve_compare_kwargs(
             kwargs["select"]["test"]["time"] = t1
         test_lane = kwargs["select"]["test"]
         cacheable = pinned or _is_closed(test_lane, index, margin=detide_margin)
+        # each labelled select is merged over this lane: one that names a time of
+        # its own replaces the window, so it has to be closed like any explicit one
+        for entry in (selects or {}).values():
+            entry_lane = _lane_of(selects_entry_parts(entry)[0], "test")
+            if _has_time_key(entry_lane):
+                cacheable = cacheable and _is_closed(
+                    {**test_lane, **entry_lane}, index, margin=detide_margin
+                )
     else:
         # A flat, non-paired select applies to both lanes at once --
         # compare()'s own contract -- so rewriting only the "test"
         # side here would silently change what the reference reads
         # too. Never rewritten, only checked.
         cacheable = _is_closed(select, index, margin=detide_margin)
+        for entry in (selects or {}).values():
+            entry_lane = _lane_of(selects_entry_parts(entry)[0], "test")
+            if _has_time_key(entry_lane):
+                cacheable = cacheable and _is_closed(
+                    {**select, **entry_lane}, index, margin=detide_margin
+                )
     if kwargs.get("times") is not None:
         # times= fans this one page into several per-bin comparisons,
         # each replacing whatever time entry select carried with its
@@ -1470,12 +1592,25 @@ def expand(suite: Any) -> list[ExpandedPage]:
         for combo in combos:
             namespace = {**defaults, **combo}
             title = _template_value(page.title, namespace, title=page.title)
-            plot = {
-                **plot_defaults,
-                **_template_value(page.plot, namespace, title=title),
-            }
+            own_plot = _template_value(page.plot, namespace, title=title)
+            plot = {**plot_defaults, **own_plot}
             if suite.pdf:
                 plot = _pin_to_page(plot, seen=pin_seen)
+            default_plot = tuple(
+                k for k in plot_defaults if k in plot and k not in own_plot
+            )
+            caption = (
+                _template_value(page.caption, namespace, title=title)
+                if page.caption is not None
+                else None
+            )
+            if caption is not None and not isinstance(caption, str):
+                raise ValueError(
+                    f"page {title!r}: caption: must resolve to text, got "
+                    f"{type(caption).__name__} ({page.caption!r})"
+                )
+            if page.kind != "compare":
+                plot = _max_rows_key(plot, own_plot, applies=False, title=title)
 
             if page.kind == "field":
                 # Deep-copied so an exact-placeholder select (``select: "{sel}"``,
@@ -1577,6 +1712,9 @@ def expand(suite: Any) -> list[ExpandedPage]:
                 )
                 draw = _template_value(page.draw, namespace, title=title) or "plot"
                 check_draw(title, draw, contours)
+                plot = _max_rows_key(
+                    plot, own_plot, applies=draw == "plot", title=title
+                )
                 if isinstance(contours, dict):
                     # Same treatment as the page (see the field branch above).
                     contours, contour_cacheable, contour_problem = (
@@ -1628,6 +1766,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
 
             else:  # summary
                 kwargs = _template_value(dict(page.summary), namespace, title=title)
+                kwargs["kind"] = summary_kinds(title, kwargs)
+                kwargs["scope"] = kwargs.get("scope", "all")
                 if suite.pdf:
                     kwargs = _pin_to_page(kwargs, seen=pin_seen)
                 out.append(
@@ -1639,6 +1779,8 @@ def expand(suite: Any) -> list[ExpandedPage]:
                         cache=suite.cache,
                     )
                 )
+            out[-1].caption = caption
+            out[-1].default_plot = default_plot
     return out
 
 
@@ -1699,11 +1841,20 @@ class PageSkipped(Exception):
     """
 
 
-def _test_side(spec: Any) -> Any:
-    """Return a pair-spec's ``test`` side; any other spec unchanged."""
-    if isinstance(spec, dict) and {"test", "reference"} <= spec.keys():
-        return spec["test"]
-    return spec
+def _test_side_entry(entry: Any) -> Any:
+    """Return a ``selects:`` entry cut to its test side (select and own aggregate)."""
+    select, _ = selects_entry_parts(entry)
+    if select is entry:  # a plain select, not the {select:, aggregate:} form
+        return select_for(entry, "test")
+    out = dict(entry)
+    if "select" in out:
+        out["select"] = select_for(out["select"], "test")
+    aggregate = out.get("aggregate")
+    if isinstance(aggregate, list):
+        out["aggregate"] = [aggregate_for(a, "test") for a in aggregate]
+    elif aggregate is not None:
+        out["aggregate"] = aggregate_for(aggregate, "test")
+    return out
 
 
 def _self_check_kwargs(kwargs: dict[str, Any]) -> dict[str, Any] | None:
@@ -1719,19 +1870,21 @@ def _self_check_kwargs(kwargs: dict[str, Any]) -> dict[str, Any] | None:
     out["reference"] = test
     variables = out.get("variables")
     if isinstance(variables, list):
-        out["variables"] = [_test_side(v) for v in variables]
+        out["variables"] = [variable_for(v, "test") for v in variables]
     elif variables is not None:
-        out["variables"] = _test_side(variables)
+        out["variables"] = variable_for(variables, "test")
     select = out.get("select")
     if select is not None:
-        out["select"] = _test_side(select)
+        out["select"] = select_for(select, "test")
+    if isinstance(out.get("selects"), dict):
+        out["selects"] = {k: _test_side_entry(v) for k, v in out["selects"].items()}
     aggregate = out.get("aggregate")
     if isinstance(aggregate, list):
-        out["aggregate"] = [_test_side(a) for a in aggregate]
+        out["aggregate"] = [aggregate_for(a, "test") for a in aggregate]
     elif aggregate is not None:
-        out["aggregate"] = _test_side(aggregate)
+        out["aggregate"] = aggregate_for(aggregate, "test")
     if "qc" in out:
-        out["qc"] = _test_side(out["qc"])
+        out["qc"] = qc_for(out["qc"], "test")
     # Per-lane switches that would otherwise treat the two copies of one source
     # differently (detide the reference only, demean one side): both lanes get the
     # test's choice.
@@ -1907,6 +2060,107 @@ def _drop_all_nan(page: ExpandedPage, cs: Any, *, osk: Any) -> tuple[Any, list[b
     return osk.ComparisonSet([c for c, k in zip(cs, keep, strict=True) if k]), keep
 
 
+def _draw(page: ExpandedPage, method: Any, kwargs: dict[str, Any]) -> Any:
+    """Call ``method(**kwargs)``, dropping refused options that ``defaults.plot`` set.
+
+    A suite-wide ``defaults.plot: {robust: true}`` suits the maps and not every other
+    page (a ``draw: metrics_series`` page has no such option). A draw method names the
+    options it cannot use before it draws anything, so when every one it refuses came
+    from ``defaults.plot`` (:attr:`ExpandedPage.default_plot`), the page is drawn
+    without them and a warning says so. An option the page wrote itself is still an
+    error, as is anything else the method refuses.
+    """
+    try:
+        return method(**kwargs)
+    except UnusableOptions as exc:
+        refused = [k for k in page.default_plot if k in kwargs and k in exc.options]
+        if not refused:
+            raise
+    warnings.warn(
+        f"page {page.title!r}: defaults.plot option(s) {refused} do not apply to this "
+        "page's figure and were skipped",
+        stacklevel=2,
+    )
+    return method(**{k: v for k, v in kwargs.items() if k not in refused})
+
+
+def _pools_rows(plot_opts: dict[str, Any]) -> bool:
+    """Whether these plot options put a row family's rows on a scale they all share."""
+    pooled = bool(plot_opts.get("shared_limits"))
+    return pooled or plot_opts.get("panels") == "difference"
+
+
+def _draw_continued(page: ExpandedPage, bucket: Any, kwargs: dict[str, Any]) -> Any:
+    """Draw a chunk after the first of a split page, its title ending in ``(cont.)``.
+
+    A title the page gave (``plot: {title: ...}``) is extended before drawing. Otherwise
+    the renderer's own suptitle is extended after it. A chunk the renderer gave no
+    suptitle keeps none: it is drawn once, never again with a title of its own (a
+    suptitle added to a finished figure would land on top of its panels), and the
+    ``_partN`` file suffix and the report's page order carry the continuity.
+    """
+    if "title" in kwargs:
+        title = kwargs["title"]
+        if title:  # an explicit "" asks for no title at all
+            kwargs = {**kwargs, "title": f"{title} (cont.)"}
+        return _draw(page, bucket.plot, kwargs)
+    fig = _draw(page, bucket.plot, kwargs)
+    sup = getattr(fig, "_suptitle", None)
+    if sup is not None and sup.get_text():
+        sup.set_text(f"{sup.get_text()} (cont.)")
+    return fig
+
+
+def _labelled_record(comparison: Any) -> dict[str, Any]:
+    """Return a comparison's metric record carrying the comparison's own label."""
+    record = comparison.metrics()
+    label = getattr(comparison, "label", None)
+    return {**record, "label": label} if label else record
+
+
+#: Record fields that tell two pooled comparisons with the same label apart, in the
+#: order a disambiguated label lists them.
+_DISTINGUISHING_FIELDS = (
+    "statistic", "aggregate", "depth", "time", "reference", "test"
+)
+
+
+def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
+    """Return one label per pooled record, unique across the pool.
+
+    A record's own label (else its variable) is kept when no other record shares it.
+    Records that share one -- the run mean and the seasonal spread of one variable, or
+    two pages of the same quantity -- get the fields that differ between them appended
+    (``"temperature · std · 200"``), and a running number as the last resort, so the
+    summary table has one row per comparison instead of refusing the pool.
+    """
+    base = [str(r.get("label") or r.get("variable") or "") for r in records]
+    groups: dict[str, list[int]] = {}
+    for i, label in enumerate(base):
+        groups.setdefault(label, []).append(i)
+    out = list(base)
+    for label, idx in groups.items():
+        if len(idx) < 2:
+            continue
+        differ = [
+            f
+            for f in _DISTINGUISHING_FIELDS
+            if len({str(records[i].get(f)) for i in idx}) > 1
+        ]
+        for i in idx:
+            parts = [
+                str(records[i][f]) for f in differ if records[i].get(f) is not None
+            ]
+            out[i] = " · ".join([label, *parts]) if parts else label
+        seen: dict[str, int] = {}
+        for i in idx:
+            seen[out[i]] = seen.get(out[i], 0) + 1
+        if any(n > 1 for n in seen.values()):
+            for n, i in enumerate(idx, start=1):
+                out[i] = f"{out[i]} ({n})"
+    return out
+
+
 def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = None):
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
@@ -2002,7 +2256,7 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
             plot_kwargs["contours"] = obj
         elif page.contours:
             plot_kwargs["contours"] = build_field(page.contours)
-        fig = obj.plot(**plot_kwargs)
+        fig = _draw(page, obj.plot, plot_kwargs)
         return [("", fig)]
 
     if page.kind in ("XY", "TS"):
@@ -2026,7 +2280,7 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
                 regions=page.kwargs["regions"],
                 at_center=page.kwargs["at_center"],
             )
-        return [("", obj.plot(**page.plot))]
+        return [("", _draw(page, obj.plot, dict(page.plot)))]
 
     if page.kind == "compare":
 
@@ -2044,7 +2298,9 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
             raise ValueError("every comparison in this page was skipped (skip_missing)")
         n_built = len(cs)
         cs, kept = _drop_all_nan(page, cs, osk=osk)
-        page.metrics_records = [c.metrics() for c in cs]
+        # Each record carries its comparison's own label ("temperature mean", a
+        # selects: entry's name), so a summary table names rows the way the figure does.
+        page.metrics_records = [_labelled_record(c) for c in cs]
         families = sorted({c.family for c in cs})
         contour_cs = None
         if isinstance(page.contours, dict):
@@ -2070,31 +2326,83 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
         if page.draw not in (None, "plot"):
             # The whole set as one figure -- metric diagrams and series pool every
             # family, so there is no per-family split (and no suffix) here.
-            return [("", getattr(cs, page.draw)(**page.plot))]
+            return [("", _draw(page, getattr(cs, page.draw), dict(page.plot)))]
+        plot_opts = dict(page.plot)
+        max_rows = plot_opts.pop("max_rows", DEFAULT_MAX_ROWS)
         results = []
         for fam in families:
-            bucket = osk.ComparisonSet([c for c in cs if c.family == fam])
-            plot_kwargs = dict(page.plot)
-            if page.contours is True:
-                plot_kwargs["contours"] = bucket
-            elif contour_cs is not None:
-                plot_kwargs["contours"] = osk.ComparisonSet(
-                    [c for c in contour_cs if c.family == fam]
+            members = [c for c in cs if c.family == fam]
+            overlay = (
+                [c for c in contour_cs if c.family == fam]
+                if contour_cs is not None
+                else None
+            )
+            # Several rows in one figure get too small to read: a row family is cut into
+            # figures of at most max_rows rows, in set order (a variable's statistics
+            # stay together when max_rows is a multiple of how many there are).
+            step = max_rows if max_rows and fam in ROW_FAMILIES else len(members)
+            if step < len(members) and _pools_rows(plot_opts):
+                # One colour scale over every row (shared_limits=True) or one
+                # difference scale over every panel (panels="difference") is the whole
+                # set's to compute, and the renderers take no limits from outside:
+                # each figure would find its own, so the same variable would change
+                # scale at the cut. The group is the whole set, so the cut is not made.
+                warnings.warn(
+                    f"page {page.title!r}: max_rows={max_rows} was not applied to "
+                    f"{len(members)} {fam} rows because shared_limits/panels="
+                    '"difference" put them on one colour scale, which separate '
+                    "figures cannot share; they are drawn as one figure (set "
+                    "max_rows: 0 to say so, or drop the shared scale to cut them)",
+                    stacklevel=2,
                 )
-            fig = bucket.plot(**plot_kwargs)
-            suffix = "" if len(families) == 1 else f"_{fam}"
-            results.append((suffix, fig))
+                step = len(members)
+            for part, start in enumerate(range(0, len(members), step)):
+                rows = slice(start, start + step)
+                bucket = osk.ComparisonSet(members[rows])
+                plot_kwargs = dict(plot_opts)
+                if page.contours is True:
+                    plot_kwargs["contours"] = bucket
+                elif overlay is not None:
+                    plot_kwargs["contours"] = osk.ComparisonSet(overlay[rows])
+                if part == 0:
+                    fig = _draw(page, bucket.plot, plot_kwargs)
+                else:
+                    fig = _draw_continued(page, bucket, plot_kwargs)
+                suffix = ("" if len(families) == 1 else f"_{fam}") + (
+                    f"_part{part + 1}" if part else ""
+                )
+                results.append((suffix, fig))
         return results
 
     # summary
     pooled = pooled_records or []
     if not pooled:
         raise ValueError("no compare page produced results to summarize")
+    labels = _distinct_labels(pooled)
     comparisons = [
-        MetricRecord(
-            r, label=r.get("label") or r.get("variable", ""), units=r.get("units")
-        )
-        for r in pooled
+        MetricRecord(r, label=label, units=r.get("units"))
+        for r, label in zip(pooled, labels, strict=True)
     ]
-    fig = osk.summary(comparisons, **page.kwargs)
-    return [("", fig)]
+    kinds = page.kwargs["kind"]
+    max_rows = page.kwargs.get("max_rows", DEFAULT_TABLE_ROWS)
+    diagram_kwargs = {
+        k: v for k, v in page.kwargs.items() if k not in ("kind", "scope", "max_rows")
+    }
+    results = []
+    for kind in kinds:
+        suffix = "" if len(kinds) == 1 else f"_{kind}"
+        if kind != "table":
+            fig = osk.summary(comparisons, kind=kind, **diagram_kwargs)
+            results.append((suffix, fig))
+            continue
+        # Keyed by the (distinct) labels, so rows are named as the figures name them
+        # rather than by the table's own variable/depth rule.
+        table = osk.table({c.label: c for c in comparisons})
+        page.summary_table = table.to_dataframe(units=True)
+        figs = table.to_figures(
+            max_rows=max_rows, title=diagram_kwargs.get("title", page.title)
+        )
+        results.extend(
+            (suffix + (f"_part{i + 1}" if i else ""), fig) for i, fig in enumerate(figs)
+        )
+    return results

@@ -64,37 +64,10 @@ class KnownProblem:
         )
 
 
-_LAYOUT = r"the maps are only|constrained_layout not applied"
-_LAYOUT_WHY = (
-    "PACKAGE BUG (also in suites/review-notes.md): a compare page with several rows "
-    "of maps (two statistics, or many variables) is laid out with maps a fraction of "
-    "an inch wide and the difference panels collapsed; the renderer's layout "
-    "warning ('the maps are only N in wide' / 'constrained_layout not applied') is "
-    "the symptom. ocean_skill/plot/matplotlib_renderer.py (raised near L678, L2979)."
-)
-KNOWN_PROBLEMS = (
-    KnownProblem(
-        "final-report",
-        "strict",
-        r"Chlorophyll vs satellite — mean and seasonal",
-        _LAYOUT,
-        _LAYOUT_WHY,
-    ),
-    KnownProblem(
-        "model-comparison",
-        "strict",
-        r"Boundary BGC, ESPER vs climatology — ",
-        _LAYOUT,
-        _LAYOUT_WHY,
-    ),
-    KnownProblem(
-        "model-comparison",
-        "strict",
-        r"vs WOA23 — mean and seasonal variability",
-        _LAYOUT,
-        _LAYOUT_WHY,
-    ),
-)
+#: Package bugs the guarded run is known to report. The "maps only a fraction of an inch
+#: wide" layout bug (a long row label overhanging its row; see ``_add_row_label``) was
+#: tracked here until it was fixed.
+KNOWN_PROBLEMS: tuple[KnownProblem, ...] = ()
 
 HAS_GUARDRAILS = "smoke" in inspect.signature(run_suite).parameters
 
@@ -287,21 +260,9 @@ def test_localizing_fits_dates_regions_and_subchunks_to_the_fixture(pacmed, tmp_
     assert fx.NY % sub["eta_rho"] == 0 and sub["eta_rho"] < fx.NY and sub["s_rho"] == 1
 
 
-# ------------------------------------------------------- a bug the fixture turned up
+# ----------------------------------------------- a bug the fixture turned up (fixed)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "PACKAGE BUG: comparing a boundary whose row holds land cells fails with "
-        "'select={transect: {points}}: entry N ([nan, nan]) is not finite'. "
-        "comparison.py _resolved_path (~L5735) re-spells the test lane's "
-        "path_lon/path_lat as a points list, and those are NaN on land-masked cells "
-        "(transect.py ~L785); _normalize_pairs (~L447) then refuses them. A land cell "
-        "on the boundary row should be NaN data, not a refused path."
-    ),
-)
 def test_a_boundary_row_with_land_cells_still_compares(
     isolated_catalogs, tmp_path, monkeypatch
 ):

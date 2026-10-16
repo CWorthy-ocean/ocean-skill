@@ -25,7 +25,15 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["Ticks", "colorbar_ticks", "difference_limit", "round_limits", "tick_step"]
+__all__ = [
+    "DEFAULT_DIFF_QUANTILE",
+    "Ticks",
+    "colorbar_ticks",
+    "difference_limit",
+    "resolve_diff_quantile",
+    "round_limits",
+    "tick_step",
+]
 
 #: Tick steps a colour bar may use, as multiples of a power of ten. matplotlib's default
 #: list also has 2.5, left out here because it puts two decimals on every other label
@@ -273,21 +281,57 @@ def round_limits(
     return new_lo, new_hi
 
 
-def difference_limit(difference) -> float:
+#: The central fraction of the data ``robust=True`` clips a colour scale to (the 10th to
+#: 90th percentile): what ``True`` means wherever ``robust`` is a fraction, so the data
+#: panels (:func:`ocean_skill.plot.matplotlib_renderer._limits`) and the difference
+#: panels (:func:`resolve_diff_quantile`) narrow together.
+ROBUST_FRACTION = 0.8
+
+#: The share of ``|difference|`` a difference panel's symmetric range spans by default.
+DEFAULT_DIFF_QUANTILE = 0.98
+
+
+def resolve_diff_quantile(
+    diff_quantile: float | None = None, robust: bool | float | None = False
+) -> float:
+    """Return the quantile of ``|difference|`` a difference panel's range should span.
+
+    ``diff_quantile`` (a fraction in ``(0, 1]``) wins outright. Otherwise ``robust``
+    -- which for the data panels means "clip to the central fraction ``q``", ``True``
+    being :data:`ROBUST_FRACTION` -- sets it
+    the same way, so one option narrows every panel of a comparison alike: ``True`` or
+    a fraction is that fraction of ``|difference|``. Neither given, the default
+    (:data:`DEFAULT_DIFF_QUANTILE`, the 98th percentile).
+    """
+    if diff_quantile is not None:
+        q = float(diff_quantile)
+        if not 0.0 < q <= 1.0:
+            raise ValueError(
+                f"diff_quantile={diff_quantile!r} is not a fraction in (0, 1] -- pass "
+                "the share of |difference| the symmetric range should span "
+                "(0.98 for the 98th percentile; 1 for the largest difference)."
+            )
+        return q
+    if robust is None or robust is False:
+        return DEFAULT_DIFF_QUANTILE
+    return ROBUST_FRACTION if robust is True else float(robust)
+
+
+def difference_limit(difference, quantile: float = DEFAULT_DIFF_QUANTILE) -> float:
     """Return a difference panel's symmetric half-range, snapped up to a round value.
 
-    The 98th percentile of ``|difference|`` -- wide enough for nearly every cell,
-    narrow enough that one outlier does not wash the rest of the panel out -- then
-    snapped up as :func:`round_limits` snaps the top of ``(-d, d)``, so the bar reads
-    ``−1.8 … 1.8`` rather than ``−1.734 … 1.734``. ``1.0`` for a difference with no
-    finite values or one that is zero everywhere, so the diverging norm still has a
-    range to span.
+    The ``quantile`` (default the 98th percentile) of ``|difference|`` -- wide enough
+    for nearly every cell, narrow enough that one outlier does not wash the rest of the
+    panel out -- then snapped up as :func:`round_limits` snaps the top of ``(-d, d)``,
+    so the bar reads ``−1.8 … 1.8`` rather than ``−1.734 … 1.734``. ``1.0`` for a
+    difference with no finite values or one that is zero everywhere, so the diverging
+    norm still has a range to span.
     """
     values = np.abs(np.asarray(difference, dtype="float64")).ravel()
     values = values[np.isfinite(values)]
     if values.size == 0:
         return 1.0
-    dmax = float(np.percentile(values, 98))
+    dmax = float(np.percentile(values, quantile * 100.0))
     if not dmax > 0:
         return 1.0
     return round_limits(-dmax, dmax, log=False)[1]

@@ -1673,7 +1673,7 @@ def test_a_fatal_crash_still_leaves_run_log_and_restores_streams(
     """
     from ocean_skill.workflows.report import PdfReport
 
-    def boom(self, fig, stem):
+    def boom(self, fig, stem, caption=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(PdfReport, "emit", boom)
@@ -1992,8 +1992,9 @@ def test_sections_are_pdf_only_and_settle_to_ok_or_skipped_after_the_run(
     assert result.exit_code == 0
     assert seen == ["field"]  # a section never reaches build()
 
-    # divider + figure; the trailing divider was dropped
-    assert _pagecount_by_bytes(result.pdf) == 2
+    # divider and figure share a page (the page-sized figure is scaled to fit under it);
+    # the trailing divider was dropped
+    assert _pagecount_by_bytes(result.pdf) == 1
     # PNG numbering is the figures' alone
     assert [p.name for p in result.figures] == ["01_Physics_latest.png"]
     assert [p.name for p in (result.report_dir / "figures").iterdir()] == [
@@ -2039,7 +2040,7 @@ def test_a_section_whose_pages_all_skipped_leaves_no_orphan_divider(
     assert doomed.reason == "no page after this section drew"
     assert bad.status == "skipped"
     assert good.status == "ok"
-    assert _pagecount_by_bytes(result.pdf) == 2  # "Good part" divider + "Good page"
+    assert _pagecount_by_bytes(result.pdf) == 1  # "Good part" divider heads "Good page"
     assert result.exit_code == 4  # one data page failed, one drew
 
 
@@ -2265,9 +2266,10 @@ def test_cover_is_written_first_and_before_a_pending_divider(tmp_path):
         assert not report.cover_written  # buffered until a figure follows
         report.emit(_blank_pages(1, agg=True)[0], "f")
 
-    assert order[:2] == cover and len(order) == 4  # cover, cover, divider, figure
-    assert report.cover_written and report.get_pagecount() == 4
-    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 4
+    # cover, cover, then the divider and the (scaled-to-fit) figure on one page
+    assert order[:2] == cover and len(order) == 3
+    assert report.cover_written and report.get_pagecount() == 3
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 3
     assert [p.name for p in (tmp_path / "figures").iterdir()] == ["01_f.png"]
 
 
@@ -2301,8 +2303,8 @@ def test_run_suite_puts_the_cover_pages_in_the_pdf_and_the_manifest(
     )
     result = run_suite(path)
 
-    # two cover pages + divider + figure
-    assert _pagecount_by_bytes(result.pdf) == 4
+    # two cover pages + the divider and figure sharing a page
+    assert _pagecount_by_bytes(result.pdf) == 3
     assert [p.name for p in result.figures] == ["01_Physics_latest.png"]
     assert result.exit_code == 0
     manifest = json.loads(result.manifest.read_text())

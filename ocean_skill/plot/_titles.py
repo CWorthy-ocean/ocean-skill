@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-__all__ = ["resolve_titles"]
+__all__ = ["map_panel_titles", "map_title_parts", "resolve_titles"]
 
 
 def resolve_titles(
@@ -39,3 +39,51 @@ def resolve_titles(
             "pass it back in the same order."
         )
     return [t if t is not None else a for a, t in zip(auto, titles, strict=True)]
+
+
+def map_title_parts(item) -> tuple[str, ...]:
+    """Return what identifies one map of a set, in reading order: its title parts.
+
+    The variable, the source (the member's own label, less the statistic phrase a
+    statistics fan appended to it), the statistic (``"mean"``, ``"std of monthly
+    means"``), the level and the instant -- each ``""`` when the item has none. Whether
+    a part reaches a title is :func:`map_panel_titles`'s call: only the parts that
+    differ between the maps do.
+    """
+    from ocean_skill.plot.matplotlib_renderer import field_title
+
+    aggregate = item.get("aggregate") or ""
+    return (
+        field_title(item.get("standard_name")),
+        item.get("source_label") or item.get("label") or "",
+        aggregate,
+        item.get("depth") or "",
+        # an aggregate's own time phrase restates the statistic (and the window, which
+        # every member of a statistics fan shares); the statistic already says it
+        "" if aggregate else item.get("time") or "",
+    )
+
+
+def map_panel_titles(items) -> list[str]:
+    """One title per map of an unfaceted set, naming only what tells the maps apart.
+
+    Every part (:func:`map_title_parts`) that reads the same on all the maps is left to
+    the suptitle (or to nothing, for the source), so a set fanned over variables is
+    titled by variable as it always was, and a set fanned over statistics -- the mean
+    and the monthly variability of one variable -- by statistic, rather than the same
+    variable name over every panel. Parts that differ join with `` · `` in reading
+    order. A set whose maps differ in no part at all (cannot be built from a
+    :class:`~ocean_skill.field.FieldSet`, but a hand-made item list can) falls back to
+    the variable.
+    """
+    from ocean_skill.plot.matplotlib_renderer import _elide
+
+    parts = [map_title_parts(item) for item in items]
+    varying = [
+        k
+        for k in range(len(parts[0]))
+        if len({row[k] for row in parts}) > 1
+    ]
+    if not varying:
+        return [row[0] for row in parts]
+    return [" · ".join(_elide(row[k]) for k in varying if row[k]) for row in parts]

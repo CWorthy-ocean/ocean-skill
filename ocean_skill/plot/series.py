@@ -855,7 +855,7 @@ def _ylabel(specs) -> str:
         if len(variables) == 1
         else "value"
     )
-    return f"{name} [{next(iter(units))}]" if len(units) == 1 else name
+    return f"{name} [{units_text(next(iter(units)))}]" if len(units) == 1 else name
 
 
 def _label_color(lines) -> str | None:
