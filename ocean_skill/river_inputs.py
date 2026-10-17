@@ -1105,6 +1105,9 @@ class RiverInputs:
                     word = "value" if nonpos == 1 else "values"
                     flags.append(f"{nonpos:,} {word} <= 0 not shown")
                 if flags:
+                    # headroom above the tallest bar, so the note never sits on a bar
+                    bottom, top = ax.get_ylim()
+                    ax.set_ylim(bottom, top * (1.12 + 0.14 * len(flags)))
                     ax.text(
                         0.97,
                         0.95,

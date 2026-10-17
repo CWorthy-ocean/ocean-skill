@@ -41,7 +41,7 @@
 #     forcing_time (defaults.clim_sides lists the sides; empty means no such file);
 #   - a sea surface salinity restoring file (...surface-restoring_clim.nc) is compared
 #     with WOA23 surface salinity for that month (defaults.restoring lists the files;
-#     empty means none). It is also mapped with the other surface climatologies.
+#     empty means none).
 #
 # This file is the shipped `input-check` suite, the one copy `ocean-skill-suite new`
 # starts from. `ocean-skill-suite new input-check` rewrites the block between the
@@ -131,7 +131,6 @@ defaults:
     - {name: pacmed_surf_phys, label: surface physics, vars: [Tair, qair, rain, swrad, lwrad, uwnd, vwnd]}
   surface_clim:
     - {name: pacmed_surf_bgc_clim, label: surface BGC climatology, vars: [iron, dust, nox, nhx]}
-    - {name: pacmed_surf_restoring_clim, label: salinity restoring climatology, vars: [sss]}
 # <<< setup
   # (the rest of defaults: is the same for every run)
   # Every page's plot: options start from these (a page's own plot: wins). Robust color
@@ -300,6 +299,7 @@ pages:
       {forcing_time}, model only. Chlorophyll is the sum of the three phytoplankton pools.
     plot:
       title: "{side.title} boundary — iron, ammonium, DOC and chlorophyll (climatology, {forcing_time})"
+      ncols: 2                       # 2x2: four stacked rows overflow a letter page
 
   # -- surface forcing ---------------------------------------------------------------
   - title: "Surface forcing"
