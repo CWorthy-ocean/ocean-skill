@@ -180,6 +180,81 @@ def find_workplan(run_dir: Path) -> Path | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _workplan_dates(wp: dict, wp_path: Path) -> tuple[list[datetime], list[datetime]]:
+    """Return every step's ``start_date`` and ``end_date`` in workplan ``wp`` (naive).
+
+    A step's dates are its ``runtime_params`` ``start_date``/``end_date``: from its
+    blueprint, then the resolved blueprint in its working folder (``work/*.yaml``), then
+    the workplan's own ``apply-overrides`` for that step, later ones winning -- steps
+    often share one base blueprint and differ only in the latter two. A blueprint path
+    that is relative is read relative to the workplan's folder (``wp_path``).
+
+    A run continued under a new workplan keeps its earlier jobs' folders beside the
+    current ones (``tasks/jan_1wk`` next to ``tasks/july_ccs``), so every other folder
+    next to a step's working folder is read too: its resolved blueprint, then its
+    ``work/directives.yaml`` overrides. A folder with neither adds nothing.
+    """
+    import pandas as pd
+
+    def stamp(value):
+        t = pd.Timestamp(value)
+        t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
+        return t.to_pydatetime()
+
+    starts, ends = [], []
+
+    def add(runtime: dict) -> None:
+        if runtime.get("start_date") is not None:
+            starts.append(stamp(runtime["start_date"]))
+        if runtime.get("end_date") is not None:
+            ends.append(stamp(runtime["end_date"]))
+
+    for step in wp.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        runtime: dict = {}  # later sources win: base blueprint, task's, overrides
+        blueprint = step.get("blueprint")
+        if isinstance(blueprint, str):
+            bp_path = Path(blueprint).expanduser()
+            bp_path = bp_path if bp_path.is_absolute() else wp_path.parent / bp_path
+            bp = _load(bp_path) if bp_path.is_file() else None
+            runtime |= (bp or {}).get("runtime_params") or {}
+        work = step.get("working_dir")
+        task_bp = newest_blueprint(Path(work)) if isinstance(work, str) else None
+        if task_bp is not None:
+            runtime |= (_load(task_bp) or {}).get("runtime_params") or {}
+        overrides = (
+            ((step.get("directives") or {}).get("apply-overrides") or {})
+            .get("overrides", {})
+            .get("runtime_params")
+        )
+        runtime |= overrides or {}
+        add(runtime)
+    # earlier jobs of the same run, from workplans since replaced
+    seen = {
+        Path(s["working_dir"]).expanduser().resolve()
+        for s in wp.get("steps") or []
+        if isinstance(s, dict) and isinstance(s.get("working_dir"), str)
+    }
+    for parent in sorted({d.parent for d in seen}):
+        for task in sorted(p for p in parent.iterdir() if p.is_dir()):
+            if task.resolve() in seen:
+                continue
+            runtime = {}
+            task_bp = newest_blueprint(task)
+            if task_bp is not None:
+                runtime |= (_load(task_bp) or {}).get("runtime_params") or {}
+            path = task / "work" / "directives.yaml"
+            directives = (_load(path) if path.is_file() else None) or {}
+            runtime |= (
+                ((directives.get("directives") or {}).get("apply-overrides") or {})
+                .get("overrides", {})
+                .get("runtime_params")
+            ) or {}
+            add(runtime)
+    return starts, ends
+
+
 def segment_starts(
     suite: SuiteConfig, suite_path: Path | None = None
 ) -> list[datetime]:
@@ -199,8 +274,6 @@ def segment_starts(
     rather than an error: these dates only mark where a health figure should look for a
     restart.
     """
-    import pandas as pd
-
     try:
         info = suite.run_info
         base = (
@@ -219,36 +292,7 @@ def segment_starts(
         wp = None if wp_path is None else _load(wp_path)
         if wp is None:
             return []
-        def stamp(value):
-            t = pd.Timestamp(value)
-            t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
-            return t.to_pydatetime()
-
-        starts, ends = [], []
-        for step in wp.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            runtime: dict = {}  # later sources win: base blueprint, task's, overrides
-            blueprint = step.get("blueprint")
-            if isinstance(blueprint, str):
-                bp_path = Path(blueprint).expanduser()
-                bp_path = bp_path if bp_path.is_absolute() else wp_path.parent / bp_path
-                bp = _load(bp_path) if bp_path.is_file() else None
-                runtime |= (bp or {}).get("runtime_params") or {}
-            work = step.get("working_dir")
-            task_bp = newest_blueprint(Path(work)) if isinstance(work, str) else None
-            if task_bp is not None:
-                runtime |= (_load(task_bp) or {}).get("runtime_params") or {}
-            overrides = (
-                ((step.get("directives") or {}).get("apply-overrides") or {})
-                .get("overrides", {})
-                .get("runtime_params")
-            )
-            runtime |= overrides or {}
-            if runtime.get("start_date") is not None:
-                starts.append(stamp(runtime["start_date"]))
-            if runtime.get("end_date") is not None:
-                ends.append(stamp(runtime["end_date"]))
+        starts, ends = _workplan_dates(wp, wp_path)
         if not starts and not ends:
             return []
         # every step's start and end is a join, except where the whole run starts and
@@ -382,6 +426,29 @@ def _rows(*pairs: tuple[str, Any]) -> list[tuple[str, str]]:
     return [(k, str(v)) for k, v in pairs if v not in (None, "", [])]
 
 
+def _run_span(wp: dict, wp_path: Path | None, runtime: Any) -> str | None:
+    """Return the whole run's dates as ``"<first start> to <last end>"`` (dates only).
+
+    A restarted run is one workplan with a task per job, and each task's blueprint has
+    only its own piece's dates, so the span is read from every step of the workplan
+    (:func:`_workplan_dates`): the earliest start to the latest end. With no workplan
+    steps the blueprint's own ``runtime_params`` give it, else ``None``.
+    """
+    starts: list[Any] = []
+    ends: list[Any] = []
+    if wp_path is not None and wp:
+        try:
+            starts, ends = _workplan_dates(wp, wp_path)
+        except Exception as exc:  # noqa: BLE001 -- a cover must never fail a run
+            warnings.warn(f"cover: no workplan run dates ({exc})", stacklevel=2)
+    rt = runtime if isinstance(runtime, dict) else {}
+    start = min(starts) if starts else rt.get("start_date")
+    end = max(ends) if ends else rt.get("end_date")
+    if start is None or end is None:
+        return None
+    return f"{_date(start)} to {_date(end)}"
+
+
 def gather(
     suite: SuiteConfig,
     suite_path: Path,
@@ -420,6 +487,7 @@ def gather(
     if run_dir is None and isinstance(bp.get("working_dir"), str):
         run_dir = Path(bp["working_dir"]).expanduser()
     step = _step_for(wp, run_dir)
+    run_span = _run_span(wp, wp_path, bp.get("runtime_params"))
 
     span = (
         f"{_date(index[0])} - {_date(index[-1])}"
@@ -471,8 +539,6 @@ def gather(
             ),
         ),
     ]
-    rt = bp.get("runtime_params") or {}
-    rt = rt if isinstance(rt, dict) else {}
     nesting = _locations(bp.get("nesting_info"))
     part = bp.get("partitioning") if isinstance(bp.get("partitioning"), dict) else {}
     forcing = bp.get("forcing") if isinstance(bp.get("forcing"), dict) else {}
@@ -491,10 +557,7 @@ def gather(
                 ("Run folder", bp.get("working_dir")),
                 ("Application", bp.get("application")),
                 ("Schema version", bp.get("schema_version")),
-                (
-                    "Run dates",
-                    f"{rt.get('start_date')} -> {rt.get('end_date')}" if rt else None,
-                ),
+                ("Run dates", run_span.replace(" to ", " -> ") if run_span else None),
                 ("Valid dates", f"{valid[0]} -> {valid[1]}" if all(valid) else None),
                 (
                     "Initial conditions",
@@ -543,10 +606,14 @@ def gather(
         )
     else:
         title = str(bp_name or source or suite.name)
-    period = f"{rt['start_date']} to {rt['end_date']}" if rt else span
+    period = run_span or span
     sub = [
         str(bp_name) if bp_name and str(bp_name) != title else None,
-        _text(bp_desc) if bp_desc else None,
+        # an auto-generated description ("Generated blueprint; overridden keys ...")
+        # is noise under the title; the Simulation table still lists it
+        _text(bp_desc)
+        if bp_desc and not _text(bp_desc).lower().startswith("generated blueprint")
+        else None,
         f"Simulated {period}" if period else None,
         f"ocean-skill report: {suite.name}",
     ]

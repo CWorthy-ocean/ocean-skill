@@ -75,6 +75,7 @@ from ocean_skill.config import (
     summary_kinds,
 )
 from ocean_skill.plot.spec import UnusableOptions
+from ocean_skill.table import _collapse_range
 
 __all__ = [
     "COMPARE_DRAWS",
@@ -1686,8 +1687,13 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
             # ``defaults.plot: {zoom: ...}`` it will never apply to), and no
             # ``for_each`` (the schema already refused one). Title and notes are
             # templated against ``defaults`` alone.
-            title = _template_value(page.title, defaults, title=page.title)
-            text = _template_value(page.section, defaults, title=title)
+            # a mapping default reads by attribute, as on the other pages
+            # ("{period.min}", "{period.max:.10}" for the date alone)
+            namespace = {
+                k: _Item(v) if isinstance(v, dict) else v for k, v in defaults.items()
+            }
+            title = _template_value(page.title, namespace, title=page.title)
+            text = _template_value(page.section, namespace, title=title)
             if not isinstance(text, str):
                 raise ValueError(
                     f"page {title!r}: section: must resolve to text, got "
@@ -1773,6 +1779,7 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
             title = _template_value(page.title, namespace, title=page.title)
             own_plot = _template_value(page.plot, namespace, title=title)
             plot = {**plot_defaults, **own_plot}
+            plot = _page_title_option(plot, title)
             if suite.pdf:
                 plot = _pin_to_page(plot, seen=pin_seen)
             default_plot = tuple(
@@ -2304,6 +2311,28 @@ def _drop_all_nan(page: ExpandedPage, cs: Any, *, osk: Any) -> tuple[Any, list[b
     return osk.ComparisonSet([c for c, k in zip(cs, keep, strict=True) if k]), keep
 
 
+def _page_title_option(plot: dict[str, Any], page_title: str) -> dict[str, Any]:
+    """Resolve ``plot: {title: page}``: the figure's title is the page's own.
+
+    ``title:`` replaces the figure's own (generic) suptitle, so a page can say what its
+    figure is -- which boundary side, which month -- and the literal ``page`` is the
+    shorthand for the page's title, placeholders already filled. Anything else must be
+    text (``""`` draws no title); a number or a list would reach the renderer as a
+    mangled one.
+    """
+    if "title" not in plot:
+        return plot
+    given = plot["title"]
+    if given == "page":
+        return {**plot, "title": page_title}
+    if given is not None and not isinstance(given, str):
+        raise ValueError(
+            f"page {page_title!r}: plot: title: must be text (or `page` for the "
+            f"page's own title), got {type(given).__name__} ({given!r})"
+        )
+    return plot
+
+
 def _draw(page: ExpandedPage, method: Any, kwargs: dict[str, Any]) -> Any:
     """Call ``method(**kwargs)``, dropping refused options that ``defaults.plot`` set.
 
@@ -2311,8 +2340,9 @@ def _draw(page: ExpandedPage, method: Any, kwargs: dict[str, Any]) -> Any:
     page (a ``draw: metrics_series`` page has no such option). A draw method names the
     options it cannot use before it draws anything, so when every one it refuses came
     from ``defaults.plot`` (:attr:`ExpandedPage.default_plot`), the page is drawn
-    without them and a warning says so. An option the page wrote itself is still an
-    error, as is anything else the method refuses.
+    without them, silently (a suite-wide default is not an error on a page it does not
+    suit, and warning on every such page buried the ones that matter). An option the
+    page wrote itself is still an error, as is anything else the method refuses.
     """
     try:
         return method(**kwargs)
@@ -2320,11 +2350,6 @@ def _draw(page: ExpandedPage, method: Any, kwargs: dict[str, Any]) -> Any:
         refused = [k for k in page.default_plot if k in kwargs and k in exc.options]
         if not refused:
             raise
-    warnings.warn(
-        f"page {page.title!r}: defaults.plot option(s) {refused} do not apply to this "
-        "page's figure and were skipped",
-        stacklevel=2,
-    )
     return method(**{k: v for k, v in kwargs.items() if k not in refused})
 
 
@@ -2369,6 +2394,11 @@ _DISTINGUISHING_FIELDS = (
 )
 
 
+#: A mixed-layer-depth variable as the labels spell it, with or without the method
+#: (``mld``, ``mld (density_threshold)``): named in full in a table.
+_MLD_LABEL_RE = re.compile(r"mld(?: \([^)]*\))?", re.IGNORECASE)
+
+
 def _short_label(text: str) -> str:
     """Shorten a label made of CF standard names the way the figures do.
 
@@ -2384,6 +2414,8 @@ def _short_label(text: str) -> str:
     from ocean_skill.vocabulary import is_known
 
     def one(part: str) -> str:
+        if _MLD_LABEL_RE.fullmatch(part):  # "mld", "mld (density_threshold)"
+            return "mixed layer depth"
         if " " in part or "_" not in part:
             return part
         short = short_name(part)
@@ -2399,10 +2431,13 @@ def _spell_field(name: str, value: Any) -> str:
     it would put the dict's repr into a summary table's row name, where the Notes
     column already spells it (``"0-500 m"``, ``"2010-01-01–2013-12-31"``).
     """
-    if name == "depth" and isinstance(value, dict | list | tuple):
-        return _depth_label(value)
+    if name == "depth" and (
+        isinstance(value, dict | list | tuple)
+        or (isinstance(value, int | float) and not isinstance(value, bool))
+    ):
+        return _depth_label(value)  # a bare 200 reads "200 m"; "surface" stays as is
     if name == "time" and isinstance(value, dict | list | tuple):
-        return _time_label(value)
+        return _collapse_range(_time_label(value))
     if name == "variable":
         return _short_label(str(value))
     if name in ("test", "reference"):
@@ -2780,7 +2815,9 @@ def build(
         table = osk.table({c.label: c for c in comparisons})
         page.summary_table = table.to_dataframe(units=True)
         figs = table.to_figures(
-            max_rows=max_rows, title=diagram_kwargs.get("title", page.title)
+            max_rows=max_rows,
+            title=diagram_kwargs.get("title", page.title),
+            common_notes=True,
         )
         results.extend(
             (suffix + (f"_part{i + 1}" if i else ""), fig) for i, fig in enumerate(figs)

@@ -31,6 +31,7 @@ import numpy as np
 
 from ocean_skill.metrics import DEFAULT_MAP_METRICS
 from ocean_skill.plot import _titles
+from ocean_skill.plot._numbers import format_value
 
 __all__ = ["portrait"]
 
@@ -130,7 +131,7 @@ def _fmt_value(name: str, val) -> str:
         return f"{round(float(val))}"
     if units == "1":
         return f"{float(val):.2f}"
-    return f"{float(val):.3g}"
+    return format_value(float(val))
 
 
 def portrait(

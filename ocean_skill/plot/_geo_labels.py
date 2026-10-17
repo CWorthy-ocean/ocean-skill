@@ -15,8 +15,23 @@ __all__ = [
     "format_lon",
     "lat_tick_js",
     "lon_tick_js",
+    "tick_count",
     "wrap_lon",
 ]
+
+#: Inches one degree tick label needs (the text, ``175°E``, plus air on both sides).
+_INCHES_PER_TICK = 0.65
+
+
+def tick_count(width_inches: float) -> int:
+    """How many longitude/latitude ticks an axis ``width_inches`` wide can label.
+
+    At most seven, fewer on a narrow panel: a section crossing the dateline spells every
+    tick in full (``175°E``, ``160°W``), and five of those on a two-inch panel run
+    together. At least two, so an axis always says where it is.
+    """
+    return max(2, min(7, round(width_inches / _INCHES_PER_TICK)))
+
 
 
 def wrap_lon(lon: float) -> float:

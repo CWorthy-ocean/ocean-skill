@@ -861,7 +861,8 @@ def _ylabel(specs) -> str:
         if len(variables) == 1
         else "value"
     )
-    return f"{name} [{units_text(next(iter(units)))}]" if len(units) == 1 else name
+    shown = units_text(next(iter(units))) if len(units) == 1 else ""
+    return f"{name} [{shown}]" if shown else name
 
 
 def _label_color(lines) -> str | None:
@@ -984,7 +985,8 @@ def _period_of(da) -> str:
         return ""
     if values.size == 0:
         return ""
-    return f"{str(values.min())[:7]} to {str(values.max())[:7]}"
+    first, last = str(values.min())[:7], str(values.max())[:7]
+    return first if first == last else f"{first} to {last}"
 
 
 def _scale_into_unit(v, low: float, span: float):
@@ -1767,6 +1769,11 @@ def compose(
         for line in panel.lines + panel.secondary:
             if line.label not in labels:
                 labels.append(line.label)
+    # One series on the whole figure: a key with a single entry names what the title and
+    # axis already say. Only the default placement yields -- a caller who asked for a
+    # corner, "below" or "right" gets the key they asked for.
+    if legend_placement == "auto" and sum(bool(label) for label in labels) == 1:
+        legend_placement = "off"
     # A blank grid cell carries no lines at all -- excluded here so its empty label
     # set does not, on its own, make an otherwise shared legend read as unshared.
     drawn = [p for p in panels if not p.blank]

@@ -611,8 +611,18 @@ _FACTOR = re.compile(
 #: PSU for *comparison* (``ppt``, ``parts per thousand``) are the same number but not
 #: the same label, so they are shown as written.
 _PSU_SPELLINGS = frozenset(
-    {"psu", "practical salinity units", "practical_salinity_units"}
+    {
+        "psu",
+        "practical salinity units",
+        "practical_salinity_units",
+        "practical salinity",
+        "practical_salinity",
+    }
 )
+#: The spelling of "no unit at all" (CF's ``1``): a label has nothing to say for it, so
+#: :func:`display` returns ``""`` and a caller draws no ``[]``. (``unitless`` and
+#: ``dimensionless`` are words, left as written like every other ambiguous one.)
+_DIMENSIONLESS = frozenset({"1"})
 #: Words whose pint reading differs from what the label means: ``kt`` is the knot to
 #: pint and a kiloton to a carbon budget; ``ppt`` is pico-pint to pint and parts per
 #: thousand to a salinity; ``units`` is micro-"nit". A string containing one is left as
@@ -730,9 +740,14 @@ def display(unit_string) -> str:
     from :func:`for_statistic` read as people write them: ``delta_degC^2`` is ``°C²``
     and ``(mg/m^3)^2`` is ``(mg/m³)²`` (``delta_`` is dropped: a spread of
     temperatures is plainly in degrees). Idempotent, so safe to run over any label;
-    ``None`` or blank is ``""``.
+    ``None`` or blank is ``""``, and so is a dimensionless ``1`` (CF's unit for
+    practical salinity or a ratio): a label with no unit prints no ``[]``.
     """
     text = "" if unit_string is None else str(unit_string).strip()
+    if text.lower() in _DIMENSIONLESS:
+        return ""
+    if text.lower() in _PSU_SPELLINGS:
+        return "PSU"
     return _display_unit(text) if text else ""
 
 

@@ -21,7 +21,8 @@ from tests.test_profile_comparison import _profile_comparison
     [
         ("woa23_nitrate_month12", "WOA23 nitrate Dec"),
         ("woa23_phosphate_month01", "WOA23 phosphate Jan"),
-        ("woa23_temperature_monthly", "WOA23 temperature monthly"),
+        # one entry holding all twelve months: its name cannot say which a page draws
+        ("woa23_temperature_monthly", "WOA23 temperature"),
         ("woa23_oxygen_annual", "WOA23 oxygen annual"),
     ],
 )
@@ -37,7 +38,7 @@ def test_a_period_climatology_reads_dataset_variable_period(name, expected):
         "a+b",  # a pooled name
         "woa23_nitrate_month13",  # not a month
         "woa23_notavariable_month04",  # the vocabulary does not know the variable
-        "chl_gapfree_my_daily_geo",  # nothing a rule can say
+        "chl_gapfree_nrt_daily_wind",  # not an entry the package knows
     ],
 )
 def test_a_name_with_nothing_to_derive_is_left_as_written(name):
@@ -68,6 +69,44 @@ def test_a_blank_or_non_text_label_is_ignored(monkeypatch):
 
 def test_the_packaged_glodap_entry_carries_a_label():
     assert source_label("glodap") == "GLODAPv2"
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("chl_gapfree_my_daily_geo", "Copernicus L4 chlorophyll"),
+        ("holte_talley_mld_clim", "Holte & Talley"),
+        ("glodap", "GLODAPv2"),
+    ],
+)
+def test_the_standard_observation_entries_have_built_in_labels(
+    monkeypatch, name, expected
+):
+    """A shadowing catalog's same-named entry (no label of its own) is still named."""
+    monkeypatch.setattr(
+        catalog, "resolve", lambda n: SimpleNamespace(metadata={"units": "m"})
+    )
+    assert source_label(name) == expected
+    monkeypatch.setattr(
+        catalog, "resolve", lambda n: (_ for _ in ()).throw(KeyError(n))
+    )
+    assert source_label(name) == expected  # not even resolvable here
+
+
+def test_an_entrys_own_label_beats_the_built_in_one(monkeypatch):
+    monkeypatch.setattr(
+        catalog, "resolve", lambda n: SimpleNamespace(metadata={"label": "H and T"})
+    )
+    assert source_label("holte_talley_mld_clim") == "H and T"
+
+
+def test_a_model_side_entry_is_named_by_the_label_its_suite_wrote(monkeypatch):
+    monkeypatch.setattr(
+        catalog,
+        "resolve",
+        lambda n: SimpleNamespace(metadata={"label": "initial conditions"}),
+    )
+    assert source_label("ccs_4km_ic") == "initial conditions"
 
 
 def test_the_label_is_prose_and_never_changes_a_sources_fingerprint():

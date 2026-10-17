@@ -255,9 +255,26 @@ def test_a_section_starts_a_new_page_even_when_the_last_one_has_room(tmp_path):
     assert report.written_sections == {1, 2}
 
 
-def test_a_figure_too_tall_to_fit_under_its_divider_leaves_it_a_page_of_its_own(
+def test_a_tall_figure_is_shrunk_under_its_divider_down_to_the_minimum_scale(
     tmp_path,
 ):
+    """Section text is never alone on a page while its figure fits at >= 0.6 scale."""
+    assert _report.MIN_FIT_SCALE == 0.6
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        log = _log_pdf_writes(report)
+        report.section(1, "Part one", _LONG_NOTES)
+        report.emit(_full_bleed_figure((5.0, 9.8)), "tall")
+
+    # one page: the divider is the figure's header, not a page of its own
+    assert log == ["divider:Part one"]
+    assert report.written_sections == {1}
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 1
+
+
+def test_a_figure_too_tall_to_fit_under_its_divider_leaves_it_a_page_of_its_own(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(_report, "MIN_FIT_SCALE", 0.95)
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         log = _log_pdf_writes(report)
         report.section(1, "Part one", _LONG_NOTES)
@@ -306,7 +323,8 @@ def test_a_divider_with_its_figure_is_an_exact_letter_page(tmp_path):
     assert boxes[0] == pytest.approx(_PAGE_PT, abs=0.5)
 
 
-def test_a_divider_alone_is_an_exact_letter_page(tmp_path):
+def test_a_divider_alone_is_an_exact_letter_page(tmp_path, monkeypatch):
+    monkeypatch.setattr(_report, "MIN_FIT_SCALE", 0.95)  # force the divider alone
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.section(1, "Part one", _LONG_NOTES)
         report.emit(_full_bleed_figure((5.0, 9.8)), "tall")
@@ -680,7 +698,7 @@ def test_a_stand_alone_divider_and_a_packed_pages_header_are_one_layout(monkeypa
     assert alone.get_size_inches() == pytest.approx((_report.PAGE_W, _report.PAGE_H))
 
     heading = plt.figure(figsize=(_report.PAGE_W, _report.PAGE_H))
-    top = _report.SECTION_TOP_Y * _report.PAGE_H
+    top = _report.PAGE_H - _report._top_margin()
     _report._draw_header(heading, _report.PAGE_W / 2, top, title, notes)
 
     def geometry(fig):
@@ -694,12 +712,13 @@ def test_a_stand_alone_divider_and_a_packed_pages_header_are_one_layout(monkeypa
     plt.close(heading)
 
 
-def test_a_stand_alone_divider_hangs_from_the_top_third_with_a_rule_and_notes():
+def test_a_stand_alone_divider_hangs_from_the_top_with_a_rule_and_notes():
     fig = _report._section_figure("Part one", "Some notes.")
     title, notes = fig.texts
     (rule,) = _rules(fig)
     assert title.get_text() == "Part one" and title.get_ha() == "center"
-    assert 0.5 < title.get_position()[1] < 0.7  # a little above the page's middle
+    # hung from the top of the page, never centred in a blank one
+    assert title.get_position()[1] > 0.9
     # title, then its rule, then the notes below it
     assert title.get_position()[1] > rule.get_ydata()[0] > notes.get_position()[1]
 

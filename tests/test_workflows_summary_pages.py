@@ -140,11 +140,14 @@ def test_table_rows_are_the_pooled_comparisons_with_three_figure_numbers_and_uni
     header = [text[0, c] for c in range(8)]
     for name in ("bias", "RMSE", "CRMSD", "corr", "σ ratio", "n", "Units"):
         assert name in header
+    # the notes every row shares (here: the depth, "0") went to the title, and the
+    # emptied column is gone
+    assert "Notes" not in header and (0, 8) not in _table_of(fig).get_celld()
     body = [[text[r, c] for c in range(len(header))] for r in (1, 2, 3)]
     assert [row[header.index("Units")] for row in body] == ["°C", "mmol/m³", ""]
     assert {row[header.index("RMSE")] for row in body} == {"1.23"}
     assert {row[header.index("n")] for row in body} == {"1234"}
-    assert fig.get_suptitle() == "Summary"
+    assert fig.get_suptitle() == "Summary (0)"
     assert fig.get_size_inches()[0] == pytest.approx(8.5)
 
 
@@ -371,7 +374,10 @@ def test_a_depth_band_and_a_time_window_are_spelled_not_printed_as_dicts():
 
 def test_records_alike_in_every_field_are_numbered():
     records = [{"variable": "mld"}, {"variable": "mld"}]
-    assert P._distinct_labels(records) == ["mld (1)", "mld (2)"]
+    assert P._distinct_labels(records) == [
+        "mixed layer depth (1)",
+        "mixed layer depth (2)",
+    ]
 
 
 def test_a_summary_table_draws_two_statistics_of_one_variable(tmp_path):
@@ -485,3 +491,38 @@ def test_a_long_standard_name_is_never_split_mid_word_in_the_table_figure():
     assert "mole_concentration" not in flat  # now the short name
     assert "oxygen" in flat and "nitrate" in flat
     plt.close(fig)
+
+
+# -- labels and notes of the pooled table ----------------------------------------------
+
+
+def test_a_bare_depth_reads_in_metres_and_mld_reads_in_full():
+    day = {"min": "2013-01-01", "max": "2013-01-01"}
+    records = [
+        {"variable": "temperature", "label": "temperature", "depth": 200, "time": day},
+        {"variable": "temperature", "label": "temperature", "depth": "surface"},
+        {"variable": "mld", "label": "mld (density_threshold)", "depth": "n/a"},
+    ]
+    assert P._distinct_labels(records) == [
+        "temperature · 200 m · 2013-01-01",  # a one-day span is the day
+        "temperature · surface",
+        "mixed layer depth",
+    ]
+
+
+def test_notes_every_row_shares_move_to_the_title_and_na_and_one_day_ranges_tidy_up():
+    day = {"min": "2013-01-01", "max": "2013-01-01"}
+    records = [
+        _record("sea_water_potential_temperature", "degC", depth=200, time=day),
+        _record("nitrate", "mmol m-3", depth=200, time=day),
+        _record("mld", "m", depth="n/a", time=day),
+    ]
+    page = _page({"kind": "table"})
+    ((_, fig),) = P.build(page, pooled_records=records)
+    text = _cell_text(fig)
+    notes = {text[r, 8] for r in (1, 2, 3)} if (0, 8) in text else set()
+    assert "n/a" not in " ".join(text.values())
+    assert "2013-01-01–2013-01-01" not in " ".join(text.values())
+    # the date is on every row, so it moved to the title; the depths differ, so stay
+    assert fig.get_suptitle() == "Summary (2013-01-01)"
+    assert notes == {"200 m", ""}

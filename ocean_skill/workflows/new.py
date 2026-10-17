@@ -13,6 +13,7 @@ edited by hand; guesses are written as ``# TODO check`` comments.
 from __future__ import annotations
 
 import argparse
+import copy
 import glob
 import json
 import os
@@ -139,6 +140,25 @@ def _by_glob(folder: Path, pattern: str) -> dict[str, list[Path]]:
     return groups
 
 
+def _is_climatology(path: str) -> bool:
+    """Whether a roms-tools file (``..._clim.nc``) is a twelve-month climatology."""
+    return Path(path).stem.endswith(("_clim", "-clim"))
+
+
+def _surface_label(part: str) -> str:
+    """Return how a figure names a surface forcing file, from its name's middle.
+
+    ``physics`` reads ``surface physics``, ``bgc-unified_clim`` reads ``surface BGC
+    unified climatology`` and a salinity-restoring file ``salinity restoring``.
+    """
+    if part.startswith("restoring"):
+        return "salinity restoring" + (" climatology" if "clim" in part else "")
+    words = [w for w in re.split(r"[-_]+", part) if w]
+    words = ["climatology" if w == "clim" else w for w in words]
+    words = ["BGC" if w == "bgc" else w for w in words]
+    return " ".join(["surface", *words])
+
+
 def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
     """Return the ``refresh:`` and ``defaults:`` lines of an input-check."""
     import textwrap
@@ -159,15 +179,21 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
         raise SuiteNewError(f"expected one initial-conditions file in {folder}")
     ic, sources, forcing = ics[0], [], []
 
-    def add(suffix: str, kind: str, files: str | None, **kw) -> str:
-        """Add a forcing entry ``<name>_<suffix>`` (a warning if there are no files)."""
+    def add(suffix: str, kind: str, files: str | None, *, label: str, **kw) -> str:
+        """Add a forcing entry ``<name>_<suffix>`` (a warning if there are no files).
+
+        ``label`` is how figures name the entry (its catalog metadata ``label``).
+        """
         entry, refs = f"{name}_{suffix}", f"{output_dir}/refs/{name}_{suffix}.parquet"
         if files is None:
             warn.append(f"no {suffix} files in {folder}; its pages will fail")
         else:
             row = {"name": entry, "kind": kind, "files": files, "grid": str(grid)}
             forcing.append(
-                row | ({} if kind == "initial_conditions" else {"ref": refs}) | kw
+                row
+                | ({} if kind == "initial_conditions" else {"ref": refs})
+                | {"label": label}
+                | kw
             )
         return entry
 
@@ -179,9 +205,10 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
             {"name": f"{name}_ic", "files": str(ic), "grid": str(grid)}
             | {"ref": f"{output_dir}/refs/{name}_ic.parquet"}
             | {"keep": "latest-per-file", "subchunk": sub}
+            | {"label": "initial conditions"}
         )
     else:
-        add("ic", "initial_conditions", str(ic))
+        add("ic", "initial_conditions", str(ic), label="initial conditions")
 
     # open sides: the ones the boundary-physics file has temperature for
     phys = _by_glob(folder, "*boundary-physics_*.nc")
@@ -198,14 +225,35 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
     open_sides = [s for s in forced if wet[s] >= MIN_WET]
     if dropped := [f"{s} ({wet[s]:.0%} water)" for s in forced if s not in open_sides]:
         warn.append(f"boundary sides left out as mostly land: {', '.join(dropped)}")
-    bgc = _by_glob(folder, "*boundary-bgc-*.nc")
-    bgc = [k for k in bgc if not Path(k).stem.endswith(("_clim", "-clim"))]
+    # the BGC boundary files: monthly ones (dated), and the climatological one (twelve
+    # months in one file, whose own ``month`` is picked by the pages)
+    bgc_all = _by_glob(folder, "*boundary-bgc-*.nc")
+    bgc = [k for k in bgc_all if not _is_climatology(k)]
+    bgc_clim = [k for k in bgc_all if _is_climatology(k)]
+    if len(bgc_clim) > 1:
+        warn.append(f"{len(bgc_clim)} climatological BGC boundary files; using one")
 
     def bry() -> dict:  # a fresh dict per row: shared ones dump as YAML anchors
         return {"subchunk": {"bry_time": 1}, "sides": list(open_sides)}
 
-    bry_phys = add("bry_phys", "boundary", next(iter(phys)), **bry())
-    bry_bgc = add("bry_bgc", "boundary", next(iter(bgc), None), **bry())
+    bry_phys = add(
+        "bry_phys", "boundary", next(iter(phys)), label="boundary file", **bry()
+    )
+    bry_bgc = add(
+        "bry_bgc", "boundary", next(iter(bgc), None), label="boundary file", **bry()
+    )
+    # one file, so there are no monthly chunks to join (no subchunk); with none, no
+    # warning either: the climatology pages are simply absent
+    bry_clim = f"{name}_bry_bgc_clim"
+    if bgc_clim:
+        add(
+            "bry_bgc_clim",
+            "boundary",
+            bgc_clim[0],
+            label="climatological boundary file",
+            climatology=True,
+            sides=list(open_sides),
+        )
 
     with xr.open_dataset(grid) as g:
         lon, lat = g["lon_rho"].values, g["lat_rho"].values
@@ -226,7 +274,12 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
     # surface files, dated or climatology: their 2-D variables, and a time variable
     # that is not called "time" (a CO2 file's own)
     surface: dict[bool, list[dict]] = {False: [], True: []}
-    for pattern in ("*surface-physics_*.nc", "*surface-bgc-*.nc"):
+    restoring: list[dict] = []  # salinity restoring files, which also get a WOA23 page
+    for pattern in (
+        "*surface-physics_*.nc",
+        "*surface-bgc-*.nc",
+        "*surface-restoring*.nc",
+    ):
         for key, files in _by_glob(folder, pattern).items():
             filename = Path(key).name
             part = re.sub(
@@ -247,13 +300,18 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
                 kw["time_coord"] = times[0]
             if part == "physics" and len(files) > 1:
                 kw["subchunk"] = {"time": 1}  # monthly files of 28-31 steps must join
-            entry = add("surf_" + re.sub(r"\W", "_", part), "surface", key, **kw)
-            surface[clim].append(
-                {"name": entry, "label": f"surface {part}", "vars": names}
+            label = _surface_label(part)
+            entry = add(
+                "surf_" + re.sub(r"\W", "_", part), "surface", key, label=label, **kw
             )
+            if part.startswith("restoring") and "sss" in names:
+                # drawn on its own page against WOA23, not again as a plain map
+                restoring.append({"name": entry, "label": label, "var": "sss"})
+            else:
+                surface[clim].append({"name": entry, "label": label, "vars": names})
 
     rivers = sorted(folder.glob("*river*.nc"))
-    add("river", "river", str(rivers[0]) if rivers else None)
+    add("river", "river", str(rivers[0]) if rivers else None, label="river forcing")
 
     # the first date: the restart's day (to the nearest), else a roms-tools initial
     # conditions file's own ini_time, else the first boundary month -- which can be a
@@ -277,9 +335,12 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
         raise SuiteNewError(f"no start date in {ic.name} or {first.name}")
     defaults = {"test": f"{name}_ic", "forcing_time": when.strftime("%Y-%m")}
     defaults |= {"forcing_month": when.month, "ic_month": when.month}
-    defaults |= {"bry_phys": bry_phys, "bry_bgc": bry_bgc, "river": f"{name}_river"}
+    defaults |= {"bry_phys": bry_phys, "bry_bgc": bry_bgc, "bry_bgc_clim": bry_clim}
+    defaults |= {"river": f"{name}_river"}
     defaults |= {
         "sides": sides,
+        "clim_sides": copy.deepcopy(sides) if bgc_clim else [],  # no YAML anchors
+        "restoring": restoring,
         "surface": surface[False],
         "surface_clim": surface[True],
     }

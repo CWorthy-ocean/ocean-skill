@@ -18,12 +18,14 @@ River 7 enters at two cells (75% and 25%), river 3 at two cells either side of t
 dateline (the grid is -180..180).
 """
 
+import gc
 import io
 
 import numpy as np
 import pytest
 import xarray as xr
 from matplotlib.figure import Figure
+from xarray.backends.file_manager import FILE_CACHE
 
 from ocean_skill import build, river_inputs, sources
 from ocean_skill.river_inputs import RIVER_DRAWS, RiverInputs, rivers
@@ -49,6 +51,28 @@ def _grid_arrays():
     lon, lat = lon.copy(), lat.copy()
     lon.ravel()[2], lon.ravel()[SPLIT_3] = 179.5, -179.5
     return lon, lat
+
+
+@pytest.fixture(autouse=True)
+def _release_netcdf_handles():
+    """Close every netCDF handle a test opened, on this thread, before the next test.
+
+    ``rivers()`` and ``sources.read`` hand back *lazy* datasets whose dask graphs hold
+    open netCDF4/HDF5 handles (xarray's ``FILE_CACHE``), and nothing in a test closes
+    them. They were then closed whenever the garbage collector finalized them -- from
+    any thread, including a dask worker, while another test's ``open_dataset`` was
+    inside the (not thread-safe) HDF5 library. That is the intermittent crash of a
+    whole xdist worker, or a read of a half-closed file failing
+    ``test_mouths_are_the_cell_positions_weighted_by_fraction``. Finalizing the
+    handles here, at a point where no read is running, takes the collector out of it;
+    the synchronous scheduler keeps dask worker threads out of the library too.
+    """
+    import dask
+
+    with dask.config.set(scheduler="synchronous"):
+        yield
+    gc.collect()
+    FILE_CACHE.clear()
 
 
 @pytest.fixture(scope="module")
@@ -172,10 +196,10 @@ def test_a_file_without_river_variables_is_refused(river_files, isolated_catalog
 
 
 def test_a_list_of_files_joins_along_river_time(river_files, isolated_catalogs):
-    ds = xr.open_dataset(river_files["file"], decode_times=False)
     a, b = river_files["tmp"] / "part_a.nc", river_files["tmp"] / "part_b.nc"
-    ds.isel(river_time=slice(0, 8)).to_netcdf(a)
-    ds.isel(river_time=slice(8, None)).to_netcdf(b)
+    with xr.open_dataset(river_files["file"], decode_times=False) as ds:
+        ds.isel(river_time=slice(0, 8)).to_netcdf(a)
+        ds.isel(river_time=slice(8, None)).to_netcdf(b)
     cat = build.new_catalog()
     build.add_river_source(cat, "joined", [a, b], river_files["grid"])
     build.save(cat, isolated_catalogs / "joined.yaml")
@@ -283,9 +307,9 @@ def test_planted_values_head_the_extremes_table(inputs, river_files):
         and row["date"] == "2013-01-04"
     )
     assert row["lon"] == pytest.approx(float(inputs.lon[9]))
-    # ten rivers per tracer, each once
-    ten = df[(df["kind"] == "highest") & (df["tracer"] == "DOC")]
-    assert len(ten) == 10 and ten["river_id"].is_unique
+    # three rivers per tracer, each once
+    three = df[(df["kind"] == "highest") & (df["tracer"] == "DOC")]
+    assert len(three) == river_inputs.TOP_N == 3 and three["river_id"].is_unique
 
 
 def test_zero_flow_concentrations_never_reach_the_extremes(inputs):
@@ -351,14 +375,154 @@ def test_histograms_use_active_flowing_rivers_and_skip_empty_tracers(river_sourc
     ((_, fig),) = rivers(river_source, time="2013-01-07").figures("histograms")
     # discharge plus the six tracers that vary; zooC and Lig get no panel
     assert len(fig.axes) == 1 + len(TRACERS) - 2
-    outside = {
-        ax.get_title().split(" ")[0]: ax.texts[0].get_text().split("\n")[0]
+    flagged = {
+        ax.get_title().split(" ")[0]: [t.get_text() for t in ax.texts]
         for ax in fig.axes
     }
-    assert outside["DOC"] == "outside bounds: 1"  # the planted 25000, at step 7
-    # the zero-flow river's 1e6 is no concentration; the others are planted elsewhere
-    assert outside["ALK"] == outside["NO3"] == outside["salt"] == "outside bounds: 0"
+    assert flagged["DOC"] == ["outside bounds: 1"]  # the planted 25000, at step 7
+    # the zero-flow river's 1e6 is no concentration; the others are planted elsewhere,
+    # and a panel with nothing outside its bounds says nothing about bounds
+    assert flagged["ALK"] == flagged["NO3"] == flagged["salt"] == []
+    assert not any("n <= 0" in t.get_text() for ax in fig.axes for t in ax.texts)
     assert any(t.get_text() == "all zero: zooC; constant: Lig = 1" for t in fig.texts)
+
+
+def test_histogram_panels_are_three_wide_titled_with_display_units(river_source):
+    ((_, fig),) = rivers(river_source).figures("histograms")
+    titles = [ax.get_title() for ax in fig.axes]
+    assert titles[0] == "discharge, time mean (m\u00b3/s)"
+    assert "NO3 (mmol/m\u00b3)" in titles and "temp (\u00b0C)" in titles
+    first_row = [ax for ax in fig.axes if ax.get_subplotspec().rowspan.start == 0]
+    assert len(first_row) == 3 == river_inputs._HIST_COLS
+    # a range of several decades has decade ticks, written as powers of ten
+    discharge = fig.axes[0]
+    assert discharge.get_xscale() == "log"
+    fig.canvas.draw()
+    labels = [t.get_text() for t in discharge.get_xticklabels() if t.get_text()]
+    assert labels and all(lab.startswith("$\\mathdefault{10^") for lab in labels)
+
+
+def test_a_long_note_is_wrapped_to_stay_inside_the_page():
+    note = "all zero: " + ", ".join(f"tracer{i}" for i in range(80))
+    wrapped = river_inputs._wrap(note)
+    lines = wrapped.split("\n")
+    assert len(lines) > 3 and all(len(line) <= river_inputs._WRAP for line in lines)
+    assert " ".join(lines) == note
+    assert river_inputs._wrap("") == ""
+
+
+def _inside_the_page(fig):
+    """Every text and legend of ``fig`` lies within the figure's own bounds."""
+    fig.canvas.draw()
+    box = fig.bbox
+    items = [*fig.texts, *fig.legends]
+    if fig._suptitle is not None:
+        items.append(fig._suptitle)
+    assert items
+    for item in items:
+        ext = item.get_window_extent()
+        assert ext.x0 >= box.x0 - 1 and ext.x1 <= box.x1 + 1, item
+        assert ext.y0 >= box.y0 - 1 and ext.y1 <= box.y1 + 1, item
+
+
+@pytest.mark.parametrize("draw", RIVER_DRAWS)
+def test_figures_have_readable_fonts_and_nothing_runs_off_the_page(inputs, draw):
+    from matplotlib.text import Text
+
+    for _, fig in inputs.figures(draw):
+        _inside_the_page(fig)
+        fig.canvas.draw()
+        small = [
+            (t.get_text(), t.get_fontsize())
+            for t in fig.findobj(Text)
+            if t.get_visible() and t.get_text().strip() and t.get_fontsize() < 8.0
+        ]
+        assert not small, small
+
+
+def test_the_map_title_is_one_short_line_and_the_counts_are_a_note_below(inputs):
+    ((_, fig),) = inputs.figures("map")
+    title = fig._suptitle.get_text()
+    assert "\n" not in title
+    assert title == (
+        "River mouths: 1,997 of 2,000 rivers (with a grid cell and flow), sized and "
+        "colored by time-mean discharge"
+    )
+    note = next(t.get_text() for t in fig.texts if t.get_text().startswith("Drawn:"))
+    note = " ".join(note.split())  # wrapped over lines
+    assert "1 with a grid cell but no flow" in note
+    assert "1 with flow but no grid cell of their own" in note
+    assert "1 with neither" in note
+    assert "lost" not in title.lower() and "lost" not in note.lower()
+    # the colorbar says m\u00b3/s at a readable size; marker sizes have a legend
+    labels = [ax.get_ylabel() for ax in fig.axes]
+    assert "time-mean discharge (m\u00b3/s)" in labels
+    (legend,) = fig.legends
+    assert len(legend.get_texts()) == 3
+    assert all(t.get_text().endswith("m\u00b3/s") for t in legend.get_texts())
+
+
+def test_the_sample_leaves_out_constant_and_all_zero_tracers(river_source, monkeypatch):
+    monkeypatch.setattr(
+        river_inputs, "SAMPLE_TRACERS", ("temp", "salt", "NO3", "zooC", "Lig")
+    )
+    ((_, fig),) = rivers(river_source).figures("sample")
+    labels = [ax.get_ylabel() for ax in fig.axes]
+    assert labels == [
+        "discharge (m\u00b3/s)",
+        "temp (\u00b0C)",
+        "salt (PSU)",
+        "NO3 (mmol/m\u00b3)",
+    ]
+
+
+def test_the_constant_tracers_are_found_from_the_scan(inputs):
+    constant = {inputs.tracers[k]: v for k, v in inputs.constant_tracers().items()}
+    assert constant == {"zooC": 0.0, "Lig": 1.0}
+
+
+def test_a_constant_tracer_has_no_extremes_but_a_bad_one_still_shows(
+    river_source, monkeypatch
+):
+    inputs = rivers(river_source)
+    salt, no3 = inputs.tracers.index("salt"), inputs.tracers.index("NO3")
+    monkeypatch.setattr(
+        RiverInputs, "constant_tracers", lambda self: {salt: 1.0, no3: 20.0}
+    )
+    df = inputs.table()
+    assert "salt" not in set(df["tracer"])
+    # NO3 is "constant" too here, so no highest rows, but its negative value is listed
+    assert set(df.loc[df["tracer"] == "NO3", "kind"]) == {"below bound"}
+
+
+def test_the_extremes_table_fits_two_pages_with_one_cell_for_tracer_and_unit(inputs):
+    figs = inputs.figures("extremes")
+    assert 1 <= len(figs) <= 2
+    ((_, fig),) = figs[:1]
+    (ax,) = fig.axes
+    (table,) = ax.tables
+    cells = {k: c.get_text().get_text() for k, c in table.get_celld().items()}
+    heads = [cells[0, c] for c in range(8)]
+    assert heads == [
+        "tracer",
+        "#",
+        "value",
+        "river",
+        "lon",
+        "lat",
+        "date",
+        "Q (m\u00b3/s)",
+    ]
+    body = [[cells[r, c] for c in range(8)] for r in range(1, 1 + len(cells) // 8 - 1)]
+    tracers = [row[0] for row in body if row[0]]
+    assert "DOC (mmol/m\u00b3)" in tracers and "temp (\u00b0C)" in tracers
+    assert not any(t.startswith(("zooC", "Lig")) for t in tracers)  # constant tracers
+    doc = next(row for row in body if row[0] == "DOC (mmol/m\u00b3)")
+    assert doc[1:3] == ["1", "25000"]
+    # positions read as degrees with a hemisphere, never 0-360 numbers
+    assert all(row[4].endswith(("\u00b0E", "\u00b0W", "\u00b0")) for row in body)
+    assert all(row[5].endswith(("\u00b0N", "\u00b0S", "\u00b0")) for row in body)
+    assert any(row[1] == "low 1" for row in body)  # the planted negative NO3
 
 
 def test_the_forcing_time_is_the_nearest_step(river_source):

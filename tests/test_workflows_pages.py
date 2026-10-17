@@ -2495,3 +2495,59 @@ def test_for_each_month_run_on_an_unreadable_source_leaves_one_flagged_page(
     assert flagged.title == "{month.name}" and not flagged.cache
     assert "'gone'" in flagged.problem
     assert fine.problem is None
+
+
+# -- section text placeholders; plot: {title: page} ------------------------------------
+
+
+def test_section_text_fills_defaults_placeholders_and_dotted_mapping_keys():
+    suite = _suite(
+        [
+            {
+                "title": "Part {part}",
+                "section": "From {period.min:.10} to {period.max:.10} "
+                "({forcing_time}, month {forcing_month}).",
+            }
+        ],
+        defaults={
+            "part": "one",
+            "period": {"min": "2013-01-02T00:00:00", "max": "2013-12-31T00:00:00"},
+            "forcing_time": "2013-01",
+            "forcing_month": 1,
+        },
+    )
+    (page,) = P.expand(suite)
+    assert page.title == "Part one"
+    assert page.kwargs["text"] == "From 2013-01-02 to 2013-12-31 (2013-01, month 1)."
+
+
+def test_plot_title_page_is_the_pages_own_filled_title():
+    suite = _suite(
+        [
+            {
+                "title": "{side} boundary -- temperature",
+                "for_each": {"side": ["South", "West"]},
+                "field": {"variables": ["temperature"]},
+                "plot": {"title": "page"},
+            },
+            {
+                "title": "own",
+                "field": {"variables": ["temperature"]},
+                "plot": {"title": "{forcing_time} custom"},
+            },
+        ],
+        defaults={"test": "stub", "forcing_time": "2013-01"},
+    )
+    south, west, own = P.expand(suite)
+    assert south.plot["title"] == "South boundary -- temperature"
+    assert west.plot["title"] == "West boundary -- temperature"
+    assert own.plot["title"] == "2013-01 custom"
+
+
+def test_plot_title_must_be_text():
+    suite = _suite(
+        [{"title": "t", "field": {"variables": ["temperature"]}, "plot": {"title": 5}}],
+        defaults={"test": "stub"},
+    )
+    with pytest.raises(ValueError, match="plot: title: must be text"):
+        P.expand(suite)

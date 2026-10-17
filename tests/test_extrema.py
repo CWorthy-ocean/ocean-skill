@@ -534,7 +534,7 @@ def test_series_title_names_the_extremum_in_both_renderers(stub):
     stub(_point_series())  # the follow-on point select reduces to a series, live
     fs = ext.series()
     expected = (
-        "Time series at the surface nitrate minimum: -50 mmol m-3 at 40.0°N 100.0°W"
+        "Time series at the surface nitrate minimum: -50 mmol/m³ at 40.0°N 100.0°W"
     )
     assert fs.title == expected
     assert _suptitles(fs) == (expected, expected)
@@ -547,7 +547,7 @@ def test_series_title_adds_the_snapshot_date_when_the_extremum_has_one(stub):
     stub(_point_series())
     fs = ext.series(time="2012-01")  # time= skips the native-index lookup
     assert fs.title == (
-        "Time series at the nitrate maximum: 50 mmol m-3 at 20.0°N 85.0°W on 2012-01-02"
+        "Time series at the nitrate maximum: 50 mmol/m³ at 20.0°N 85.0°W on 2012-01-02"
     )
 
 
@@ -598,7 +598,7 @@ def test_series_title_marks_local_hits_and_ranks(stub):
     ext = _make(select={"depth": "surface"}).extremum("max")
     local = dataclasses.replace(ext, mode="local", rank=2)
     title = local.series(time="2012-01").title
-    assert "surface nitrate local maximum (#2): 50 mmol m-3" in title
+    assert "surface nitrate local maximum (#2): 50 mmol/m³" in title
     # The first hit of a search is unranked, and a plain hit is not "local".
     assert "(#" not in ext.series(time="2012-01").title
     assert "local" not in ext.series(time="2012-01").title

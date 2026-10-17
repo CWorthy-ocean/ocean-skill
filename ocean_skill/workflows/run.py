@@ -287,7 +287,10 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         ref = make_kerchunk(
             ready, entry["ref"], grid=entry.get("grid"), min_age=min_age, **kwargs
         )
-        add_source(cat, entry["name"], ref)
+        # ``label:`` is how figures name this source (entry metadata, read by
+        # ``ocean_skill.catalog.source_label``); left out when the suite has none
+        meta = {"label": entry["label"]} if entry.get("label") else {}
+        add_source(cat, entry["name"], ref, **meta)
         rebuilt.append(entry["name"])
         note = f" ({len(replaced)} replaced by a later segment)" if replaced else ""
         print(f"  refresh: {entry['name']} <- {len(ready)} files{note}")
@@ -303,10 +306,14 @@ def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
 #: model's own defaults, ``climatology: false``, must not reach a builder that has no
 #: such key).
 _FORCING_KEYS = {
-    "boundary": ("variables", "climatology", "sides", "strip", "ref", "subchunk"),
-    "surface": ("variables", "climatology", "time_coord", "ref", "subchunk"),
-    "initial_conditions": ("variables",),
-    "river": ("ref",),
+    "boundary": (
+        "variables", "climatology", "sides", "strip", "ref", "subchunk", "label"
+    ),
+    "surface": (
+        "variables", "climatology", "time_coord", "ref", "subchunk", "label"
+    ),
+    "initial_conditions": ("variables", "label"),
+    "river": ("ref", "label"),
 }
 
 

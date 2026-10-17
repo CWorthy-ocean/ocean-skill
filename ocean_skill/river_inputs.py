@@ -21,14 +21,15 @@ Four views (:data:`RIVER_DRAWS`), each a list of ``(name, matplotlib Figure)``:
 ``map``
     The river mouths over the model domain, sized and colored by time-mean discharge.
 ``histograms``
-    Log-scale histograms of discharge and of every tracer's concentration at the
-    forcing time, with the count outside the plausible range printed on each panel.
+    Log-scale histograms of discharge and of every tracer that varies, at the forcing
+    time, with the count outside the plausible range printed on a panel that has any;
+    all-zero and constant tracers are listed in a note instead of drawn.
 ``sample``
     Twelve rivers chosen by discharge (three small, three medium, three large, the
-    three largest), their discharge and main concentrations over time.
+    three largest), their discharge and the main concentrations that vary over time.
 ``extremes``
-    A table of each main tracer's highest river concentrations over *all* times, and
-    any below its lower bound (:meth:`RiverInputs.table`).
+    A table of each varying main tracer's three highest river concentrations over *all*
+    times, and any below its lower bound (:meth:`RiverInputs.table`).
 
 :meth:`RiverInputs.problems` lists what is out of range as JSON-safe records, for a
 suite's summary. Everything is matplotlib, built directly (no ``pyplot`` state).
@@ -42,12 +43,15 @@ from __future__ import annotations
 
 import math
 import re
+import textwrap
 from typing import Any
 
 import numpy as np
-from matplotlib.ticker import NullFormatter
 
 from ocean_skill.config import RIVER_DRAWS
+from ocean_skill.plot._geo_labels import format_lat, format_lon
+from ocean_skill.plot._numbers import format_value
+from ocean_skill.units import display
 
 __all__ = [
     "MAIN_TRACERS",
@@ -126,14 +130,16 @@ SAMPLE_TRACERS = ("temp", "salt", "NO3", "ALK", "DIC", "DOC")
 SLAB_ELEMENTS = 8_000_000
 
 #: How many of the highest values per tracer the extremes table lists.
-TOP_N = 10
+TOP_N = 3
 
 #: Figure fonts (pt) and the letter page's drawable width (in).
-_FS = 7.0
-_FS_TITLE = 9.0
+_FS = 8.0
+_FS_TITLE = 10.0
 _WIDTH = 8.5
-_TABLE_ROWS_PER_PAGE = 34
-_HIST_COLS, _HIST_ROWS = 4, 5
+_TABLE_ROWS_PER_PAGE = 40
+_HIST_COLS, _HIST_ROWS = 3, 4
+#: Characters per line of a wrapped note at ``_FS`` pt on the letter page's width.
+_WRAP = 105
 
 _UNIT_GUESS = {"temp": "degC", "salt": "PSU"}
 
@@ -244,6 +250,11 @@ def _decode_times(ds) -> np.ndarray | None:
         except (ValueError, OverflowError):
             continue
     return None
+
+
+def _wrap(text: str, width: int = _WRAP) -> str:
+    """Wrap ``text`` to ``width`` characters a line, so a note stays inside the page."""
+    return "\n".join(textwrap.wrap(text, width=width)) if text else ""
 
 
 def _bound(name: str) -> tuple[float, float]:
@@ -537,7 +548,29 @@ class RiverInputs:
         self._identical = [(i, j) for j, i in seen.items() if confirmed[j]]
         return self._identical
 
+    def constant_tracers(self) -> dict[int, float]:
+        """Return ``{tracer index: value}`` of the tracers that never vary.
+
+        A tracer is constant when every active river carries one value at every step
+        it flows (all zero, or ``salt`` = 1 everywhere), judged from the scan's
+        per-river extremes. A tracer with no finite value at all is reported as 0.
+        """
+        scan = self._scan()
+        out: dict[int, float] = {}
+        for k in range(len(self.tracers)):
+            hi = scan["max"][k][np.isfinite(scan["max"][k])]
+            lo = scan["min"][k][np.isfinite(scan["min"][k])]
+            if not hi.size:
+                out[k] = 0.0
+            elif hi.max() == lo.min():
+                out[k] = float(hi.max())
+        return out
+
     # -- helpers ---------------------------------------------------------------------
+
+    def _unit(self, k: int) -> str:
+        """Tracer ``k``'s unit as one spelling (``mmol/m³``, ``°C``)."""
+        return display(self.units[k])
 
     def _date(self, t: int) -> str:
         if self.times is None:
@@ -561,20 +594,24 @@ class RiverInputs:
     # -- the table and the problems ------------------------------------------
 
     def table(self):
-        """Each main tracer's highest river concentrations, over all times.
+        """Each varying main tracer's highest river concentrations, over all times.
 
         One row per ``(tracer, river)`` -- a river's highest value over every time, the
         date it happened -- for the :data:`TOP_N` highest rivers of each tracer in
-        :data:`MAIN_TRACERS`, plus (``kind == "below bound"``) the lowest values under
-        the tracer's lower bound in :data:`RIVER_BOUNDS`, so a negative concentration
-        always shows. Only active rivers (see :meth:`classes`) at steps where their
-        discharge is positive are considered, so every row has a position. Columns:
+        :data:`MAIN_TRACERS` that is not constant (see :meth:`constant_tracers`: an
+        all-zero tracer, or ``salt`` = 1 everywhere, has no extremes), plus
+        (``kind == "below bound"``) the lowest values under the tracer's lower bound in
+        :data:`RIVER_BOUNDS`, listed even for a constant tracer so a negative
+        concentration always shows. Only active rivers (see :meth:`classes`) at steps
+        where their discharge is positive are considered, so every row has a position.
+        Columns:
         ``tracer``, ``kind``, ``rank``, ``value``, ``unit``, ``river``, ``river_id``,
         ``lon``, ``lat``, ``date``, ``discharge`` (m3/s at that date).
         """
         import pandas as pd
 
         scan = self._scan()
+        constant = self.constant_tracers()
         rows: list[dict[str, Any]] = []
 
         def add(tracer, kind, rank, value, t, q, unit, i):
@@ -598,7 +635,8 @@ class RiverInputs:
             k = self.tracers.index(name)
             unit = self.units[k]
             hi = np.where(np.isnan(scan["max"][k]), -np.inf, scan["max"][k])
-            for rank, i in enumerate(np.argsort(-hi, kind="stable")[:TOP_N], start=1):
+            ranked = [] if k in constant else np.argsort(-hi, kind="stable")[:TOP_N]
+            for rank, i in enumerate(ranked, start=1):
                 if np.isfinite(hi[i]):
                     add(
                         name,
@@ -788,6 +826,7 @@ class RiverInputs:
     def _draw_map(self) -> list:
         import cartopy.crs as ccrs
         from matplotlib.colors import LogNorm
+        from matplotlib.lines import Line2D
 
         from ocean_skill.plot.matplotlib_renderer import (
             DEFAULT_GRIDLINE_KWARGS,
@@ -806,15 +845,23 @@ class RiverInputs:
         x0, x1 = float(np.nanmin(data_lon)), float(np.nanmax(data_lon))
         y0, y1 = float(np.nanmin(self._grid_lat)), float(np.nanmax(self._grid_lat))
         pad_x, pad_y = 0.03 * (x1 - x0 or 1.0), 0.03 * (y1 - y0 or 1.0)
-        width = _WIDTH - 1.4
-        height = (
-            float(
-                np.clip(width * (y1 - y0 + 2 * pad_y) / (x1 - x0 + 2 * pad_x), 3.5, 9.5)
+        cls = self.classes()
+        notes = _wrap(self._class_note(cls))
+        n_note = notes.count("\n") + 1
+        # inches, top to bottom: title, map, tick labels, size legend, class note
+        top, below, legend_h = 0.5, 0.4, 0.45
+        note_h = 0.17 * n_note + 0.15
+        map_h = float(
+            np.clip(
+                (_WIDTH - 1.4) * (y1 - y0 + 2 * pad_y) / (x1 - x0 + 2 * pad_x), 3.5, 8.0
             )
-            + 1.2
         )
+        height = top + map_h + below + legend_h + note_h
         fig = self._figure(height)
-        ax = fig.add_axes((0.08, 0.5 / height, 0.72, 1 - 1.5 / height), projection=proj)
+        bottom = below + legend_h + note_h
+        ax = fig.add_axes(
+            (0.08, bottom / height, 0.72, map_h / height), projection=proj
+        )
         shift = central
         ax.set_extent(
             (x0 - pad_x - shift, x1 + pad_x - shift, y0 - pad_y, y1 + pad_y), crs=proj
@@ -845,7 +892,6 @@ class RiverInputs:
             zorder=4,
         )
         mouth_lon = np.mod(self.lon, 360.0) if central else self.lon
-        cls = self.classes()
         good = cls["mask_active"]
         order = np.flatnonzero(good)[np.argsort(q[good], kind="stable")]  # large on top
         if order.size:
@@ -855,13 +901,16 @@ class RiverInputs:
             crowd = min(
                 1.0, math.sqrt(1500.0 / qs.size)
             )  # smaller dots for 100,000 rivers
-            size = crowd * (4.0 + 40.0 * (np.log10(qs) - np.log10(lo)) / span)
+
+            def marker_area(value):
+                return crowd * (4.0 + 40.0 * (np.log10(value) - np.log10(lo)) / span)
+
             norm = LogNorm(vmin=lo, vmax=hi if hi > lo else lo * 10)
             sc = ax.scatter(
                 mouth_lon[order] - shift,
                 self.lat[order],
                 c=qs,
-                s=size,
+                s=marker_area(qs),
                 cmap="viridis",
                 norm=norm,
                 transform=proj,
@@ -870,34 +919,92 @@ class RiverInputs:
                 edgecolors="0.2",
                 rasterized=True,
             )
-            cax = fig.add_axes((0.84, 0.5 / height, 0.025, 1 - 1.5 / height))
+            cax = fig.add_axes((0.84, bottom / height, 0.025, map_h / height))
             cb = fig.colorbar(sc, cax=cax)
-            cb.set_label("time-mean discharge (m3/s)", fontsize=_FS)
+            cb.set_label(f"time-mean discharge ({display('m3/s')})", fontsize=_FS)
             cb.ax.tick_params(labelsize=_FS, which="both")
-        lost = (
-            f", {cls['lost_m3s']:.4g} m3/s ({cls['lost_pct']:.3g}%) lost"
-            if cls["flow_no_mouth"]
-            else ""
+            sizes = [lo, math.sqrt(lo * hi), hi] if hi > lo else [lo]
+            handles = [
+                Line2D(
+                    [],
+                    [],
+                    ls="",
+                    marker="o",
+                    ms=math.sqrt(float(marker_area(v))),
+                    markerfacecolor="0.75",
+                    markeredgecolor="0.2",
+                    markeredgewidth=0.2,
+                )
+                for v in sizes
+            ]
+            fig.legend(
+                handles,
+                [f"{format_value(v)} {display('m3/s')}" for v in sizes],
+                title="marker size: time-mean discharge",
+                loc="upper center",
+                bbox_to_anchor=(0.44, (below + legend_h + note_h - 0.3) / height),
+                ncol=len(sizes),
+                fontsize=_FS,
+                title_fontsize=_FS,
+                frameon=False,
+                labelspacing=1.0,
+                columnspacing=2.5,
+            )
+        fig.text(
+            0.08,
+            (note_h - 0.08) / height,
+            notes,
+            ha="left",
+            va="top",
+            fontsize=_FS,
+            color="0.2",
         )
         fig.suptitle(
-            f"River mouths: {self.n_rivers:,} rivers, time-mean discharge\n"
-            f"drawn: {cls['active']:,} active (mouth and flow); not drawn: "
-            f"{cls['mouth_no_flow']:,} mouth but no flow, "
-            f"{cls['flow_no_mouth']:,} flow but no grid cell{lost}, "
-            f"{cls['neither']:,} neither",
+            f"River mouths: {cls['active']:,} of {self.n_rivers:,} rivers (with a grid "
+            "cell and flow), sized and colored by time-mean discharge",
             fontsize=_FS_TITLE - 1,
             y=1 - 0.12 / height,
         )
         return [("river_map", fig)]
 
+    @staticmethod
+    def _class_note(counts: dict[str, Any]) -> str:
+        """Return the note under the map: what was drawn, and why not the rest.
+
+        Rivers with flow but no grid cell of their own are *not* called lost: roms-tools
+        names rivers that share a cell ``overlap_*``, and those may enter through
+        another river's cell.
+        """
+        left = []
+        if counts["mouth_no_flow"]:
+            left.append(f"{counts['mouth_no_flow']:,} with a grid cell but no flow")
+        if counts["flow_no_mouth"]:
+            left.append(
+                f"{counts['flow_no_mouth']:,} with flow but no grid cell of their own "
+                f"({format_value(counts['lost_m3s'], 4)} {display('m3/s')}, "
+                f"{format_value(counts['lost_pct'], 2)}% of discharge; they may enter "
+                "through another river's cell)"
+            )
+        if counts["neither"]:
+            left.append(f"{counts['neither']:,} with neither")
+        drawn = f"Drawn: {counts['active']:,} rivers with a grid cell and flow."
+        return f"{drawn} Not drawn: {'; '.join(left)}." if left else drawn
+
     def _draw_histograms(self) -> list:
+        from matplotlib.ticker import LogFormatterMathtext, LogLocator, NullFormatter
+
         q = self.discharge
         active = self.active
         ti = self.time_index
         a = self._tracer_slab(ti, ti + 1)[0]  # (ntracers, nriver)
         flowing = active & (self._volume_slab(ti, ti + 1)[0] > 0)
-        panels: list[tuple[str, np.ndarray, str, int | None, tuple[float, float]]] = [
-            ("discharge (time mean)", q[active], "m3/s", None, (-math.inf, math.inf))
+        panels: list[tuple[str, np.ndarray, str, tuple[float, float]]] = [
+            (
+                "discharge, time mean",
+                q[active],
+                display("m3/s"),
+                (-math.inf, math.inf),
+            )
         ]
         zero, constant = [], []
         for k, name in enumerate(self.tracers):
@@ -905,15 +1012,18 @@ class RiverInputs:
             v = v[np.isfinite(v)]
             if v.size and np.ptp(v) == 0:
                 (zero if v[0] == 0 else constant).append(
-                    name if v[0] == 0 else f"{name} = {v[0]:.4g}"
+                    name if v[0] == 0 else f"{name} = {format_value(v[0])}"
                 )
                 continue
-            panels.append((name, v, self.units[k], k, _bound(name)))
-        notes = "; ".join(
-            f"{label}: {', '.join(items)}"
-            for label, items in (("all zero", zero), ("constant", constant))
-            if items
+            panels.append((name, v, self._unit(k), _bound(name)))
+        notes = _wrap(
+            "; ".join(
+                f"{label}: {', '.join(items)}"
+                for label, items in (("all zero", zero), ("constant", constant))
+                if items
+            )
         )
+        n_note = notes.count("\n") + 1 if notes else 0
         per = _HIST_COLS * _HIST_ROWS
         n_pages = math.ceil(len(panels) / per)
         when = self._date(ti)
@@ -922,23 +1032,38 @@ class RiverInputs:
         for page in range(n_pages):
             shown = panels[page * per : (page + 1) * per]
             rows = math.ceil(len(shown) / _HIST_COLS)
-            height = 1.2 + 1.55 * rows
+            top = 0.55 + (0.17 * n_note + 0.3 if notes else 0.0)
+            height = top + 0.45 + 2.25 * rows
             fig = self._figure(height)
             fig.subplots_adjust(
-                left=0.07,
-                right=0.98,
-                top=1 - 0.7 / height,
-                bottom=0.4 / height,
-                hspace=0.75,
-                wspace=0.35,
+                left=0.09,
+                right=0.97,
+                top=1 - top / height,
+                bottom=0.45 / height,
+                hspace=0.6,
+                wspace=0.4,
             )
             if notes:
-                fig.text(0.5, 1 - 0.38 / height, notes, ha="center", fontsize=_FS)
-            for slot, (name, vals, unit, _k, (lower, upper)) in enumerate(shown):
+                fig.text(
+                    0.09,
+                    1 - 0.5 / height,
+                    notes,
+                    ha="left",
+                    va="top",
+                    fontsize=_FS,
+                    color="0.2",
+                )
+            for slot, (name, vals, unit, (lower, upper)) in enumerate(shown):
                 ax = fig.add_subplot(rows, _HIST_COLS, slot + 1)
                 v = vals[np.isfinite(vals)]
                 pos = v[v > 0]
-                if pos.size:
+                # temperature and salinity sit on a narrow linear range and can be 0:
+                # a log axis would hide them; everything else spans decades
+                linear = name in ("temp", "salt") and v.size
+                if linear:
+                    ax.hist(v, bins=25, color="#3b6ea5", linewidth=0)
+                    pos = v  # every value is drawn
+                elif pos.size:
                     lo, hi = pos.min(), pos.max()
                     edges = (
                         np.logspace(np.log10(lo), np.log10(hi), 25)
@@ -947,29 +1072,56 @@ class RiverInputs:
                     )
                     ax.hist(pos, bins=edges, color="#3b6ea5", linewidth=0)
                     ax.set_xscale("log")
-                    # three labelled ticks: log axes of a narrow range otherwise fill
-                    # with overlapping minor labels
-                    ticks = np.geomspace(lo, hi, 3) if hi > lo else [lo]
-                    ax.set_xticks(ticks, [f"{t:.3g}" for t in ticks])
+                    if math.floor(math.log10(hi)) - math.ceil(math.log10(lo)) >= 1:
+                        # decade ticks: 10^0, 10^1, ...
+                        ax.xaxis.set_major_locator(LogLocator(base=10, numticks=6))
+                        ax.xaxis.set_major_formatter(LogFormatterMathtext(base=10))
+                    else:
+                        # under a decade a power of ten would label nothing, or read
+                        # 10^1.04: four plain values across the range instead
+                        ticks = np.geomspace(lo, hi, 4)
+                        ax.set_xticks(ticks, [format_value(t) for t in ticks])
                     ax.xaxis.set_minor_formatter(NullFormatter())
+                else:
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "no positive values",
+                        transform=ax.transAxes,
+                        ha="center",
+                        fontsize=_FS,
+                        color="0.4",
+                    )
+                title = f"{name} ({unit})" if unit else name
+                ax.set_title(title, fontsize=_FS + 1, pad=4)
+                if slot % _HIST_COLS == 0:
+                    ax.set_ylabel("rivers", fontsize=_FS)
                 outside = int(((v < lower) | (v > upper)).sum())
-                ax.set_title(f"{name} ({unit})", fontsize=_FS, pad=2)
-                ax.text(
-                    0.97,
-                    0.95,
-                    f"outside bounds: {outside}\nn <= 0: {int((v <= 0).sum())}",
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=_FS - 1.5,
-                    color="#a02020" if outside else "0.3",
-                )
-                ax.tick_params(labelsize=_FS - 1)
+                nonpos = int((v <= 0).sum())
+                flags = []
+                if outside:
+                    flags.append(f"outside bounds: {outside:,}")
+                if nonpos and pos.size and not linear:  # a log axis cannot draw them
+                    word = "value" if nonpos == 1 else "values"
+                    flags.append(f"{nonpos:,} {word} <= 0 not shown")
+                if flags:
+                    ax.text(
+                        0.97,
+                        0.95,
+                        "\n".join(flags),
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="top",
+                        fontsize=_FS,
+                        color="#a02020" if outside else "0.3",
+                    )
+                ax.tick_params(labelsize=_FS, which="both")
             suffix = f" ({page + 1} of {n_pages})" if n_pages > 1 else ""
             fig.suptitle(
                 f"River inputs: distributions across {n_flow:,} active rivers with "
                 f"flow at {when}{suffix}",
-                fontsize=_FS_TITLE,
+                fontsize=_FS_TITLE - 1,
+                y=1 - 0.15 / height,
             )
             out.append((f"river_histograms_{page + 1}", fig))
         return out
@@ -1042,6 +1194,14 @@ class RiverInputs:
         series = {name: arr[j][:, np.argsort(order)] for j, name in enumerate(names)}
         for data in series.values():  # a concentration carried by no water is no value
             data[~(vol > 0)] = np.nan
+        # a tracer that never varies (all zero, salt = 1) draws as a flat line: leave
+        # it out, the histogram page lists it
+        names = [
+            n
+            for n in names
+            if np.isfinite(series[n]).any()
+            and np.ptp(series[n][np.isfinite(series[n])])
+        ]
         x = self.times if self.times is not None else np.arange(self.n_times)
         x = (
             mdates.date2num(x.astype("datetime64[ms]").astype(object))
@@ -1049,7 +1209,7 @@ class RiverInputs:
             else x
         )
         n_pan = 1 + len(names)
-        legend_h = 0.2 + 0.15 * math.ceil(len(chosen) / 3)  # inches, below the axes
+        legend_h = 0.2 + 0.18 * math.ceil(len(chosen) / 3)  # inches, below the axes
         height = 1.3 * n_pan + 1.0 + 0.45 + legend_h
         fig = self._figure(height)
         axes = fig.subplots(n_pan, 1, sharex=True)
@@ -1063,8 +1223,8 @@ class RiverInputs:
         )
         colors = colormaps["tab20"].colors
         styles = {"small": ":", "medium": "--", "large": "-.", "largest": "-"}
-        panels = [("discharge", "m3/s", vol, True)] + [
-            (n, self.units[self.tracers.index(n)], series[n], False) for n in names
+        panels = [("discharge", display("m3/s"), vol, True)] + [
+            (n, self._unit(self.tracers.index(n)), series[n], False) for n in names
         ]
         for ax, (title, unit, data, logy) in zip(axes, panels, strict=True):
             for j, (i, label) in enumerate(chosen):
@@ -1078,7 +1238,7 @@ class RiverInputs:
                 )
             if logy and np.any(data > 0):
                 ax.set_yscale("log")
-            ax.set_ylabel(f"{title} ({unit})", fontsize=_FS)
+            ax.set_ylabel(f"{title} ({unit})" if unit else title, fontsize=_FS)
             ax.tick_params(labelsize=_FS)
         if self.times is not None:
             axes[-1].xaxis_date()
@@ -1095,7 +1255,7 @@ class RiverInputs:
             loc="upper center",
             bbox_to_anchor=(0.5, legend_h / height),
             ncol=3,
-            fontsize=_FS - 1,
+            fontsize=_FS,
             frameon=False,
         )
         fig.suptitle(
@@ -1117,76 +1277,90 @@ class RiverInputs:
                 fontsize=_FS_TITLE,
             )
             return [("river_extremes_1", fig)]
-        cols = [
-            "tracer",
-            "kind",
-            "rank",
-            "value",
-            "unit",
-            "river",
-            "lon",
-            "lat",
-            "date",
-            "discharge",
-        ]
         heads = [
             "tracer",
-            "kind",
             "#",
             "value",
-            "unit",
             "river",
             "lon",
             "lat",
             "date",
-            "Q (m3/s)",
+            f"Q ({display('m3/s')})",
         ]
-        text = [
-            [
-                str(r.tracer),
-                str(r.kind),
-                str(r.rank),
-                f"{r.value:.4g}",
-                str(r.unit),
-                str(r.river)[:28],
-                f"{r.lon:.2f}",
-                f"{r.lat:.2f}",
-                str(r.date),
-                f"{r.discharge:.4g}",
-            ]
-            for r in df[cols].itertuples()
-        ]
-        pages = [
-            text[i : i + _TABLE_ROWS_PER_PAGE]
-            for i in range(0, len(text), _TABLE_ROWS_PER_PAGE)
-        ]
+        records = []  # (tracer, label, cells after the label)
+        for r in df.itertuples():
+            unit = display(r.unit)
+            records.append(
+                (
+                    (r.tracer, r.kind),
+                    f"{r.tracer} ({unit})" if unit else str(r.tracer),
+                    [
+                        str(r.rank) if r.kind == "highest" else f"low {r.rank}",
+                        format_value(r.value),
+                        str(r.river)[:28],
+                        format_lon(r.lon),
+                        format_lat(r.lat),
+                        str(r.date),
+                        format_value(r.discharge),
+                    ],
+                )
+            )
+        has_low = bool((df["kind"] == "below bound").any())
+        size = _TABLE_ROWS_PER_PAGE
+        pages = [records[i : i + size] for i in range(0, len(records), size)]
         out = []
-        for n, rows in enumerate(pages, start=1):
-            height = 0.9 + 0.2 * (len(rows) + 1)
+        for n, page in enumerate(pages, start=1):
+            # the tracer is named on its first row of the page, blank below it
+            rows, groups, seen = [], [], None
+            for key, label, cells in page:
+                rows.append([label if key != seen else "", *cells])
+                groups.append(key[0])
+                seen = key
+            note = (
+                "low N: the lowest values, below the tracer's lower bound "
+                if has_low and n == len(pages)
+                else ""
+            )
+            height = 1.0 + 0.22 * (len(rows) + 1) + (0.25 if note else 0.0)
             fig = self._figure(height)
-            ax = fig.add_axes((0.03, 0.2 / height, 0.94, 1 - 0.9 / height))
+            ax = fig.add_axes(
+                (
+                    0.03,
+                    (0.3 + (0.25 if note else 0.0)) / height,
+                    0.94,
+                    1 - (0.65 + 0.3 + (0.25 if note else 0.0)) / height,
+                )
+            )
             ax.axis("off")
             tab = ax.table(
                 cellText=rows,
                 colLabels=heads,
-                colWidths=[0.07, 0.09, 0.04, 0.1, 0.09, 0.22, 0.08, 0.08, 0.11, 0.12],
+                colWidths=[0.19, 0.06, 0.09, 0.24, 0.1, 0.09, 0.11, 0.1],
                 loc="upper center",
                 cellLoc="left",
             )
             tab.auto_set_font_size(False)
             tab.set_fontsize(_FS)
-            tab.scale(1.0, 1.15)
+            tab.scale(1.0, 1.25)
+            shade = {}
+            for g in groups:
+                shade.setdefault(g, len(shade) % 2)
             for (r, _c), cell in tab.get_celld().items():
                 cell.set_linewidth(0.3)
-                cell.set_edgecolor("0.75")
+                cell.set_edgecolor("0.8")
                 if r == 0:
-                    cell.set_facecolor("0.9")
+                    cell.set_facecolor("0.85")
                     cell.get_text().set_fontweight("bold")
+                elif shade[groups[r - 1]]:
+                    cell.set_facecolor("0.95")
+            if note:
+                fig.text(0.03, 0.15 / height, note, fontsize=_FS, color="0.3")
             suffix = f" ({n} of {len(pages)})" if len(pages) > 1 else ""
             fig.suptitle(
-                f"Extreme river concentrations, active rivers with flow{suffix}",
-                fontsize=_FS_TITLE,
-                y=1 - 0.12 / height,
+                f"Highest river concentrations over all times, top {TOP_N} per "
+                f"tracer, active rivers with flow{suffix}",
+                fontsize=_FS_TITLE - 1,
+                y=1 - 0.15 / height,
             )
             out.append((f"river_extremes_{n}", fig))
         return out

@@ -10,9 +10,35 @@ its own auto titles.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
-__all__ = ["map_panel_titles", "map_title_parts", "resolve_titles", "skill_map_title"]
+__all__ = [
+    "collapse_single_day",
+    "map_panel_titles",
+    "map_title_parts",
+    "resolve_titles",
+    "skill_map_title",
+]
+
+#: ``2013-01-01–2013-01-01`` / ``2013-01 to 2013-01``: a date range whose two ends are
+#: the same date.
+_SAME_END_RANGE = re.compile(
+    r"(?<![\d-])(\d{4}(?:-\d{2}(?:-\d{2})?)?(?:[ T]\d{2}:\d{2})?)"
+    r"(?:\u2013| to )\1(?![\d-]|[ T]\d{2}:\d{2})"
+)
+
+
+def collapse_single_day(text: str) -> str:
+    """Return ``text`` with every ``D–D`` date range (both ends the same) written ``D``.
+
+    A one-day window reads ``2013-01-01–2013-01-01`` where the comparison spelled its
+    ``{"min", "max"}`` selection; the reader wants the day, once. Ranges whose ends
+    differ, and text with no date range, come back unchanged.
+    """
+    if not text or ("\u2013" not in text and " to " not in text):
+        return text
+    return _SAME_END_RANGE.sub(r"\1", text)
 
 
 def resolve_titles(
@@ -27,6 +53,7 @@ def resolve_titles(
     (including ``""``, to blank it) replaces it. The wrong count raises a
     copy-pasteable ``ValueError`` listing the current auto titles.
     """
+    auto = [collapse_single_day(a) if isinstance(a, str) else a for a in auto]
     if titles is None:
         return list(auto)
     titles = list(titles)

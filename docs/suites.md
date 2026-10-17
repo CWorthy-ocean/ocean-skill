@@ -279,12 +279,20 @@ pages:
 
 A default only fills in where the page's draw method takes it. A page whose method does
 not (`robust` means nothing to a `draw: metrics_series` page or a T-S diagram) is drawn
-without it and a warning names the skipped option; the same option written in that
-page's own `plot:` is still an error. `summary:` pages take their keywords from the
+without it, silently; the same option written in that page's own `plot:` is still an
+error. `summary:` pages take their keywords from the
 `summary:` dict alone, so `defaults.plot` never reaches them, and a `section:` has no plot.
 `defaults.plot.size/zoom/figsize` are pinned to the page canvas like a page's own (see
 Page size). `max_rows` (see `compare:`) is a plot default that is dropped on the pages it
 does not suit without a warning.
+
+**A page's own figure title.** `plot: {title: "..."}` replaces the figure's suptitle
+(`""` draws none), with `{placeholder}`s filled as in the page title. `plot: {title: page}`
+is the shorthand for the page's own title -- useful where the figure's default title
+(a depth range, a month, the transect's end points) does not say which boundary side or
+which input the page is about. It works on `field:`, `compare:`, `XY:` and `TS:` pages;
+`health:`, `rivers:` and `summary:` pages draw their own titles (a summary table's is the
+page title).
 
 `defaults.test` must be a single source name, not a list: `time: latest`, `month: run`,
 and the report directory's own time range are all read off *one* source's time axis,
@@ -639,7 +647,11 @@ correlation, standard-deviation ratio and n, in the same number formatting as
 `osk.table()` (three significant figures for dimensional metrics, two decimals for
 dimensionless ones, whole numbers for counts), whose layout it is. Units come from each
 record, spelled as the plots do: in the column headers when every row shares them, or
-in a `Units` column when they differ. Summary pages are static (matplotlib) like every
+in a `Units` column when they differ. A depth reads `200 m` (`surface` stays as is), a
+mixed layer depth reads `mixed layer depth`, and a one-day window is that one date. What
+every row's Notes has in common is not repeated down the column: it moves to the table's
+title in parentheses (`Summary (2013-01-01)`), and a Notes column left empty is dropped
+(the CSV keeps its `depth`/`time` columns either way). Summary pages are static (matplotlib) like every
 suite page, so the table has no interactive form.
 
 Each page that draws a `table` also writes its numbers, unformatted and with a `units`
@@ -701,13 +713,18 @@ to draw (no plankton variables in the run) is skipped with that reason.
 
 A page that is only text: `title:` as a large heading, centred, with the `section:`
 string wrapped beneath it. It heads the PDF page of the figure(s) that follow it when they
-fit under it (see Page size) and has a US Letter page of its own, with its text centred,
-when the next figure does not. It lets a long
+fit under it (see Page size) and has a US Letter page of its own, its heading hung from
+the top of the page, when the next figure does not. It lets a long
 report have chapters. `section: ""` is a title-only divider; a YAML block scalar (`>-`
 folds the lines into one paragraph, `|` keeps your own line breaks, and a long line wraps
 either way) is the natural way to write longer notes. `{placeholder}`s in the title and
 the text resolve against `defaults:` -- there is no `for_each:` to bind anything else --
-and a literal brace needs the usual `{{ }}`.
+and a literal brace needs the usual `{{ }}`. Every key of `defaults:` is available
+(`{forcing_time}`, `{forcing_month}`, `{ic_month}`, `{test}`, `{period}` ... -- whatever
+the suite defines there), and a mapping default reads by attribute: with
+`period: {min: ..., max: ...}`, `{period.min}` and `{period.max}` give the two dates, and
+`{period.min:.10}` keeps just the date. A bare `{period}` is the mapping itself, printed
+as Python prints a dict.
 
 - **A divider is only drawn when a page after it draws.** It is buffered and written
   into the PDF with the next figure: above it on the same page when it fits under it. A
@@ -1018,7 +1035,10 @@ else the blueprint's name, else `defaults.test`, else the suite's `name` -- and 
 report (suite, generated time, version), then the workplan, the simulation (grid,
 period, ...), forcing (boundary and surface split into physics, BGC, and other; rivers;
 tides), code (the exact repositories and commits), the parameters, and any `run_info:
-notes`. Nothing needs configuring when the suite has a `refresh:` block: the cover finds
+notes`. The dates are the whole run's: for a workplan of several tasks, the first
+task's start to the last task's end (dates only), not the newest task's piece. A blueprint
+description that C-Star generated (it starts `Generated blueprint`) stays in the
+Simulation table and is left out of the subtitle. Nothing needs configuring when the suite has a `refresh:` block: the cover finds
 the run from that block's output glob -- the run folder is the one holding
 `work/directives.yaml`, the blueprint is the newest resolved blueprint in its `work/`,
 and the workplan is the one two levels up whose step's `working_dir` matches. Name them
@@ -1043,8 +1063,11 @@ figure never moves to an earlier page). A figure wider than the page is scaled d
 its width (keeping its aspect, side margins kept) and then packed like any other. A
 `section:` divider is put at the top of the page its first figure lands on; when that
 figure does not fit under it, it is scaled down to fit, centred, as long as that keeps
-it at 0.7 or more of its size (`MIN_FIT_SCALE`) -- otherwise the divider gets a page of
-its own, as before. A figure's caption counts towards the room it takes, so it never
+it at 0.6 or more of its size (`MIN_FIT_SCALE`) -- the one place a figure is shrunk to
+pack; otherwise the divider gets a page of its own with its heading at the top of the
+page (never centred in a blank one) and the figure on the next. Ordinary figures and
+tables that follow each other share a page whenever they fit at full size, and are
+never scaled down for it. A figure's caption counts towards the room it takes, so it never
 runs off the page or into the next figure. A figure alone on its page (nothing packed
 with it, and not scaled) is written exactly as before -- its ink at the top, horizontally
 centred, text kept as vector -- unless its page has room to enlarge it (below). A page of

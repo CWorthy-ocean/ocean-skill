@@ -360,6 +360,21 @@ _MONTH_ABBREVIATIONS = (
 )  # fmt: skip
 
 
+#: Readable names for the package's own observation entries, used when the entry
+#: carries no ``metadata["label"]`` of its own. A machine often has another catalog
+#: directory earlier on the search path whose entries share these names and carry no
+#: label (the shared observation catalogs on an HPC system); the packaged YAML would be
+#: shadowed and a figure would print ``holte_talley_mld_clim``. This table is not.
+_BUILTIN_LABELS = {
+    "chl_gapfree_my_daily_geo": "Copernicus L4 chlorophyll",
+    "chl_gapfree_my_daily_timeseries": "Copernicus L4 chlorophyll",
+    "chl_gapfree_nrt_daily_geo": "Copernicus L4 chlorophyll (near real time)",
+    "chl_gapfree_nrt_daily_timeseries": "Copernicus L4 chlorophyll (near real time)",
+    "holte_talley_mld_clim": "Holte & Talley",
+    "glodap": "GLODAPv2",
+}
+
+
 def source_label(name: Any) -> str:
     """Return a readable name for a source, for titles, legends and table rows.
 
@@ -367,10 +382,16 @@ def source_label(name: Any) -> str:
     wants ``WOA23 nitrate Dec``. In order:
 
     * the entry's own ``metadata["label"]``, when its catalog sets one -- the way to
-      name a source that no rule can (``label: Holte & Talley``);
+      name a source that no rule can (``label: Holte & Talley``). A suite's
+      ``refresh:`` writes one for each model-side entry it catalogs;
+    * the built-in name for one of the package's standard observation entries
+      (``holte_talley_mld_clim`` reads ``Holte & Talley``), which holds even where
+      another catalog of the same entry names shadows the packaged one;
     * a name of the ``<dataset>_<variable>_<period>`` shape, whose variable the
       vocabulary knows: the dataset in capitals, the variable, and the period spelled
-      out (``month12`` reads ``Dec``);
+      out (``month12`` reads ``Dec``). A ``monthly`` climatology (one entry holding all
+      twelve months, a page picks one) names no month, as its name cannot say which:
+      ``WOA23 temperature``;
     * the name itself -- a model run (``ccs_4km``), a pooled ``a+b`` name or anything
       else that is already as readable as it will get.
 
@@ -380,6 +401,8 @@ def source_label(name: Any) -> str:
     label = _entry_label(name)
     if label:
         return label
+    if name in _BUILTIN_LABELS:
+        return _BUILTIN_LABELS[name]
     match = _PERIOD_NAME.match(name)
     if match is not None:
         from ocean_skill.vocabulary import is_known
@@ -387,10 +410,10 @@ def source_label(name: Any) -> str:
         variable = match["variable"]
         month = int(match["month"]) if match["month"] else None
         if is_known(variable) and (month is None or 1 <= month <= 12):
-            period = (
-                match["period"] if month is None else _MONTH_ABBREVIATIONS[month - 1]
-            )
-            return f"{match['dataset'].upper()} {variable.replace('_', ' ')} {period}"
+            head = f"{match['dataset'].upper()} {variable.replace('_', ' ')}"
+            if month is not None:
+                return f"{head} {_MONTH_ABBREVIATIONS[month - 1]}"
+            return head if match["period"] == "monthly" else f"{head} {match['period']}"
     return name
 
 

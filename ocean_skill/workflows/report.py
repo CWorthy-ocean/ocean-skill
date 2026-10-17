@@ -40,7 +40,8 @@ sections. It is buffered rather than written at once, so a section whose pages a
 skipped leaves no orphan divider behind (see :meth:`PdfReport.section`). The figure(s)
 after it that fit are put on the same page under it; the first is scaled down to fit
 when that keeps it at :data:`MIN_FIT_SCALE` of its size, and one that still does not fit
-leaves the divider a page of its own, centred.
+leaves the divider a page of its own, its heading hung from the top of the page (never
+centred in a blank one) with the figure on the page after it.
 
 A figure may carry a caption (``emit(..., caption=)``): small wrapped text under it in
 the PDF only.
@@ -97,8 +98,10 @@ SIDE_MARGIN = 0.25
 
 #: Packing: the smallest share of its natural size a figure may be scaled down to so
 #: that it fits on a page under a divider's header (see :meth:`PdfReport._place`); a
-#: figure that would need to shrink further leaves the divider a page of its own.
-MIN_FIT_SCALE = 0.7
+#: figure that would need to shrink further leaves the divider a page of its own. This
+#: is the only place a figure is scaled down to pack: ordinary figures sharing a page
+#: are never shrunk to fit.
+MIN_FIT_SCALE = 0.6
 
 #: Filling: the most a page's figures are scaled up to use its spare room (see
 #: :func:`_fill_scale`). 1.6 keeps a small figure from turning into a poster while a
@@ -144,10 +147,8 @@ SMOKE_DPI = 100
 #: panel titles are set in -- as body text.
 SECTION_TITLE_STEPS = 4
 
-#: Where a stand-alone divider's header hangs from: the top of its title, as a fraction
-#: of the page height up from the bottom (a little above the vertical middle). The block
-#: below it is the same one that heads a packed page (:func:`_draw_header`).
-SECTION_TOP_Y = 0.6
+#: A stand-alone divider's header hangs from the top of the page, like the header of a
+#: packed one (:func:`_draw_header`): section text is never centred in a blank page.
 
 #: Wrap widths, in characters: the title at roughly 22pt and the notes at roughly 11pt
 #: both fit comfortably inside a letter page's side margins at these counts.
@@ -292,14 +293,14 @@ def _section_figure(title: str, text: str) -> Any:
     ``PAGE_W`` x ``PAGE_H`` -- the caller saves it *without* a tight bounding box (see
     :meth:`PdfReport.section`), so it stays exactly letter-sized like every other page.
     The header itself is :func:`_draw_header`, the block that also heads a packed page,
-    hung from :data:`SECTION_TOP_Y`. Built directly rather than through
-    :mod:`matplotlib.pyplot`, so it is never registered with pyplot's figure manager and
-    there is nothing to close afterwards.
+    hung from the top of the page (:func:`_top_margin` below its edge). Built directly
+    rather than through :mod:`matplotlib.pyplot`, so it is never registered with
+    pyplot's figure manager and there is nothing to close afterwards.
     """
     from matplotlib.figure import Figure
 
     fig = Figure(figsize=(PAGE_W, PAGE_H))
-    _draw_header(fig, PAGE_W / 2, SECTION_TOP_Y * PAGE_H, title, text)
+    _draw_header(fig, PAGE_W / 2, PAGE_H - _top_margin(), title, text)
     return fig
 
 
@@ -849,7 +850,8 @@ class PdfReport:
         natural size; otherwise nothing changes and the divider gets a page to itself.
         A figure so shrunk is no longer oversize: it is packed, centred, below it.
         """
-        scale = (avail - _caption_height(item.caption)) / item.nat_h
+        # a hair under, so float rounding never tips a just-fitting figure over the edge
+        scale = (avail - _caption_height(item.caption)) / item.nat_h * (1 - 1e-9)
         if scale >= MIN_FIT_SCALE:
             item.w, item.h = item.nat_w * scale, item.nat_h * scale
             item.oversize, item.scaled = False, True
