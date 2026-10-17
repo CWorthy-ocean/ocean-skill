@@ -196,3 +196,194 @@ def test_depth_coordinate_values_do_not_depend_on_chunking(small_chunks):
     eager = roms.add_depth_coord(ds.compute(), META)["z_rho"]
     lazy = roms.add_depth_coord(ds, META)["z_rho"]
     np.testing.assert_array_equal(lazy.values, eager.values)
+
+
+# --- the frame is built inside the kernel task, not held whole ----------------------
+#
+# The depth match used to hand its kernel the lazy 3-D frame (z_rho) as a dask array of
+# its own, so the scheduler computed every step's frame early and held them all until
+# the slow data reads caught up. Now each task rebuilds its own block from zeta/h
+# (``_frame_recipe`` / ``_rebuilt_frame``) wherever that is provably the same frame.
+# These tests pin that the rebuilt path is bitwise the old one, is actually taken, and
+# falls back where it cannot be proven.
+
+FRAMES = {
+    "fixed": {"origin": "fixed", "datum_z_m": 0.0, "source": "declared"},
+    "fixed_datum": {"origin": "fixed", "datum_z_m": 1.5, "source": "declared"},
+    "surface": {"origin": "surface", "source": "declared"},
+}
+# 0 m, interior depths, one deeper than most columns (h is 50-200 m)
+TARGETS = [0.0, 7.5, 33.0, 90.0, 180.0]
+
+
+def _meta(vtransform: int) -> dict:
+    return {"vertical": {"hc": 20.0, "s_dim": "s_rho", "Vtransform": vtransform}}
+
+
+def _roms_with_land(float32_vertical: bool = False) -> xr.Dataset:
+    """Return :func:`_roms_like` with land (NaN zeta) and optional float32 sigma."""
+    ds = _roms_like()
+    zeta = ds["zeta"].values.copy()
+    zeta[:, :6, :9] = np.nan  # a corner of land, every step
+    zeta[1, 20, 30] = np.nan  # and one column masked at a single step
+    ds["zeta"] = (ds["zeta"].dims, zeta)
+    if float32_vertical:
+        for name in ("sigma_r", "Cs_r"):
+            ds[name] = ds[name].astype("float32")
+    return ds
+
+
+def _run(fn, ds, meta, convention, **kwargs) -> xr.Dataset:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)  # the fixed-origin notes
+        return fn(ds, meta, TARGETS, convention=convention, **kwargs).compute()
+
+
+def _count_rebuilt(monkeypatch) -> list[int]:
+    """Count calls of ``_rebuilt_frame`` (the in-task frame build)."""
+    calls: list[int] = []
+    original = roms._rebuilt_frame
+
+    def wrapper(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(roms, "_rebuilt_frame", wrapper)
+    return calls
+
+
+def _no_recipe(monkeypatch) -> None:
+    """Force the old path: the whole frame handed to the kernel."""
+    monkeypatch.setattr(roms, "_frame_recipe", lambda *a, **k: None)
+
+
+def _assert_identical(got: xr.Dataset, want: xr.Dataset) -> None:
+    assert dict(got.sizes) == dict(want.sizes)
+    assert set(got.data_vars) == set(want.data_vars)
+    assert set(got.coords) == set(want.coords)
+    for name in want.data_vars:
+        assert got[name].dims == want[name].dims
+        assert got[name].dtype == want[name].dtype
+        np.testing.assert_array_equal(got[name].values, want[name].values)
+        assert got[name].attrs == want[name].attrs
+    for name in want.coords:
+        np.testing.assert_array_equal(got[name].values, want[name].values)
+        assert got[name].attrs == want[name].attrs
+    assert got.attrs == want.attrs
+
+
+@pytest.mark.parametrize("mode", ["interp", "nearest"])
+@pytest.mark.parametrize("frame", list(FRAMES))
+@pytest.mark.parametrize("vtransform", [1, 2])
+def test_the_rebuilt_frame_is_bitwise_the_whole_frame_path(
+    small_chunks, monkeypatch, mode, frame, vtransform
+):
+    fn = roms.to_depth if mode == "interp" else roms.nearest_depth_levels
+    # float32 stretching vectors in one of the two Vtransforms, as the real store has
+    ds = _like_the_store(_roms_with_land(float32_vertical=vtransform == 1))
+    meta, convention = _meta(vtransform), FRAMES[frame]
+
+    calls = _count_rebuilt(monkeypatch)
+    got = _run(fn, ds, meta, convention)
+    assert calls, "the frame was never built inside the task"
+
+    _no_recipe(monkeypatch)
+    calls.clear()
+    want = _run(fn, ds, meta, convention)
+    assert not calls
+
+    assert np.isnan(want["temp"].values).any(), "the land must reach the result"
+    _assert_identical(got, want)
+
+
+def test_the_recipe_is_taken_and_the_frame_is_not_in_the_graph(
+    small_chunks, monkeypatch
+):
+    ds = roms.add_depth_coord(_like_the_store(_roms_with_land()), META)
+    z_name = ds["z_rho"].data.name
+    convention = FRAMES["surface"]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        out = roms.to_depth(ds, META, TARGETS, convention=convention)
+        layers = set(out["temp"].data.__dask_graph__().layers)
+        assert z_name not in layers, "the 3-D frame is still a layer of the match"
+        # nor does anything that is built from it: only zeta/h feed the kernel
+        graph = out["temp"].data.__dask_graph__()
+        assert all(z_name not in deps for deps in graph.dependencies.values())
+
+        # the old path does carry it (directly, or through its rechunk)
+        _no_recipe(monkeypatch)
+        old = roms.to_depth(ds, META, TARGETS, convention=convention)
+        old_graph = old["temp"].data.__dask_graph__()
+        assert z_name in old_graph.layers or any(
+            z_name in deps for deps in old_graph.dependencies.values()
+        )
+
+
+def test_the_frame_recipe_of_a_plain_dataset_has_what_the_task_needs():
+    ds = roms.add_depth_coord(_roms_like().chunk({"time": 1}), META)
+
+    got = roms._frame_recipe(ds, META, "s_rho", "surface", 0.0)
+
+    assert got is not None
+    zeta, h, recipe = got
+    assert zeta.dims == ("time", "eta_rho", "xi_rho")
+    assert h.dims == ("eta_rho", "xi_rho")
+    assert set(recipe) == {"sigma", "Cs", "hc", "vtransform", "origin", "datum"}
+    assert recipe["origin"] == "surface"
+    assert recipe["sigma"].shape == (NS,)
+
+
+def test_a_frame_that_is_not_provably_the_datasets_own_has_no_recipe():
+    base = _roms_like().chunk({"time": 1})
+    ds = roms.add_depth_coord(base, META)
+    args = (META, "s_rho", "fixed", 0.0)
+
+    assert roms._frame_recipe(ds, *args) is not None
+    # numpy-backed everything: nothing to schedule
+    eager = roms.add_depth_coord(_roms_like(), META)
+    assert roms._frame_recipe(eager, *args) is None
+    # sliced after the frame was attached: z_rho no longer what the ds would build
+    assert roms._frame_recipe(ds.isel(time=slice(0, 2)), *args) is None
+    # altered some other way
+    altered = ds.assign_coords(z_rho=ds["z_rho"] + 0.0)
+    assert roms._frame_recipe(altered, *args) is None
+    # no stretching vector to rebuild from
+    assert roms._frame_recipe(ds.drop_vars("sigma_r"), *args) is None
+    assert roms._frame_recipe(ds.drop_vars("Cs_r"), *args) is None
+    assert roms._frame_recipe(ds.drop_vars("h"), *args) is None
+    # no frame at all
+    assert roms._frame_recipe(ds.drop_vars("z_rho"), *args) is None
+
+
+def test_a_sliced_dataset_still_matches_through_the_whole_frame(
+    small_chunks, monkeypatch
+):
+    ds = roms.add_depth_coord(_like_the_store(_roms_with_land()), META)
+    sliced = ds.isel(time=slice(0, 2))
+    assert roms._frame_recipe(sliced, META, "s_rho", "fixed", 0.0) is None
+    calls = _count_rebuilt(monkeypatch)
+
+    got = _run(roms.to_depth, sliced, META, FRAMES["fixed"])
+    assert not calls
+
+    # and equals the match of the same steps taken from the whole dataset
+    want = _run(roms.to_depth, ds, META, FRAMES["fixed"]).isel(time=slice(0, 2))
+    np.testing.assert_array_equal(got["temp"].values, want["temp"].values)
+
+
+@pytest.mark.parametrize("frame", list(FRAMES))
+def test_a_reference_time_never_builds_the_frame_in_the_task(
+    small_chunks, monkeypatch, frame
+):
+    ds = _like_the_store(_roms_with_land())
+    convention = FRAMES[frame]
+
+    calls = _count_rebuilt(monkeypatch)
+    got = _run(roms.nearest_depth_levels, ds, META, convention, ref_time=1)
+    assert not calls, "the reference-time frame is loaded eagerly, not rebuilt"
+
+    _no_recipe(monkeypatch)
+    want = _run(roms.nearest_depth_levels, ds, META, convention, ref_time=1)
+    _assert_identical(got, want)

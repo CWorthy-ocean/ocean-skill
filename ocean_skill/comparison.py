@@ -3929,6 +3929,78 @@ def _warn_if_chunk_is_large(obj: Any, source: str) -> None:
 #: axis nobody meant to keep is worth catching before the memory is spent, not after.
 LOAD_WARN_BYTES = 2 * 1024**3
 
+#: Source data (bytes) one compute of a lane's load may span along time -- see
+#: :func:`_load_by_time`. About two steps of a 4 km, 100-level float64 field.
+LOAD_BATCH_BYTES = 2 * 1024**3
+
+#: Most computes :func:`_load_by_time` splits one load into: past it the batches grow
+#: instead, so a long record of small steps is not paid for in per-compute overhead.
+MAX_LOAD_BATCHES = 200
+
+
+def _bytes_per_step(obj, tdim: str) -> int:
+    """Return the bytes one ``tdim`` step of ``obj``'s largest lazy variable holds.
+
+    A stand-in for what reading one step of a lane costs: the variable a lane reads is
+    usually the largest it has (a 3-D tracer beside 2-D fields), and a combination
+    (a sum of pools) leaves the whole dataset standing, so this is a size per variable
+    read, not a total. 0 for a frame (a point source), a numpy-backed dataset, or one
+    with no ``tdim``.
+    """
+    sizes = [
+        var.nbytes // var.sizes[tdim]
+        for var in getattr(obj, "data_vars", {}).values()
+        if var.chunks is not None and tdim in var.dims and var.sizes[tdim]
+    ]
+    return max(sizes, default=0)
+
+
+def _load_by_time(da, tdim: str | None, step_bytes: int):
+    """Load ``da``, a few time steps per compute, when a step of its source is large.
+
+    One compute over a long record of large steps (a whole-domain mean of a year of
+    3-D restarts, matched to depths) leaves dask's local scheduler free to start every
+    step's reads, frames and column rechunks long before the reductions that finish
+    them -- it ran a year of 4 km restarts to ~96 GB, about one 3-D field held per step.
+    How far ahead it runs depends on the graph's shape, not on anything this package
+    controls, so the record is cut instead: whole ``tdim`` chunks at a time, about
+    :data:`LOAD_BATCH_BYTES` of source per compute (``step_bytes`` a step, from
+    :func:`_bytes_per_step`), and never more than :data:`MAX_LOAD_BATCHES` computes.
+    Each value is still computed by the very same tasks, so the result is identical;
+    only how many steps are in flight changes. A numpy-backed ``da``, one with no
+    ``tdim``, or a record that fits in one batch loads in one compute, as before.
+    """
+    import math
+
+    import numpy as np
+
+    if da.chunks is None or tdim is None or tdim not in da.dims or step_bytes <= 0:
+        return da.load()
+    axis = da.get_axis_num(tdim)
+    sizes = da.chunks[axis]
+    n = da.sizes[tdim]
+    per_batch = max(
+        1, LOAD_BATCH_BYTES // step_bytes, math.ceil(n / MAX_LOAD_BATCHES)
+    )
+    if n <= per_batch:
+        return da.load()
+    data = np.empty(da.shape, dtype=da.dtype)
+    start = 0
+    i = 0
+    while i < len(sizes):
+        stop = start + sizes[i]
+        i += 1
+        # Whole chunks only: a chunk cut across two batches would be computed twice.
+        while i < len(sizes) and stop - start + sizes[i] <= per_batch:
+            stop += sizes[i]
+            i += 1
+        where = (slice(None),) * axis + (slice(start, stop),)
+        data[where] = da.data[where].compute()
+        start = stop
+    # .load() for any coordinate that is still lazy, as the one-compute load did.
+    return da.copy(data=data).load()
+
+
 #: Ceiling (bytes) for :func:`_materialize_point_column`'s eager load. A 3x3-cell
 #: column, every s-level, a multi-month hourly deployment, is tens of MB -- this
 #: only refuses a pathological point lane (a station kept for a decade at native
@@ -4789,9 +4861,13 @@ def prepare_source(
     # consumer that touches values -- the metrics, then each panel of each plot.
     # to_zarr below computes the same graph anyway and discards the result, so
     # this costs nothing when caching is on and saves a full recompute when a
-    # save fails or caching is off. See align() for the same move on the pair.
+    # save fails or caching is off. See align() for the same move on the pair. A long
+    # record of large steps is loaded a few steps at a time (_load_by_time).
     if da is not None:
-        da = da.load()
+        from ocean_skill.operators import resolve_dim
+
+        tdim = resolve_dim(da, "T")
+        da = _load_by_time(da, tdim, _bytes_per_step(obj, tdim) if tdim else 0)
     # A miss is cached; "this source doesn't carry this variable" is not, since
     # that is cheap to rediscover and would otherwise persist past a fixed catalog.
     if use_cache and da is not None:

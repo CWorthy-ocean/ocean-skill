@@ -1465,6 +1465,89 @@ def _classify_columns(frame, top, bottom, *, targets):
     return codes
 
 
+def _rebuilt_frame(zeta, h, *, sigma, Cs, hc, vtransform, origin, datum):
+    """Return one block of the frame, built from the free surface and bathymetry.
+
+    The same arithmetic :func:`add_depth_coord` and :func:`frame_coordinate` do on the
+    whole lazy field, here on numpy blocks: ``zeta`` and ``h`` are ``(...)`` and
+    ``sigma``/``Cs`` the ``(N,)`` stretching vectors, so the result is ``(..., N)``
+    with the vertical last, as the kernels take it. Each element goes through the
+    same operations in the same order and dtypes (:func:`_s_to_z`), so the values are
+    bit-identical to the frame the lazy field would have handed over.
+    """
+    zeta, h = zeta[..., None], h[..., None]
+    height = _s_to_z(sigma, Cs, h, zeta, hc, vtransform)
+    if origin == "surface":
+        return height - zeta
+    if datum:
+        return height - datum
+    return height
+
+
+def _match_rebuilt(values, zeta, h, top, bottom, *, recipe, targets, mode, dtype):
+    """:func:`_match_columns`, with the frame built inside the task.
+
+    See :func:`_rebuilt_frame` and :func:`_frame_recipe`.
+    """
+    frame = _rebuilt_frame(zeta, h, **recipe)
+    return _match_columns(
+        values, frame, top, bottom, targets=targets, mode=mode, dtype=dtype
+    )
+
+
+def _classify_rebuilt(zeta, h, top, bottom, *, recipe, targets):
+    """:func:`_classify_columns`, with the frame built inside the task."""
+    frame = _rebuilt_frame(zeta, h, **recipe)
+    return _classify_columns(frame, top, bottom, targets=targets)
+
+
+def _frame_recipe(ds, meta, s_dim: str, origin: str, datum_z_m: float):
+    """Return what each kernel task needs to build its own block of the frame, or None.
+
+    The frame is a full ``(time, s_rho, eta, xi)`` field, but a function of the free
+    surface and the bathymetry alone (:func:`add_depth_coord`). Handed to the kernel
+    as a dask array of its own, each block is a separate task that depends only on
+    one small ``zeta`` block, so the scheduler computes it as soon as a thread is
+    free -- far ahead of the data block it meets, which takes a hundred level reads
+    -- and holds it until that data arrives. Over a whole-domain series that is one
+    3-D frame per time step held at once (about 75 GB for a year of 4 km restarts).
+    dask will not fold those tasks into the kernel's (a core dimension makes the
+    kernel's blockwise layer one it never fuses with its producers), so instead the
+    kernel is handed ``zeta`` and ``h`` and builds the frame block itself
+    (:func:`_rebuilt_frame`); it then lives only as long as the task.
+
+    Only when that is *provably* the frame ``ds`` carries: ``z_rho`` must be the lazy
+    field :func:`add_depth_coord` builds from this very ``ds`` -- the same dask graph,
+    by name -- so the rebuilt blocks hold the same values. A ``z_rho`` that was sliced,
+    reduced or computed some other way since, a numpy-backed one (nothing to
+    schedule), or a grid without ``sigma_r``/``Cs_r``/``h`` returns ``None`` and the
+    frame is passed whole, as before. Returns ``(zeta, h, recipe)``: the two fields to
+    hand to the kernel and the keyword arguments of :func:`_rebuilt_frame`.
+    """
+    z_rho = ds.coords.get("z_rho")
+    if z_rho is None or z_rho.chunks is None:
+        return None
+    if not all(name in ds.variables for name in ("sigma_r", "Cs_r", "h")):
+        return None
+    sigma, Cs = ds["sigma_r"], ds["Cs_r"]
+    if sigma.dims != (s_dim,) or Cs.dims != (s_dim,):
+        return None
+    rebuilt = add_depth_coord(ds.drop_vars("z_rho"), meta)["z_rho"]
+    if rebuilt.chunks is None or rebuilt.data.name != z_rho.data.name:
+        return None
+    hc, vtransform = _vertical_params(ds, meta)
+    recipe = {
+        "sigma": np.asarray(sigma.values),
+        "Cs": np.asarray(Cs.values),
+        "hc": hc,
+        "vtransform": vtransform,
+        "origin": origin,
+        "datum": datum_z_m,
+    }
+    zeta = _zeta_of(ds).reset_coords(drop=True)
+    return zeta, ds["h"].reset_coords(drop=True), recipe
+
+
 def _match_dtype(values_dtype, frame_dtype, mode: str):
     """Return the dtype a match produces: the data's own, or float where it must be.
 
@@ -1479,7 +1562,9 @@ def _match_dtype(values_dtype, frame_dtype, mode: str):
     return np.result_type(values_dtype, frame_dtype)
 
 
-def _match_variable(da, frame, top, bottom, s_dim: str, targets, mode: str):
+def _match_variable(
+    da, frame, top, bottom, s_dim: str, targets, mode: str, rebuild=None
+):
     """Run :func:`_match_columns` over one variable, lazily (dask in -> dask out).
 
     The vertical is an ``apply_ufunc`` *core* dimension, so it is made one dask chunk
@@ -1491,28 +1576,40 @@ def _match_variable(da, frame, top, bottom, s_dim: str, targets, mode: str):
     has and the variable lacks (a time axis, for a field that does not vary in time) is
     put first, ahead of the variable's own. Coordinates other than the dimension ones
     are left off -- the caller attaches the ones it wants.
+
+    ``rebuild`` is :func:`_frame_recipe`'s ``(zeta, h, recipe)``, chunked like
+    ``frame``: when given, the kernel builds each block of the frame itself
+    (:func:`_match_rebuilt`) and ``frame`` is read only for its dtype.
     """
     values = _contiguous_column(da.reset_coords(drop=True), s_dim)
     dtype = _match_dtype(da.dtype, frame.dtype, mode)
+    kwargs = {"targets": targets, "mode": mode, "dtype": dtype}
+    if rebuild is None:
+        func, inputs, core = _match_columns, (values, frame), [[s_dim], [s_dim]]
+    else:
+        zeta, h, recipe = rebuild
+        func, inputs, core = _match_rebuilt, (values, zeta, h), [[s_dim], [], []]
+        kwargs["recipe"] = recipe
     out = xr.apply_ufunc(
-        _match_columns,
-        values,
-        frame,
+        func,
+        *inputs,
         top,
         bottom,
-        input_core_dims=[[s_dim], [s_dim], [], []],
+        input_core_dims=[*core, [], []],
         output_core_dims=[["z"]],
         dask="parallelized",
         output_dtypes=[dtype],
         dask_gufunc_kwargs={"output_sizes": {"z": len(targets)}},
-        kwargs={"targets": targets, "mode": mode, "dtype": dtype},
+        kwargs=kwargs,
     )
     extra = [d for d in out.dims if d != "z" and d not in da.dims]
     own = [d for d in da.dims if d != s_dim]
     return out.transpose(*extra, *own, "z")
 
 
-def _match_spread(ds, s_dim: str, h_dims, frame, top, bottom, targets, mode: str):
+def _match_spread(
+    ds, s_dim: str, h_dims, frame, top, bottom, targets, mode: str, rebuild=None
+):
     """Carry a riding ``spread`` coordinate onto the match's target depths.
 
     Both depth matches rebuild their result with a fixed coordinate whitelist
@@ -1532,7 +1629,9 @@ def _match_spread(ds, s_dim: str, h_dims, frame, top, bottom, targets, mode: str
     spread = ds[SPREAD_COORD]
     if s_dim not in spread.dims or not (h_dims <= set(spread.dims)):
         return None
-    matched = _match_variable(spread, frame, top, bottom, s_dim, targets, mode)
+    matched = _match_variable(
+        spread, frame, top, bottom, s_dim, targets, mode, rebuild
+    )
     matched.attrs = dict(spread.attrs)
     return matched
 
@@ -1553,19 +1652,31 @@ def _at_ref_time(da: xr.DataArray, meta: dict[str, Any], ref_time: Any) -> xr.Da
     return at.drop_vars(tdim, errors="ignore")
 
 
-def _frame_codes(frame, top, bottom, s_dim: str, targets) -> xr.DataArray:
-    """Return the edge-policy code of every (sample, target), lazy when dask-backed."""
+def _frame_codes(
+    frame, top, bottom, s_dim: str, targets, rebuild=None
+) -> xr.DataArray:
+    """Return the edge-policy code of every (sample, target), lazy when dask-backed.
+
+    ``rebuild`` as for :func:`_match_variable`: the frame is built inside each task.
+    """
+    kwargs: dict[str, Any] = {"targets": targets}
+    if rebuild is None:
+        func, inputs, core = _classify_columns, (frame,), [[s_dim]]
+    else:
+        zeta, h, recipe = rebuild
+        func, inputs, core = _classify_rebuilt, (zeta, h), [[], []]
+        kwargs["recipe"] = recipe
     return xr.apply_ufunc(
-        _classify_columns,
-        frame,
+        func,
+        *inputs,
         top,
         bottom,
-        input_core_dims=[[s_dim], [], []],
+        input_core_dims=[*core, [], []],
         output_core_dims=[["z"]],
         dask="parallelized",
         output_dtypes=[np.int8],
         dask_gufunc_kwargs={"output_sizes": {"z": len(targets)}},
-        kwargs={"targets": targets},
+        kwargs=kwargs,
     )
 
 
@@ -1713,6 +1824,7 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
     frame = frame_coordinate(ds, meta, origin, datum_z_m=datum_z_m)
     top, bottom = water_column_bounds(ds, meta, origin, datum_z_m=datum_z_m)
     frame, top, bottom = (a.reset_coords(drop=True) for a in (frame, top, bottom))
+    rebuild = None
     if ref_time is not None:
         # The old static lookup: the frame as it was at one reference time, applied to
         # every step. Because the frame then has no time axis, the very same kernel
@@ -1720,8 +1832,16 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
         frame, top, bottom = (
             _at_ref_time(a, meta, ref_time) for a in (frame, top, bottom)
         )
+    else:
+        # Each task builds its own block of the frame where that is provably the
+        # same frame, rather than the scheduler holding every step's (see
+        # _frame_recipe); ``frame`` itself is then only read for its chunks and dtype.
+        rebuild = _frame_recipe(ds, meta, s_dim, origin, datum_z_m)
     frame = _contiguous_column(frame, s_dim)
     top, bottom = (_like_horizontal(a, frame) for a in (top, bottom))
+    if rebuild is not None:
+        zeta, h, recipe = rebuild
+        rebuild = (_like_horizontal(zeta, frame), _like_horizontal(h, frame), recipe)
 
     # Rho-point fields share z_rho's own horizontal dims; staggered u/v (xi_u/eta_v)
     # need interpolation to rho first (deferred), so are skipped here. Read off lon's
@@ -1738,7 +1858,9 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
     for var in ds.data_vars:
         da = ds[var]
         if s_dim in da.dims and h_dims <= set(da.dims):
-            matched = _match_variable(da, frame, top, bottom, s_dim, targets, mode)
+            matched = _match_variable(
+                da, frame, top, bottom, s_dim, targets, mode, rebuild
+            )
             # the match sheds attrs; carry the source variable's forward explicitly
             matched.attrs = dict(da.attrs)
             out[var] = matched
@@ -1749,7 +1871,9 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
     coords = {"lon": ds["lon"], "lat": ds["lat"], "z": ("z", targets, z_attrs)}
     if AREA_COORD in ds.coords:
         coords[AREA_COORD] = ds[AREA_COORD]
-    spread = _match_spread(ds, s_dim, h_dims, frame, top, bottom, targets, mode)
+    spread = _match_spread(
+        ds, s_dim, h_dims, frame, top, bottom, targets, mode, rebuild
+    )
     if spread is not None:
         from ocean_skill.operators import SPREAD_COORD
 
@@ -1764,7 +1888,9 @@ def _match_depths(ds, meta, d, *, mode: str, convention, ref_time=None) -> xr.Da
     # geometry, not of any one variable's data: a variable that is NaN everywhere
     # within a reachable depth (masked out for a reason other than geometry) does not
     # warn here.
-    counts, reached = _tally_codes(_frame_codes(frame, top, bottom, s_dim, targets))
+    counts, reached = _tally_codes(
+        _frame_codes(frame, top, bottom, s_dim, targets, rebuild)
+    )
     stamp = {
         "depth_edge_top": counts[_TOP_CELL],
         "depth_edge_bottom": counts[_BOTTOM_CELL],
