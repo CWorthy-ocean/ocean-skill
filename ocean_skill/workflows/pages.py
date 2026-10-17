@@ -37,6 +37,12 @@ a title and notes text for a divider page in ``report.pdf``. :func:`expand` temp
 both against ``defaults`` (there is no ``for_each``), and the runner hands them
 straight to :meth:`~ocean_skill.workflows.report.PdfReport.section`; :func:`build`
 refuses one outright.
+
+A ``health:``/``rivers:`` page draws the figures of a run-diagnostic object
+(:func:`ocean_skill.run_health.health`, :func:`ocean_skill.river_inputs.rivers`).
+:func:`expand` fills in its ``source`` and pins its time window like a ``field:``
+page's; :func:`build` computes the object once per (source, time window) and hands
+every later page with the same key the same one (see :func:`_diagnostic_object`).
 """
 
 from __future__ import annotations
@@ -62,7 +68,12 @@ from ocean_skill.comparison import (
     selects_entry_parts,
     variable_for,
 )
-from ocean_skill.config import COMPARE_DRAWS, check_draw, summary_kinds
+from ocean_skill.config import (
+    COMPARE_DRAWS,
+    check_diagnostic_draw,
+    check_draw,
+    summary_kinds,
+)
 from ocean_skill.plot.spec import UnusableOptions
 
 __all__ = [
@@ -941,7 +952,8 @@ class ExpandedPage:
     """One fully-resolved page: everything ``build`` needs to draw it."""
 
     title: str
-    kind: str  # "field" | "compare" | "summary" | "section" | "XY" | "TS"
+    #: "field" | "compare" | "summary" | "section" | "XY" | "TS" | "health" | "rivers"
+    kind: str
     kwargs: dict[str, Any]
     plot: dict[str, Any]
     cache: bool
@@ -1332,6 +1344,80 @@ def _expand_xy_page(
     }, problem
 
 
+# -- health: / rivers: pages -----------------------------------------------------------
+#
+# ``health: {source, time, draw}`` and ``rivers: {source, time, draw}``: the run
+# diagnostics of :mod:`ocean_skill.run_health` and :mod:`ocean_skill.river_inputs`. One
+# page is one ``draw`` (one figure group) of an object that several pages share, so
+# the expensive read happens once per (source, window) however many pages draw from it.
+
+#: The keys of a ``health:``/``rivers:`` mapping.
+_DIAGNOSTIC_KEYS = ("source", "time", "draw")
+
+
+def _expand_diagnostic_page(
+    page: Any,
+    namespace: dict[str, Any],
+    *,
+    title: str,
+    test_source: str | None,
+    get_index: Any,
+) -> tuple[dict[str, Any], bool, str | None]:
+    """Resolve one ``health:``/``rivers:`` page into ``(kwargs, cacheable, problem)``.
+
+    ``source`` defaults to ``defaults.test`` and ``draw`` to the kind's first figure.
+    A ``health:`` page's time window is pinned to the source's time axis like a
+    ``field:`` page's (:func:`_pin_test_lane`): no ``time`` becomes the whole run, a
+    window with only a ``min`` or a ``max`` takes the run's own end for the other, and
+    ``latest`` the last step, so the cache rule is the field pages' and the kwargs
+    reproduce the figure. A ``rivers:`` page's ``time`` is passed as written -- a river
+    file's time axis is not the run's. A source that cannot be read leaves the page
+    unwindowed, uncached, with ``problem`` set for the run to list and skip.
+    """
+    from ocean_skill.config import HEALTH_DRAWS, RIVER_DRAWS
+
+    kind = page.kind
+    raw = _template_value(dict(getattr(page, kind)), namespace, title=title)
+    unknown = sorted(set(raw) - set(_DIAGNOSTIC_KEYS))
+    if unknown:
+        raise ValueError(
+            f"page {title!r}: {kind}: has no key(s) {unknown} -- it takes "
+            f"{list(_DIAGNOSTIC_KEYS)}"
+        )
+    kwargs = copy.deepcopy(raw)
+    kwargs.setdefault("source", test_source)
+    if kwargs["source"] is None:
+        raise ValueError(f"page {title!r}: no source (set defaults.test)")
+    if not isinstance(kwargs["source"], str):
+        raise ValueError(
+            f"page {title!r}: {kind}: source: must be one source name, got "
+            f"{kwargs['source']!r}"
+        )
+    kwargs.setdefault("draw", (HEALTH_DRAWS if kind == "health" else RIVER_DRAWS)[0])
+    check_diagnostic_draw(title, kind, kwargs["draw"])
+    if kind == "rivers":
+        return kwargs, False, None
+    try:
+        index = get_index(kwargs["source"])
+    except _SourceUnreadable as exc:
+        return kwargs, False, str(exc)
+    if index is None:  # no time axis: nothing to window
+        kwargs.pop("time", None)
+        return kwargs, True, None
+    time = kwargs.pop("time", None)
+    open_ended = False
+    if isinstance(time, dict) and ("min" in time) != ("max" in time):
+        time = {
+            "min": time.get("min", index[0].isoformat()),
+            "max": time.get("max", index[-1].isoformat()),
+        }
+        open_ended = True
+    scratch = {"select": {} if time is None else {"time": time}}
+    select, _, cacheable = _pin_test_lane(scratch, index)
+    kwargs["time"] = select["time"]
+    return kwargs, cacheable or open_ended, None
+
+
 def _window_source(source: Any, test_source: Any, *, title: str) -> str:
     """Pick the one source whose time axis pins a ``field:`` page's window and cache.
 
@@ -1629,6 +1715,8 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
             page_source = (page.compare or {}).get("test", test_source)
         elif page.kind in ("XY", "TS"):
             page_source = test_source
+        elif page.kind in ("health", "rivers"):
+            page_source = (getattr(page, page.kind) or {}).get("source", test_source)
 
         test_index = None
         index_error: Exception | None = None
@@ -1855,6 +1943,25 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
                         kwargs=kwargs,
                         plot=plot,
                         cache=all(m["cache"] for m in kwargs["members"].values()),
+                        problem=problem,
+                    )
+                )
+
+            elif page.kind in ("health", "rivers"):
+                kwargs, cacheable, problem = _expand_diagnostic_page(
+                    page,
+                    namespace,
+                    title=title,
+                    test_source=test_source,
+                    get_index=get_index,
+                )
+                out.append(
+                    ExpandedPage(
+                        title=title,
+                        kind=page.kind,
+                        kwargs=kwargs,
+                        plot=plot,
+                        cache=page.kind == "health" and suite.cache and cacheable,
                         problem=problem,
                     )
                 )
@@ -2298,6 +2405,10 @@ def _spell_field(name: str, value: Any) -> str:
         return _time_label(value)
     if name == "variable":
         return _short_label(str(value))
+    if name in ("test", "reference"):
+        from ocean_skill.catalog import source_label
+
+        return source_label(str(value))
     return str(value)
 
 
@@ -2344,7 +2455,83 @@ def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
     return out
 
 
-def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = None):
+def _diagnostic_object(page: ExpandedPage, run_context: dict[str, Any] | None):
+    """Return the run-diagnostic object a ``health:``/``rivers:`` page draws from.
+
+    Computed on the first page that needs it and shared by every later page with the
+    same kind, source, time window and cache flag -- the object holds the expensive
+    read, a page only picks which figures of it to draw. The shared state is
+    ``run_context`` (``{"joins": ..., "objects": {...}}``, owned by the runner):
+    ``joins`` is the list of job-segment start dates handed to
+    :func:`ocean_skill.run_health.health`, or a no-argument callable returning it,
+    called at most once and only when a health page is built. A failed computation is
+    remembered too, so each page of a broken source fails at once instead of repeating
+    the read.
+    """
+    import json
+
+    ctx = run_context if run_context is not None else {"joins": None, "objects": {}}
+    objects = ctx.setdefault("objects", {})
+    kwargs = page.kwargs
+    key = (
+        page.kind,
+        kwargs["source"],
+        json.dumps(kwargs.get("time"), sort_keys=True, default=str),
+        page.cache,
+    )
+    if key not in objects:
+        try:
+            if page.kind == "health":
+                from ocean_skill.run_health import health
+
+                joins = ctx.get("joins")
+                if callable(joins):
+                    joins = ctx["joins"] = joins()
+                objects[key] = health(
+                    kwargs["source"],
+                    time=kwargs.get("time"),
+                    joins=joins,
+                    cache=page.cache,
+                )
+            else:
+                from ocean_skill.river_inputs import rivers
+
+                objects[key] = rivers(kwargs["source"], time=kwargs.get("time"))
+        except Exception as exc:
+            objects[key] = exc
+    obj = objects[key]
+    if isinstance(obj, Exception):
+        raise obj
+    return obj
+
+
+def _build_diagnostic(page: ExpandedPage, run_context: dict[str, Any] | None):
+    """Draw a ``health:``/``rivers:`` page; see :func:`_diagnostic_object`.
+
+    The page's ``plot:`` is not used: the diagnostic figures take no options.
+    """
+    obj = _diagnostic_object(page, run_context)
+    draw = page.kwargs["draw"]
+    results = list(obj.figures(draw))
+    if not results:
+        raise PageSkipped(
+            f"{page.kind}: draw: {draw} has nothing to draw for "
+            f"{page.kwargs['source']!r} (the run has no such variables or data)"
+        )
+    if draw in ("integrity", "extremes"):
+        table = obj.table()
+        if table is not None and len(table):
+            page.summary_table = table
+    page.results = list(obj.problems())
+    return results
+
+
+def build(
+    page: ExpandedPage,
+    *,
+    pooled_records: list[MetricRecord] | None = None,
+    run_context: dict[str, Any] | None = None,
+):
     """Draw one expanded page. Returns a list of ``(suffix, Figure)`` pairs.
 
     A ``section`` page has nothing to draw and raises :class:`ValueError` -- see the
@@ -2382,6 +2569,13 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
     ``run.log``) and recorded onto :attr:`ExpandedPage.results` (so it lands in
     ``manifest.json`` too) -- the one place in this chain that is inherently
     data-dependent and so cannot have been resolved by :func:`expand`.
+
+    A ``health``/``rivers`` page draws one figure group of a diagnostic object that
+    ``run_context`` shares between pages (see :func:`_diagnostic_object`); it records
+    the object's problems on :attr:`ExpandedPage.results` and, for the tables it
+    draws, :attr:`ExpandedPage.summary_table`, but no metric records, so the final
+    ``summary:`` page stays about the comparisons. One with nothing to draw raises
+    :class:`PageSkipped`.
     """
     if page.kind == "section":
         raise ValueError(
@@ -2556,6 +2750,9 @@ def build(page: ExpandedPage, *, pooled_records: list[MetricRecord] | None = Non
                 )
                 results.append((suffix, fig))
         return results
+
+    if page.kind in ("health", "rivers"):
+        return _build_diagnostic(page, run_context)
 
     # summary
     pooled = pooled_records or []

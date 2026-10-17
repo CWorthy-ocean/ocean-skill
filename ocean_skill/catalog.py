@@ -52,6 +52,7 @@ __all__ = [
     "overlap",
     "resolve",
     "search_paths",
+    "source_label",
 ]
 
 _CATALOG_GLOB = "*.yaml"
@@ -348,11 +349,68 @@ def resolve(name: str) -> SourceRef:
     return casts.resolve_cast(resolve(base), base, cast)
 
 
+#: ``<dataset>_<variable>_<period>``: the shape a per-variable, per-period climatology
+#: entry is named in (``woa23_nitrate_month12``, ``woa23_temperature_annual``).
+_PERIOD_NAME = re.compile(
+    r"^(?P<dataset>[a-z]+\d*)_(?P<variable>[a-z_]+?)_"
+    r"(?P<period>month(?P<month>\d{2})|monthly|annual)$"
+)
+_MONTH_ABBREVIATIONS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+)  # fmt: skip
+
+
+def source_label(name: Any) -> str:
+    """Return a readable name for a source, for titles, legends and table rows.
+
+    Source names are configuration (``woa23_nitrate_month12``); a reader of a figure
+    wants ``WOA23 nitrate Dec``. In order:
+
+    * the entry's own ``metadata["label"]``, when its catalog sets one -- the way to
+      name a source that no rule can (``label: Holte & Talley``);
+    * a name of the ``<dataset>_<variable>_<period>`` shape, whose variable the
+      vocabulary knows: the dataset in capitals, the variable, and the period spelled
+      out (``month12`` reads ``Dec``);
+    * the name itself -- a model run (``ccs_4km``), a pooled ``a+b`` name or anything
+      else that is already as readable as it will get.
+
+    Never raises: a name that does not resolve is simply not labelled by its entry.
+    """
+    name = str(name)
+    label = _entry_label(name)
+    if label:
+        return label
+    match = _PERIOD_NAME.match(name)
+    if match is not None:
+        from ocean_skill.vocabulary import is_known
+
+        variable = match["variable"]
+        month = int(match["month"]) if match["month"] else None
+        if is_known(variable) and (month is None or 1 <= month <= 12):
+            period = (
+                match["period"] if month is None else _MONTH_ABBREVIATIONS[month - 1]
+            )
+            return f"{match['dataset'].upper()} {variable.replace('_', ' ')} {period}"
+    return name
+
+
+def _entry_label(name: str) -> str | None:
+    """Return the ``metadata["label"]`` of the source ``name`` resolves to, if any."""
+    try:
+        with warnings.catch_warnings():
+            # a shadowed name warns on every resolve; the reader already saw it once
+            warnings.simplefilter("ignore")
+            label = (resolve(name).metadata or {}).get("label")
+    except Exception:  # unknown name, a pooled "a+b", a hand-built stand-in
+        return None
+    return label.strip() or None if isinstance(label, str) else None
+
+
 #: Entry-metadata keys :func:`fingerprint` leaves out: the ones that do not change
 #: what a read of the entry returns. Prose for people (``description``, ``title``,
-#: ``tags``) says nothing about the data. The rest is *derived from* the data by the
-#: build probe -- the extents (``geospatial_*``, and ERDDAP's own spelling of the same
-#: bounding box, ``minLatitude`` ... ``maxLongitude``), the time coverage
+#: ``label``, ``tags``) says nothing about the data. The rest is *derived from* the data
+#: by the build probe -- the extents (``geospatial_*``, and ERDDAP's own spelling of the
+#: same bounding box, ``minLatitude`` ... ``maxLongitude``), the time coverage
 #: (``time_coverage_*``, ``minTime`` / ``maxTime``), the ``domain_outline`` ring, the
 #: ``variables`` list -- so it follows from the reader definition that is hashed
 #: anyway, and re-describing an entry, or re-probing it so an extent shifts, must not
@@ -364,6 +422,7 @@ _FINGERPRINT_SKIP_KEYS = frozenset(
     {
         "description",
         "title",
+        "label",
         "tags",
         "minTime",
         "maxTime",

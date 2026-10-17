@@ -210,6 +210,9 @@ def _fmt_pos(lon: float, lat: float) -> str:
 
     Matches :func:`ocean_skill.plot.section._path_note`'s own endpoint formatting.
     """
+    from ocean_skill.plot._geo_labels import wrap_lon
+
+    lon = wrap_lon(lon)
     lat_hemi = "N" if lat >= 0 else "S"
     lon_hemi = "E" if lon >= 0 else "W"
     return f"{abs(lat):.1f}°{lat_hemi}, {abs(lon):.1f}°{lon_hemi}"

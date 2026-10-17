@@ -1,8 +1,9 @@
-"""``ocean-skill-suite new mid-run-check``: fill the template's setup block from a run.
+"""``ocean-skill-suite new mid-run-check|input-check``: fill a template's setup block.
 
-Starting a mid-run check by hand means copying ``templates/mid-run-check.yaml`` and
-editing a few paths. This finds them in a C-Star run folder (``<run>/tasks/<task>/
-{input/input_datasets,output,work}``) and rewrites the block between the template's
+Starting a check by hand means copying ``templates/<name>.yaml`` and editing a few
+paths. This finds them in a C-Star run folder (``<run>/tasks/<task>/
+{input/input_datasets,output,work}``; ``input-check`` reads the first task's inputs, or
+the folder named by ``--inputs``) and rewrites the block between the template's
 ``# >>> setup`` and ``# <<< setup`` markers. The rest of the file (pages, comments) is
 kept byte for byte: the block is spliced in as text, since loading and dumping the YAML
 would drop the comments. ``final-report`` and ``model-comparison`` are copied and
@@ -22,13 +23,15 @@ from pathlib import Path
 
 import yaml
 
+TEMPLATES = ("mid-run-check", "input-check")
 TEMPLATE = Path(__file__).parent / "templates" / "mid-run-check.yaml"
 
 #: The shared observation catalogs on Anvil; ``--shared-catalogs`` points elsewhere.
 SHARED_CATALOGS = "/anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs"
 
 #: Restart references are split into one-level chunks of this many rows (the largest
-#: divisor of ``eta_rho`` in range) so a page matched to a depth reads whole columns.
+#: divisor of ``eta_rho`` in range, else the smallest one above it) so a page matched to
+#: a depth reads whole columns.
 SUBCHUNK_RANGE = (32, 128)
 
 _STAMP = re.compile(r"output_rst\.(\d{4})(\d{2})(\d{2})")
@@ -91,27 +94,182 @@ def find_grid(roots: list[Path]) -> Path:
 def pick_subchunk(grid: Path) -> tuple[dict[str, int], int]:
     """Return the restart ``subchunk:`` for ``grid`` and its ``eta_rho`` length.
 
-    One level per chunk, and the largest divisor of ``eta_rho`` in
-    :data:`SUBCHUNK_RANGE` rows so the chunks tile the grid. With none (674 = 2 x 337)
-    the rows stay whole.
+    One level per chunk, and rows so the chunks tile the grid: the largest divisor of
+    ``eta_rho`` in :data:`SUBCHUNK_RANGE`, else (1346 = 2 x 673) the smallest divisor
+    of at least ``SUBCHUNK_RANGE[0]`` below ``eta_rho``. With none (a prime) the rows
+    stay whole.
     """
     import xarray as xr
 
     with xr.open_dataset(grid) as ds:
         n = int(ds.sizes["eta_rho"])
-    rows = max(
-        (d for d in range(SUBCHUNK_RANGE[0], SUBCHUNK_RANGE[1] + 1) if n % d == 0),
-        default=0,
-    )
+    divisors = [d for d in range(SUBCHUNK_RANGE[0], n) if n % d == 0]
+    in_range = [d for d in divisors if d <= SUBCHUNK_RANGE[1]]
+    rows = max(in_range) if in_range else min(divisors, default=0)
     return {"s_rho": 1, "s_w": 1, **({"eta_rho": rows} if rows else {})}, n
 
 
-def render(
-    args: argparse.Namespace, roots: list[Path], out: Path
-) -> tuple[str, list[str], list[str]]:
-    """Return the suite text, its ``# TODO check`` items and its warnings."""
-    from ocean_skill.workflows import cover
+#: Boundary side -> the grid dimension and index its edge lies on.
+SIDES = {"south": ("eta_rho", 0), "north": ("eta_rho", -1)}
+SIDES |= {"west": ("xi_rho", 0), "east": ("xi_rho", -1)}
 
+
+def _first_inputs(roots: list[Path]) -> Path:
+    """Return the ``input_datasets`` folder of the task whose restarts start first."""
+
+    def start(folder: Path) -> tuple[str, str]:
+        task = folder.parents[1]
+        rst = sorted(p.name for p in (task / "output").glob("output_rst.*.nc"))
+        return (rst[0] if rst else "~", task.name)
+
+    dirs = [p for r in roots for p in (r / "tasks").glob("*/input/input_datasets")]
+    if not dirs:
+        raise SuiteNewError("no tasks/*/input/input_datasets in --run; pass --inputs")
+    return min(dirs, key=start)
+
+
+def _by_glob(folder: Path, pattern: str) -> dict[str, list[Path]]:
+    """Group files matching ``pattern`` by name with their date digits as ``?``."""
+    groups: dict[str, list[Path]] = {}
+    for f in sorted(folder.glob(pattern)):
+        key = re.sub(r"\d{4,8}(?=\.nc$)", lambda m: "?" * len(m[0]), str(f))
+        groups.setdefault(key, []).append(f)
+    return groups
+
+
+def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
+    """Return the ``refresh:`` and ``defaults:`` lines of an input-check."""
+    import textwrap
+    from datetime import datetime, timedelta
+
+    import xarray as xr
+
+    folder = _abs(args.inputs) if args.inputs else _first_inputs(roots)
+    grids = [_abs(args.grid)] if args.grid else sorted(folder.glob("*_grid.nc"))
+    if len(grids) != 1 or not grids[0].is_file():
+        raise SuiteNewError(f"expected one *_grid.nc in {folder}; pass --grid FILE")
+    grid = grids[0]
+    ics = sorted(folder.glob("*initial_conditions*.nc"))
+    ics = ics or sorted(folder.glob("output_rst.*.nc"))
+    if len(ics) != 1:
+        raise SuiteNewError(f"expected one initial-conditions file in {folder}")
+    ic, sources, forcing = ics[0], [], []
+
+    def add(suffix: str, kind: str, files: str | None, **kw) -> str:
+        """Add a forcing entry ``<name>_<suffix>`` (a warning if there are no files)."""
+        entry, refs = f"{name}_{suffix}", f"{output_dir}/refs/{name}_{suffix}.parquet"
+        if files is None:
+            warn.append(f"no {suffix} files in {folder}; its pages will fail")
+        else:
+            row = {"name": entry, "kind": kind, "files": files, "grid": str(grid)}
+            forcing.append(
+                row | ({} if kind == "initial_conditions" else {"ref": refs}) | kw
+            )
+        return entry
+
+    if ic.name.startswith("output_rst"):  # a restart start: an ordinary model source
+        sub, n_eta = pick_subchunk(grid)
+        if "eta_rho" not in sub:
+            warn.append(f"eta_rho={n_eta} has no divisor of {SUBCHUNK_RANGE[0]}+")
+        sources.append(
+            {"name": f"{name}_ic", "files": str(ic), "grid": str(grid)}
+            | {"ref": f"{output_dir}/refs/{name}_ic.parquet"}
+            | {"keep": "latest-per-file", "subchunk": sub}
+        )
+    else:
+        add("ic", "initial_conditions", str(ic))
+
+    # open sides: the ones the boundary-physics file has temperature for
+    phys = _by_glob(folder, "*boundary-physics_*.nc")
+    first = next(iter(phys.values()), [None])[0]
+    if first is None:
+        raise SuiteNewError(f"no *boundary-physics_*.nc in {folder}")
+    with xr.open_dataset(first, decode_times=False) as ds:
+        open_sides = [s for s in SIDES if f"temp_{s}" in ds]
+    bgc = _by_glob(folder, "*boundary-bgc-*.nc")
+    bgc = [k for k in bgc if not Path(k).stem.endswith(("_clim", "-clim"))]
+
+    def bry() -> dict:  # a fresh dict per row: shared ones dump as YAML anchors
+        return {"subchunk": {"bry_time": 1}, "sides": list(open_sides)}
+
+    bry_phys = add("bry_phys", "boundary", next(iter(phys)), **bry())
+    bry_bgc = add("bry_bgc", "boundary", next(iter(bgc), None), **bry())
+
+    with xr.open_dataset(grid) as g:
+        lon, lat = g["lon_rho"].values, g["lat_rho"].values
+    sides = []
+    for side in open_sides:
+        dim, i = SIDES[side]
+        cut = (i, slice(None)) if dim == "eta_rho" else (slice(None), i)
+        (x0, x1), (y0, y1) = lon[cut][[0, -1]], lat[cut][[0, -1]]
+        label = f"lon {x0:.1f} to {x1:.1f}, lat {y0:.1f} to {y1:.1f}"
+        sides.append(
+            {"name": side, "title": side.title(), "label": label}
+            | {"transect": {dim: i}}
+        )
+
+    # surface files, dated or climatology: their 2-D variables, and a time variable
+    # that is not called "time" (a CO2 file's own)
+    surface: dict[bool, list[dict]] = {False: [], True: []}
+    for pattern in ("*surface-physics_*.nc", "*surface-bgc-*.nc"):
+        for key, files in _by_glob(folder, pattern).items():
+            filename = Path(key).name
+            part = re.sub(
+                r"([-_][?\d]+)?\.nc$", "", re.sub(r"^.*surface-", "", filename)
+            )
+            clim = part.endswith(("_clim", "-clim"))
+            with xr.open_dataset(files[0], decode_times=False) as ds:
+                names = [
+                    str(v)
+                    for v, a in ds.data_vars.items()
+                    if {"eta_rho", "xi_rho"} <= set(a.dims)
+                ]
+                times = [
+                    str(v) for v in ds.variables if "time" in str(v) and ds[v].ndim == 1
+                ]
+            kw = {"climatology": True} if clim else {}
+            if times and "time" not in times and not clim:
+                kw["time_coord"] = times[0]
+            if part == "physics" and len(files) > 1:
+                kw["subchunk"] = {"time": 1}  # monthly files of 28-31 steps must join
+            entry = add("surf_" + re.sub(r"\W", "_", part), "surface", key, **kw)
+            surface[clim].append(
+                {"name": entry, "label": f"surface {part}", "vars": names}
+            )
+
+    rivers = sorted(folder.glob("*river*.nc"))
+    add("river", "river", str(rivers[0]) if rivers else None)
+
+    # the first date: the restart's day (to the nearest), else the first boundary month
+    stamp = re.search(r"output_rst\.(\d{14})", ic.name)
+    month = re.search(r"_(\d{4})(\d{2})\.nc$", first.name)
+    if stamp:
+        when = datetime.strptime(stamp[1], "%Y%m%d%H%M%S") + timedelta(hours=12)
+    elif month:
+        when = datetime(int(month[1]), int(month[2]), 1)
+    else:
+        raise SuiteNewError(f"no start date in {ic.name} or {first.name}")
+    defaults = {"test": f"{name}_ic", "forcing_time": when.strftime("%Y-%m")}
+    defaults |= {"forcing_month": when.month, "ic_month": when.month}
+    defaults |= {"bry_phys": bry_phys, "bry_bgc": bry_bgc, "river": f"{name}_river"}
+    defaults |= {
+        "sides": sides,
+        "surface": surface[False],
+        "surface_clim": surface[True],
+    }
+
+    def dump(data: dict) -> str:
+        text = yaml.safe_dump(
+            data, sort_keys=False, default_flow_style=None, width=10**6
+        )
+        return textwrap.indent(text.rstrip(), "  ")
+
+    refresh = {"catalog": catalog, "sources": sources, "forcing": forcing}
+    return ["", "refresh:", dump(refresh), "", "defaults:", dump(defaults)]
+
+
+def _mid_run(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
+    """Return the ``refresh:`` and ``defaults:`` lines of a mid-run-check."""
     globs = [str(_abs(g)) for g in args.files] if args.files else find_restarts(roots)
     grid = _abs(args.grid) if args.grid else find_grid(roots)
     if not grid.is_file():
@@ -120,6 +278,45 @@ def render(
     stamps = sorted(
         m.groups() for g in globs for p in glob.glob(g) if (m := _STAMP.search(p))
     )
+    lines = [
+        "",
+        "refresh:",
+        f"  catalog: {_q(catalog)}",
+        "  sources:",
+        f"    - name: {_q(name)}",
+        f"      files: {json.dumps(globs) if len(globs) > 1 else _q(globs[0])}",
+        f"      grid: {_q(grid)}",
+        f"      ref: {_q(f'{output_dir}/refs/{name}.parquet')}",
+        "      keep: latest-per-file  # restart files: keep each file's main time step",
+    ]
+    if "eta_rho" in sub:
+        lines.append(
+            f"      # {sub['eta_rho']}-row, 1-level chunks: depth pages read less."
+        )
+    else:
+        why = f"eta_rho={n_eta} has no divisor of 32 or more: rows stay whole"
+        lines.append(f"      # {why}: depth pages over many restarts need more memory.")
+        warn.append(f"{why}; depth pages over many restarts use more memory")
+    first = "-".join(stamps[0]) if stamps else None
+    period = f'  period: {{min: "{first or "2000-01-01"}"}}'
+    return [
+        *lines,
+        f"      subchunk: {json.dumps(sub)}",
+        "",
+        "defaults:",
+        f"  test: {_q(name)}",
+        period
+        if first
+        else f"{period}  {check('restart dates not read from file names')}",
+    ]
+
+
+def render(
+    args: argparse.Namespace, roots: list[Path], out: Path
+) -> tuple[str, list[str], list[str]]:
+    """Return the suite text, its ``# TODO check`` items and its warnings."""
+    from ocean_skill.workflows import cover
+
     tasks = sorted(t for r in roots for t in (r / "tasks").glob("*"))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")  # several workplans: the user names one
@@ -141,62 +338,35 @@ def render(
     )
     catalog = f"{catalogs}/{name.replace('_', '-')}.yaml"
     lines = [
-        "name: mid-run-check",
+        f"name: {args.template}",
         f"output_dir: {_q(output_dir)}",
         "pdf_images: jpeg",
         f"catalog_search_paths: [{_q(args.shared_catalogs)}, {_q(catalogs)}]",
         f"cache_dir: {_q(output_dir)}",
-        "",
-        "run_info:",
     ]
-    for key, path in found.items():
+    if roots:
+        lines += ["", "run_info:"]
+    for key, path in found.items() if roots else ():
         lines.append(
             f"  {key}: {_q(path)}"
             if path
             else f"  {check(f'run_info.{key} not found under {roots[0]}')}"
         )
-    lines += [
-        "",
-        "refresh:",
-        f"  catalog: {_q(catalog)}",
-        "  sources:",
-        f"    - name: {_q(name)}",
-        f"      files: {json.dumps(globs) if len(globs) > 1 else _q(globs[0])}",
-        f"      grid: {_q(grid)}",
-        f"      ref: {_q(f'{output_dir}/refs/{name}.parquet')}",
-        "      keep: latest-per-file  # restart files: keep each file's main time step",
-    ]
-    if "eta_rho" in sub:
-        lines.append(
-            f"      # {sub['eta_rho']}-row, 1-level chunks: depth pages read less."
-        )
-    else:
-        why = f"eta_rho={n_eta} has no divisor in {SUBCHUNK_RANGE}, so rows stay whole"
-        lines.append(f"      # {why}: depth pages over many restarts need more memory.")
-        warn.append(f"{why}; depth pages over many restarts use more memory")
-    first = "-".join(stamps[0]) if stamps else None
-    period = f'  period: {{min: "{first or "2000-01-01"}"}}'
-    lines += [
-        f"      subchunk: {json.dumps(sub)}",
-        "",
-        "defaults:",
-        f"  test: {_q(name)}",
-        period
-        if first
-        else f"{period}  {check('restart dates not read from file names')}",
-    ]
+    build = _input_check if args.template == "input-check" else _mid_run
+    lines += build(args, roots, name, output_dir, catalog, check, warn)
 
-    text = TEMPLATE.read_text()
+    template = TEMPLATE.with_name(f"{args.template}.yaml")
+    text = template.read_text()
     opened = re.search(r"^# >>> setup.*\n", text, re.MULTILINE)
     closed = re.search(r"^# <<< setup.*\n", text, re.MULTILINE)
     if opened is None or closed is None:
-        raise SuiteNewError(f"{TEMPLATE} has no setup markers")
+        raise SuiteNewError(f"{template} has no setup markers")
     head = text[: opened.start()].replace(
-        "ocean-skill-run mid-run-check.yaml", f"ocean-skill-run {out}"
+        f"ocean-skill-run {args.template}.yaml", f"ocean-skill-run {out}"
     )
     note = (
-        "# Generated by `ocean-skill-suite new mid-run-check`; the description below "
-        "is the template's.\n"
+        f"# Generated by `ocean-skill-suite new {args.template}`; the description "
+        "below is the template's.\n"
     )
     block = opened.group(0) + "\n".join(lines) + "\n" + closed.group(0)
     return note + head + block + text[closed.end() :], todo, warn
@@ -211,7 +381,7 @@ def validate(path: Path) -> list[str]:
     except Exception as exc:
         return [f"the suite does not load: {exc}"]
     problems = []
-    for src in suite.refresh.sources:
+    for src in [*suite.refresh.sources, *suite.refresh.forcing]:
         files = [src.files] if isinstance(src.files, str) else src.files
         problems += [f"no files match {g}" for g in files if not glob.glob(g)]
         if src.grid and not Path(src.grid).is_file():
@@ -226,30 +396,32 @@ def validate(path: Path) -> list[str]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ocean-skill-suite")
     new = parser.add_subparsers(dest="command", required=True).add_parser(
-        "new", help="write a mid-run-check suite from a C-Star run folder"
+        "new",
+        help="write a mid-run-check or input-check suite from a C-Star run folder",
     )
     add = new.add_argument
-    add("template", help="the suite to start from: mid-run-check")
+    add("template", help="the suite to start from: mid-run-check or input-check")
     add(
         "--run",
         action="append",
-        required=True,
+        default=[],
         metavar="DIR",
         help="C-Star run folder (holds tasks/); repeat for segments",
     )
+    add("--inputs", metavar="DIR", help="input-check: the input_datasets folder itself")
     add("--name", required=True, help="the model source's name")
     add("--output-dir", required=True, help="reports and cache go here")
     add("--files", nargs="+", metavar="GLOB", help="the restarts, if not found")
     add("--grid", metavar="FILE", help="the grid, if not found")
     add("--catalog-dir", help="this suite's catalog (default <output-dir>/catalogs)")
     add("--shared-catalogs", default=SHARED_CATALOGS)
-    add("-o", "--out", default="mid-run-check.yaml", help="file to write")
+    add("-o", "--out", help="file to write (default <template>.yaml)")
     add("--force", action="store_true", help="overwrite an existing file")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run ``ocean-skill-suite new mid-run-check --run DIR --name N --output-dir DIR``.
+    """Run ``ocean-skill-suite new TEMPLATE --run DIR --name N --output-dir DIR``.
 
     Returns 0 when the suite was written and checks out, 1 when it was written but the
     check found problems, 2 when nothing could be written.
@@ -259,13 +431,20 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 2
     try:
-        if args.template != "mid-run-check":
+        if args.template not in TEMPLATES:
             raise SuiteNewError(
                 f"template {args.template!r} is not supported yet; copy "
                 f"ocean_skill/workflows/templates/{args.template}.yaml and edit its "
                 "setup block (between '# >>> setup' and '# <<< setup') by hand"
             )
-        out, roots = _abs(args.out), [_abs(r) for r in args.run]
+        out, roots = (
+            _abs(args.out or f"{args.template}.yaml"),
+            [_abs(r) for r in args.run],
+        )
+        if not roots and not (args.inputs and args.template == "input-check"):
+            raise SuiteNewError(
+                "--run DIR is required (input-check also takes --inputs)"
+            )
         if out.exists() and not args.force:
             raise SuiteNewError(f"{out} exists; pass --force to overwrite it")
         if missing := [r for r in roots if not r.is_dir()]:

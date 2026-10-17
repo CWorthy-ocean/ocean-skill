@@ -31,6 +31,7 @@ __all__ = [
     "find_workplan",
     "gather",
     "newest_blueprint",
+    "segment_starts",
 ]
 
 #: Page geometry, in figure fractions: text starts at ``MARGIN_X`` and a value column
@@ -177,6 +178,63 @@ def find_workplan(run_dir: Path) -> Path | None:
             stacklevel=3,
         )
     return hits[0] if len(hits) == 1 else None
+
+
+def segment_starts(
+    suite: SuiteConfig, suite_path: Path | None = None
+) -> list[datetime]:
+    """Return when the run's job segments after the first began (its restart "joins").
+
+    A run restarted in pieces is one workplan with a step per piece, each step's
+    blueprint carrying that piece's ``runtime_params.start_date``. The workplan is found
+    as :func:`gather` finds it (``run_info.workplan``, relative to the suite file's
+    folder, else the one with a step in the ``refresh:`` run folder); a step's
+    blueprint, when its path is relative, is read relative to the workplan's folder.
+    The result is sorted and free of repeats, without the first start (the run's own,
+    not a join), and naive datetimes. Anything unreadable or missing yields ``[]``
+    rather than an error: these dates only mark where a health figure should look for a
+    restart.
+    """
+    import pandas as pd
+
+    try:
+        info = suite.run_info
+        base = (
+            Path(suite_path).expanduser().resolve().parent
+            if suite_path is not None
+            else Path.cwd()
+        )
+        wp_path = None
+        if info and info.workplan:
+            given = Path(info.workplan).expanduser()
+            given = given if given.is_absolute() else base / given
+            wp_path = given if given.is_file() else None
+        else:
+            run_dir = _run_dir(suite)
+            wp_path = find_workplan(run_dir) if run_dir is not None else None
+        wp = None if wp_path is None else _load(wp_path)
+        if wp is None:
+            return []
+        starts = []
+        for step in wp.get("steps") or []:
+            blueprint = step.get("blueprint") if isinstance(step, dict) else None
+            if not isinstance(blueprint, str):
+                continue
+            bp_path = Path(blueprint).expanduser()
+            bp_path = bp_path if bp_path.is_absolute() else wp_path.parent / bp_path
+            bp = _load(bp_path) if bp_path.is_file() else None
+            runtime = (bp or {}).get("runtime_params")
+            start = runtime.get("start_date") if isinstance(runtime, dict) else None
+            if start is None:
+                continue
+            stamp = pd.Timestamp(start)
+            if stamp.tzinfo is not None:
+                stamp = stamp.tz_convert("UTC").tz_localize(None)
+            starts.append(stamp.to_pydatetime())
+        return sorted(set(starts))[1:]
+    except Exception as exc:
+        warnings.warn(f"cover: no segment start dates ({exc})", stacklevel=2)
+        return []
 
 
 # --- condensing file lists ---------------------------------------------------------

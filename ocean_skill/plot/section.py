@@ -40,6 +40,7 @@ import numpy as np
 import xarray as xr
 
 from ocean_skill.plot._colorbar import _clean, tick_step
+from ocean_skill.plot._geo_labels import wrap_lon
 
 __all__ = [
     "CAST_COLOR",
@@ -94,12 +95,13 @@ class SectionGeometry:
     horizontal axis, whose along coordinate carries ``axis_coord`` (see
     :func:`ocean_skill.comparison._slab_to_section`) -- always has its *surviving*
     coordinate on ``x_name``, in degrees. Either way ``x_name`` still names the
-    coordinate to draw against and ``x_label`` reads "latitude (°N)" /
-    "longitude (°E)" / "distance along transect (km)". A renderer needs no branch for
-    it: it draws ``x_name`` against ``y_name`` and labels the axes with
-    ``x_label``/``y_label`` regardless. ``x_axis`` records which it is (``"distance"``,
-    ``"lat"`` or ``"lon"``) for a caller that does care, such as one deciding whether
-    two sections can share an x axis.
+    coordinate to draw against and ``x_label`` reads "latitude" /
+    "longitude" (the ticks spell the degrees, see :mod:`ocean_skill.plot._geo_labels`) /
+    "distance along transect (km)". A renderer draws ``x_name`` against ``y_name`` and
+    labels the axes with ``x_label``/``y_label`` regardless. ``x_axis`` records which it
+    is (``"distance"``, ``"lat"`` or ``"lon"``) for a caller that does care: a degree
+    axis spells its ticks as a map's gridlines are, and two sections can share an x axis
+    only when theirs agree.
     """
 
     x_name: str
@@ -112,27 +114,20 @@ class SectionGeometry:
 
 
 def _band_note(axis: str, band) -> str:
-    """``"mean over 180–200°E"`` / ``"mean over 5°S–5°N"``: what a slab averaged.
+    """``"mean over 180°E–160°W"`` / ``"mean over 5°S–5°N"``: what a slab averaged.
 
     ``axis`` is the averaged axis (``"lon"`` or ``"lat"``) and ``band`` its
     ``(lo, hi)`` range, both read off the along coordinate's attrs (see
-    :func:`ocean_skill.comparison._slab_to_section`). A longitude band whose ends
-    both sit in 0-360 reads as one run of east longitude ("180–200°E", even past
-    180 -- the convention the box was asked for in); any other spells each end with
-    its own hemisphere letter.
+    :func:`ocean_skill.comparison._slab_to_section`). A longitude band is wrapped to
+    ±180 like every other longitude here (``"180°E–160°W"`` for a band asked for as
+    180-200), each end keeping its hemisphere letter unless both share one.
     """
+    from ocean_skill.comparison import _hemisphere_range
+
     lo, hi = float(band[0]), float(band[1])
     if axis == "lat":
-        return (
-            f"mean over {abs(lo):g}°{'N' if lo >= 0 else 'S'}–"
-            f"{abs(hi):g}°{'N' if hi >= 0 else 'S'}"
-        )
-    if lo >= 0 and hi >= 0:
-        return f"mean over {lo:g}–{hi:g}°E"
-    return (
-        f"mean over {abs(lo):g}°{'E' if lo >= 0 else 'W'}–"
-        f"{abs(hi):g}°{'E' if hi >= 0 else 'W'}"
-    )
+        return f"mean over {_hemisphere_range(lo, hi, 'N', 'S')}"
+    return f"mean over {_hemisphere_range(wrap_lon(lo), wrap_lon(hi), 'E', 'W')}"
 
 
 def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
@@ -163,6 +158,7 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
         return ""
 
     def _fmt(lon_v: float, lat_v: float) -> str:
+        lon_v = wrap_lon(lon_v)
         return (
             f"{abs(lat_v):.1f}°{'N' if lat_v >= 0 else 'S'}, "
             f"{abs(lon_v):.1f}°{'E' if lon_v >= 0 else 'W'}"
@@ -171,7 +167,8 @@ def _path_note(da, lon_name: str | None, lat_name: str | None) -> str:
     lon_fixed = np.ptp(lon) < 1e-6
     lat_fixed = np.ptp(lat) < 1e-6
     if lon_fixed and not lat_fixed:
-        return f"along {abs(lon[0]):.1f}°{'E' if lon[0] >= 0 else 'W'}"
+        fixed = wrap_lon(lon[0])
+        return f"along {abs(fixed):.1f}°{'E' if fixed >= 0 else 'W'}"
     if lat_fixed and not lon_fixed:
         return f"along {abs(lat[0]):.1f}°{'N' if lat[0] >= 0 else 'S'}"
     return f"{_fmt(lon[0], lat[0])} → {_fmt(lon[-1], lat[-1])}"
@@ -432,7 +429,8 @@ def prepare_section(
             name="distance",
         )
         distance.attrs["units"] = "degrees_north" if x_axis == "lat" else "degrees_east"
-        x_label = "latitude (°N)" if x_axis == "lat" else "longitude (°E)"
+        # the ticks carry the unit and hemisphere (``125°W``): the title names the axis
+        x_label = "latitude" if x_axis == "lat" else "longitude"
     else:
         # rebuilt rather than renamed: a renamed coordinate shares its attrs with the
         # caller's own along coordinate, which the bookkeeping below (units, x_axis)

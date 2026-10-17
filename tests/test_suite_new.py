@@ -1,4 +1,4 @@
-"""``ocean-skill-suite new mid-run-check`` writes a suite that loads, from a run folder.
+"""``ocean-skill-suite new mid-run-check|input-check`` writes a suite that loads.
 
 Fake run folders are built in ``tmp_path`` in the two layouts C-Star writes on the HPC
 (PACMED: one task per month; CCS: named tasks plus a gathered ``rst_files/`` folder):
@@ -24,7 +24,13 @@ RST = "output_rst.{}.nc"
 
 def _grid(path: Path, n_eta: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    xr.Dataset({"h": (("eta_rho", "xi_rho"), np.zeros((n_eta, 3)))}).to_netcdf(path)
+    dims, shape = ("eta_rho", "xi_rho"), (n_eta, 3)
+    lat, lon = np.meshgrid(
+        np.linspace(10, 20, n_eta), np.linspace(120, 125, 3), indexing="ij"
+    )
+    xr.Dataset(
+        {"h": (dims, np.zeros(shape)), "lon_rho": (dims, lon), "lat_rho": (dims, lat)}
+    ).to_netcdf(path)
 
 
 def _task(root: Path, task: str, stamps: list[str], n_eta: int = 962, grid="a_grid.nc"):
@@ -52,10 +58,10 @@ def pacmed(tmp_path: Path, workplan: bool = True) -> Path:
 
 
 def ccs(tmp_path: Path) -> Path:
-    """Named tasks (674 rows) with a gathered ``rst_files/`` folder, no workplan."""
+    """Named tasks (673 rows, prime) with a gathered ``rst_files/``, no workplan."""
     root = tmp_path / "ccs_run"
-    _task(root, "jan_1wk", ["20130102000000", "20130103000000"], 674, "ccs_grid.nc")
-    _task(root, "feb_ccs", ["20130201000000"], 674, "ccs_grid.nc")
+    _task(root, "jan_1wk", ["20130102000000", "20130103000000"], 673, "ccs_grid.nc")
+    _task(root, "feb_ccs", ["20130201000000"], 673, "ccs_grid.nc")
     for s in ("20130102000000", "20130201000000"):
         (root / "tasks" / "rst_files").mkdir(exist_ok=True)
         (root / "tasks" / "rst_files" / RST.format(s)).touch()
@@ -145,8 +151,12 @@ def test_no_restarts_is_an_error(tmp_path, capsys):
     assert rc == 2 and not out.exists() and "--files" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("rows, expected", [(962, 74), (674, None)])
-def test_subchunk_is_the_largest_divisor_in_range(tmp_path, rows, expected):
+@pytest.mark.parametrize(
+    "rows, expected",
+    [(962, 74), (1346, 673), (674, 337), (673, None), (30, None)],
+)
+def test_subchunk_divides_eta_rho(tmp_path, rows, expected):
+    """A divisor in range wins (962 -> 74), else the smallest one of 32 or more."""
     grid = tmp_path / "g.nc"
     _grid(grid, rows)
     sub, n = new.pick_subchunk(grid)
@@ -210,3 +220,114 @@ def test_the_generated_suite_has_the_template_pages(tmp_path):
 def test_quoting_keeps_odd_paths_loadable():
     for odd in ("/a b/c", "/a:b/c", "/a #b", "123", "yes", "/ok/path_1.nc", "*x"):
         assert yaml.safe_load(new._q(odd)) == odd
+
+
+def _nc(path: Path, name: str, dims: tuple[str, ...]) -> None:
+    """Write a netCDF with one variable ``name`` of size-2 dimensions ``dims``."""
+    data = {name: (dims, np.zeros((2,) * len(dims)))}
+    xr.Dataset(data, coords={dims[0]: np.arange(2)}).to_netcdf(path)
+
+
+def inputs(tmp_path: Path, restart: bool) -> Path:
+    """Build an ``input_datasets`` folder, PACMED-like (restart IC) or CCS-like."""
+    root = tmp_path / ("pac" if restart else "ccs")
+    rows = ["eta_rho", "xi_rho"]
+    folder = root / "tasks" / "first" / "input" / "input_datasets"
+    _grid(folder / "x_grid.nc", 1346)
+    xr.Dataset(
+        {
+            "temp_south": (("bry_time", "xi_rho"), np.zeros((2, 2))),
+            "temp_west": (("bry_time", "eta_rho"), np.zeros((2, 2))),
+        }
+    ).to_netcdf(folder / "x_boundary-physics_201101.nc")
+    (folder / "x_boundary-physics_201102.nc").touch()
+    _nc(folder / "x_surface-physics_201101.nc", "Tair", ["time", *rows])
+    _nc(folder / "x_surface-bgc-mbl_co2_2011.nc", "pco2_air", ["xco2_time", *rows])
+    _nc(folder / "x_surface-bgc-unified_clim.nc", "iron", ["month", *rows])
+    for f in ("x_boundary-bgc-esper-alk_201101", "x_boundary-bgc-unified-chl_clim",
+              "x_river", "x_nesting"):  # fmt: skip
+        (folder / f"{f}.nc").touch()
+    ic = "output_rst.20101231234500" if restart else "x_initial_conditions"
+    (folder / f"{ic}.nc").touch()
+    return root
+
+
+@pytest.mark.parametrize("restart", [True, False])
+def test_input_check_finds_the_inputs(tmp_path, restart):
+    root = inputs(tmp_path, restart)
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    suite = SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
+    assert suite.name == "input-check" and suite.defaults["test"] == "my_run_ic"
+    assert "&id" not in out.read_text()  # rows share no dicts, so no YAML anchors
+    kinds = {f.name: f.kind for f in suite.refresh.forcing}
+    assert kinds["my_run_bry_phys"] == "boundary" and kinds["my_run_river"] == "river"
+    assert ("my_run_ic" in kinds) == (not restart)  # a restart IC is a plain source
+    assert [s.name for s in suite.refresh.sources] == (["my_run_ic"] if restart else [])
+    boundary = {f.name: f for f in suite.refresh.forcing}["my_run_bry_bgc"]
+    assert boundary.files.endswith("x_boundary-bgc-esper-alk_??????.nc")
+    assert boundary.sides == ["south", "west"]
+    d = suite.defaults
+    assert (d["forcing_time"], d["forcing_month"]) == ("2011-01", 1)
+    assert [s["name"] for s in d["sides"]] == ["south", "west"]
+    assert d["sides"][0]["transect"] == {"eta_rho": 0}
+    assert d["sides"][1]["transect"] == {"xi_rho": 0}
+    assert d["sides"][0]["label"] == "lon 120.0 to 125.0, lat 10.0 to 10.0"
+    assert [s["vars"] for s in d["surface"]] == [["Tair"], ["pco2_air"]]
+    co2 = kinds["my_run_surf_bgc_mbl_co2"]
+    assert co2 == "surface" and [s["vars"] for s in d["surface_clim"]] == [["iron"]]
+    entries = {f.name: f for f in suite.refresh.forcing}
+    assert entries["my_run_surf_bgc_mbl_co2"].time_coord == "xco2_time"
+    assert entries["my_run_surf_bgc_unified_clim"].climatology
+    if restart:  # 1346 rows = 2 x 673
+        assert suite.refresh.sources[0].subchunk == {
+            "s_rho": 1,
+            "s_w": 1,
+            "eta_rho": 673,
+        }
+
+
+def test_input_check_takes_an_inputs_folder_and_keeps_the_pages(tmp_path):
+    folder = inputs(tmp_path, True) / "tasks" / "first" / "input" / "input_datasets"
+    out = tmp_path / "suite.yaml"
+    argv = [
+        "new",
+        "input-check",
+        "--inputs",
+        str(folder),
+        "--name",
+        "r",
+        "-o",
+        str(out),
+    ]
+    argv += ["--output-dir", str(tmp_path / "d"), "--shared-catalogs", str(tmp_path)]
+    assert new.main(argv) == 0 and "run_info" not in yaml.safe_load(out.read_text())
+    shipped = new.TEMPLATE.with_name("input-check.yaml").read_text()
+    assert yaml.safe_load(out.read_text())["pages"] == yaml.safe_load(shipped)["pages"]
+    assert new.main(["new", "input-check", "--name", "r", "--output-dir", "d"]) == 2
+
+
+def test_input_check_picks_the_task_whose_restarts_start_first(tmp_path):
+    root = tmp_path / "run"
+    for task, stamp in (("a_late", "20130201000000"), ("z_early", "20130102000000")):
+        _task(root, task, [stamp])
+    assert new._first_inputs([root]).parents[1].name == "z_early"
+
+
+def test_input_check_pages_expand_one_per_open_side(tmp_path):
+    from ocean_skill.workflows import pages
+
+    rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
+    assert rc == 0
+    titles = [
+        p.title
+        for p in pages.expand(
+            SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
+        )
+    ]
+    for side in ("South", "West"):
+        assert (
+            f"{side} boundary — temperature and salinity vs WOA23 (2011-01)" in titles
+        )
+    assert not any(t.startswith(("North", "East")) for t in titles)
+    assert "Surface forcing — surface physics (2011-01 mean)" in titles

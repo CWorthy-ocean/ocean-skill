@@ -138,9 +138,12 @@ The fingerprint (`osk.catalog.fingerprint(name)`) is read from the catalog *file
 from the data: the entry's reader as written — its class and arguments, the URLs and
 paths in them, any chained transforms (`.tail()`, `.sel(...)`, …), the data it points
 at — plus the metadata that changes what a read returns (`time_zone`, `standard_names`,
-`axes`, `depth_convention`, …). Prose (`description`, `title`, `tags`) and what the build
+`axes`, `depth_convention`, …). Prose (`description`, `title`, `label`, `tags`) and what the build
 probe derived from the data (extents, time coverage, the variable list) are left out, so
-re-describing an entry does not throw its results away.
+re-describing an entry does not throw its results away. (`label` is the short name a
+figure's column titles and legends use for the source -- `label: Holte & Talley` -- in
+place of the entry name; a `<dataset>_<variable>_<period>` name such as
+`woa23_nitrate_month12` is spelled `WOA23 nitrate Dec` without one.)
 
 So **redefining an entry under the same name misses cleanly**: rewrite a catalog so
 `cast0000` points at a different CSV, or `model_win` at a different time window, and the

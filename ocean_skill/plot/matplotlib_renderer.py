@@ -19,6 +19,7 @@ from __future__ import annotations
 import contextlib
 import functools
 from collections.abc import Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -786,6 +787,167 @@ def _align_colorbars(fig, renderer=None) -> None:
         else:
             width = thickness[False] / fig_w
             cax.set_position([near + gap[False] / fig_w, lo, width, hi - lo])
+
+
+#: Air (display points) kept between a colorbar's labelling and the panel beside it.
+_CBAR_CLEARANCE = 2.0
+
+#: Air kept between two tick labels on one colorbar, as a multiple of the type's size.
+_TICK_LABEL_GAP = 0.3
+
+
+def _thin_colorbar_ticks(fig, renderer) -> bool:
+    """Drop every second tick of a colorbar whose tick labels run into each other.
+
+    A bar ticks at round values whatever its length (:func:`_round_ticks`), which is
+    right for a bar the width of a page and runs ``−15−10 −5`` together on the 1.5-inch
+    bar under a narrow map. Measured after the layout has settled, when the bar's length
+    is known; only a bar whose labels actually crowd is touched, and the surviving ticks
+    keep their round values. Returns whether any bar was thinned, so the caller measures
+    again.
+    """
+    from matplotlib.ticker import FixedLocator
+
+    changed = False
+    for cax in fig.axes:
+        if not getattr(cax, "_osk_cbar_parents", None):
+            continue
+        horizontal = cax._osk_cbar_horizontal
+        axis = cax.xaxis if horizontal else cax.yaxis
+        if not isinstance(axis.get_major_locator(), FixedLocator):
+            continue  # a bar that ticks itself (the dates of a time bar) is left to it
+        labels = [t for t in axis.get_ticklabels() if t.get_visible() and t.get_text()]
+        if len(labels) < 3:
+            continue
+        boxes = [t.get_window_extent(renderer) for t in labels]
+        size_px = labels[0].get_fontsize() * fig.dpi / 72.0
+        # the clear space between two boxes on one line, whichever way the axis runs
+        gaps = [
+            max(b.x0 - a.x1, a.x0 - b.x1)
+            if horizontal
+            else max(b.y0 - a.y1, a.y0 - b.y1)
+            for a, b in pairwise(boxes)
+        ]
+        if min(gaps) >= _TICK_LABEL_GAP * size_px:
+            continue
+        ticks = list(axis.get_ticklocs())
+        texts = [t.get_text() for t in axis.get_ticklabels()]
+        if len(ticks) != len(texts):  # pragma: no cover - a locator with no fixed ticks
+            continue
+        # every second tick, starting so that zero (a difference bar's anchor) survives
+        zero = next((i for i, t in enumerate(ticks) if t == 0), 0)
+        keep = slice(zero % 2, None, 2)
+        set_ticks = cax.set_xticks if horizontal else cax.set_yticks
+        set_ticks(ticks[keep], labels=texts[keep])
+        changed = True
+    return changed
+
+
+def _clear_colorbar_labels(fig, renderer) -> bool:
+    """Pull a colorbar's labelling back from any panel it has run into.
+
+    A bar sits in the gutter between two columns of maps, and what is drawn beside it --
+    tick labels, then the axis label (``[PSU]``, ``test − reference [mmol/m³]``) -- is
+    as wide as its text, not as wide as the gutter: four-character ticks and a label
+    that has not been shortened leave the label on top of the next map's frame. Measured
+    after the layout and the bars' own alignment have settled, since that is when the
+    gutter's width is known.
+
+    For each bar whose labelling reaches into another panel, the label is first moved
+    closer to the ticks (down to a point of padding), then the bar is moved toward its
+    own panel (by at most half the gap between them), and what is left is taken out of
+    the bar's own thickness, never below half of it. Bars that already clear their
+    neighbours are not touched. Returns whether anything moved, so the caller measures
+    again.
+
+    A bar is only moved once the layout engine has been stood down (see
+    :func:`_align_colorbars`); under a live one the move would be undone on the next
+    draw, so there is nothing to do.
+    """
+    if fig.get_layout_engine() is not None:
+        return False
+    caxes = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
+    if not caxes:
+        return False
+    panels = [
+        ax
+        for ax in fig.axes
+        if ax.get_visible() and not getattr(ax, "_osk_cbar_parents", None)
+    ]
+    # display pixels, like every extent measured below (not inches)
+    fig_w, fig_h = fig.bbox.width, fig.bbox.height
+    px_per_pt = fig.dpi / 72.0
+    changed = False
+    for cax in caxes:
+        horizontal = cax._osk_cbar_horizontal
+        axis = cax.xaxis if horizontal else cax.yaxis
+        ticks = cax.get_xticklabels() if horizontal else cax.get_yticklabels()
+        texts = [t for t in (axis.label, *ticks) if t.get_visible() and t.get_text()]
+        if not texts:
+            continue
+        boxes = [t.get_window_extent(renderer) for t in texts]
+        bar = cax.get_window_extent(renderer)
+        owned = set(cax._osk_cbar_parents)
+        clearance = _CBAR_CLEARANCE * px_per_pt
+        if horizontal:
+            # a bar below its panels: its labelling reaches *down* into the next row
+            reach = min(b.y0 for b in boxes)
+            hit = [
+                p.get_window_extent(renderer).y1
+                for p in panels
+                if p not in owned
+                and (b := p.get_window_extent(renderer)).x1 > bar.x0
+                and b.x0 < bar.x1
+                and b.y1 <= bar.y0
+                and b.y1 > reach - clearance
+            ]
+            overlap = max(hit) - reach + clearance if hit else 0.0
+        else:
+            # a bar beside its panels: its labelling reaches *right*, into the next one
+            reach = max(b.x1 for b in boxes)
+            hit = [
+                b.x0
+                for p in panels
+                if p not in owned
+                and (b := p.get_window_extent(renderer)).y1 > bar.y0
+                and b.y0 < bar.y1
+                and b.x0 >= bar.x0
+                and b.x0 < reach + clearance
+            ]
+            overlap = reach + clearance - min(hit) if hit else 0.0
+        if overlap <= 0:
+            continue
+        # first closer to the ticks (the label's padding), then a thinner bar
+        pad = float(axis.labelpad)
+        taken = min(max(pad - 1.0, 0.0), overlap / px_per_pt)
+        if taken > 0:
+            axis.labelpad = pad - taken
+            overlap -= taken * px_per_pt
+        parents = [p.get_window_extent(renderer) for p in cax._osk_cbar_parents]
+        if overlap > 0:
+            # then toward its own panel, by at most half the gap between them
+            pos = cax.get_position()
+            if horizontal:
+                room = max((min(b.y0 for b in parents) - bar.y1) / 2.0, 0.0)
+                move = min(room, overlap)
+                cax.set_position([pos.x0, pos.y0 + move / fig_h, pos.width, pos.height])
+            else:
+                room = max((bar.x0 - max(b.x1 for b in parents)) / 2.0, 0.0)
+                move = min(room, overlap)
+                cax.set_position([pos.x0 - move / fig_w, pos.y0, pos.width, pos.height])
+            overlap -= move
+        if overlap > 0:
+            # and what is left out of the bar's own thickness, never below half of it
+            pos = cax.get_position()
+            if horizontal:
+                thinner = max(pos.height - overlap / fig_h, pos.height * 0.5)
+                top = pos.y0 + pos.height
+                cax.set_position([pos.x0, top - thinner, pos.width, thinner])
+            else:
+                thinner = max(pos.width - overlap / fig_w, pos.width * 0.5)
+                cax.set_position([pos.x0, pos.y0, thinner, pos.height])
+        changed = True
+    return changed
 
 
 def _level_row_gaps(fig, axes) -> None:
@@ -3223,6 +3385,77 @@ def _shrink_to_fit(text, limit_px: float, renderer, *, along: str = "width") -> 
         text.set_fontsize(shrunk)
 
 
+#: Clear space left between two longitude labels, as a multiple of one label's width
+#: (``"170°W"``): ``1.5`` is half a label of air between neighbours.
+_LON_LABEL_SPACING = 1.5
+
+#: The steps a re-spaced longitude axis may take, as multiples of a power of ten: 10,
+#: 15, 20, 30, 50, 60 or 90 degrees (or 0.5, 1.5, ... for a small domain), rather than
+#: the 25 or 100 a plain decimal ladder offers.
+_LON_STEPS = (1, 1.5, 2, 3, 5, 6, 9)
+
+
+def _longitude_step(span: float, count: int) -> float:
+    """Return the smallest round step that puts at most ``count`` ticks on ``span``."""
+    need = span / max(count, 1)
+    decade = 10.0 ** np.floor(np.log10(need))
+    return float(
+        min(
+            step * scale
+            for scale in (decade / 10.0, decade, decade * 10.0)
+            for step in _LON_STEPS
+            if step * scale >= need * (1 - 1e-9)
+        )
+    )
+
+
+def _thin_longitude_gridlines(fig, renderer) -> bool:
+    """Space each map's longitude gridlines so their labels fit the panel's width.
+
+    Cartopy picks about eight meridians whatever the panel's size, which is right for a
+    page-wide map and runs the labels of a narrow one together (``170°W160°W150°W``) --
+    the shape every tall, narrow-in-longitude domain is drawn at, and every panel in a
+    three-column row. The tick count here comes from the panel's *physical* width
+    instead: as many labels as fit with half a label of air between them, the spacing
+    then rounded to a round step by the locator.
+
+    Measured after the layout has settled, when each panel's width is known. A gridliner
+    whose labels already clear each other is left alone (cartopy's own choice stands),
+    and every panel of one width gets the same spacing, so a grid's meridians line up
+    whether or not a panel prints its labels. Returns whether anything was re-spaced,
+    in which case the caller measures again.
+    """
+    from cartopy.mpl.ticker import LongitudeLocator
+    from matplotlib.font_manager import FontProperties
+    from matplotlib.ticker import MultipleLocator
+
+    changed = False
+    for ax in fig.axes:
+        width_px = ax.get_window_extent(renderer).width
+        for gl in (a for a in ax.artists if hasattr(a, "xlocator")):
+            style = getattr(gl, "xlabel_style", None) or {}
+            size = style.get("size", style.get("fontsize", 8))
+            label_px, _, _ = renderer.get_text_width_height_descent(
+                "170°W", FontProperties(size=size), ismath=False
+            )
+            fit = int(width_px // (label_px * _LON_LABEL_SPACING))
+            # leave a locator the caller set (a Fixed/explicit one) alone: only the
+            # automatic one has a tick count to bring down
+            locator = gl.xlocator
+            if not isinstance(locator, LongitudeLocator) or fit < 1:
+                continue
+            # the span is all the step choice reads, so the axes' own x range (in the
+            # projection's coordinates, which a 180-centred frame offsets) counts the
+            # meridians cartopy is about to draw
+            lo, hi = sorted(ax.get_xlim())
+            drawn = [t for t in locator.tick_values(lo, hi) if lo <= t <= hi]
+            if len(drawn) <= fit:
+                continue
+            gl.xlocator = MultipleLocator(_longitude_step(hi - lo, fit))
+            changed = True
+    return changed
+
+
 def _fit_text_widths(fig, renderer=None) -> None:
     """Shrink any single label still too long for the thing it labels.
 
@@ -3247,6 +3480,9 @@ def _fit_text_widths(fig, renderer=None) -> None:
     if renderer is None:
         _measure(fig)
         renderer = fig.canvas.get_renderer()
+    if _thin_longitude_gridlines(fig, renderer):
+        # new meridians, so new labels: measured again before anything reads them
+        _measure(fig)
     fig_w_px = fig.get_size_inches()[0] * fig.dpi
 
     if (suptitle := getattr(fig, "_suptitle", None)) is not None:
@@ -3288,6 +3524,13 @@ def _fit_text_widths(fig, renderer=None) -> None:
             _shrink_to_fit(
                 row_label, box.height * _TEXT_FIT_FRACTION, renderer, along="height"
             )
+    # last, once every label is the size and shape it will be drawn at
+    if any(getattr(ax, "_osk_cbar_parents", None) for ax in fig.axes):
+        _measure(fig)
+        if _thin_colorbar_ticks(fig, fig.canvas.get_renderer()):
+            _measure(fig)
+        if fig.get_layout_engine() is None:
+            _clear_colorbar_labels(fig, fig.canvas.get_renderer())
 
 
 def _centre_suptitle(fig, renderer=None) -> None:
@@ -5451,6 +5694,25 @@ def _draw_casts(
         top.spines["top"].set_visible(False)
 
 
+def _degree_x_ticks(ax, geometry) -> None:
+    """Spell a section's longitude/latitude ticks the way a map's gridlines are.
+
+    A path drawn against its own longitude runs 170 to 190 across the antimeridian and a
+    0-360 model's runs 237, so the bare numbers read as neither convention; the ticks
+    become ``170°E``/``170°W`` and ``40°N``/``20°S`` (cartopy's own spelling,
+    :mod:`ocean_skill.plot._geo_labels`), and the axis title drops the hemisphere it
+    used to carry.
+    Any other x axis (kilometres along a path) is left alone.
+    """
+    from matplotlib.ticker import FuncFormatter
+
+    from ocean_skill.plot._geo_labels import format_lat, format_lon
+
+    spell = {"lon": format_lon, "lat": format_lat}.get(geometry.x_axis)
+    if spell is not None:
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: spell(value)))
+
+
 def boundary_corners(values, x_name: str) -> list[float]:
     """Kilometres along a section at which it turns a domain-boundary corner.
 
@@ -5571,6 +5833,7 @@ def _draw_section(
             fontsize=scale["contour_label"],
         )
     ax.set_xlabel(geometry.x_label, fontsize=scale["axes_label"])
+    _degree_x_ticks(ax, geometry)
     if ylabel:
         ax.set_ylabel(geometry.y_label, fontsize=scale["axes_label"])
     ax.tick_params(axis="both", labelsize=scale["tick_label"])
@@ -8185,7 +8448,7 @@ def section_row_grid(
     90.0°W``) is part of the title the same way :func:`section_row` has it, with one
     twist a single row does not need. If every row runs along the *same* path, the
     note joins the overall title once. If the paths differ, each row's own note rides
-    on that row's test-panel title instead (``model (mean over 180–200°E)``), so
+    on that row's test-panel title instead (``model (mean over 180°E–160°W)``), so
     nothing that distinguishes the rows is lost to the shared title.
 
     There is no ``domain``, ``region`` or ``gridline_kwargs``: a section has no map to

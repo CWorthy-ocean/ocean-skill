@@ -536,9 +536,9 @@ def test_a_slab_section_is_drawn_against_latitude(patched_woa):
 
     f = _field(patched_woa())
     field, geometry = prepare_section(f.data)
-    assert geometry.x_label == "latitude (°N)"
+    assert geometry.x_label == "latitude"
     assert geometry.x_axis == "lat"
-    assert geometry.path_note == "mean over 180–200°E"
+    assert geometry.path_note == "mean over 180°E–160°W"
     np.testing.assert_allclose(
         field[geometry.x_name].isel(depth=0).values, np.arange(-30.0, 31.0, 10.0)
     )
@@ -553,7 +553,7 @@ def test_a_lat_slab_is_labelled_by_longitude(patched_woa):
         aggregate=MEAN_LAT,
     )
     _, geometry = prepare_section(f.data)
-    assert geometry.x_label == "longitude (°E)"
+    assert geometry.x_label == "longitude"
     assert geometry.path_note == "mean over 10°S–5°N"
 
 
@@ -568,7 +568,7 @@ def test_an_equatorial_transect_section_reads_longitude(patched_woa):
         cache=False,
     )
     field, geometry = prepare_section(f.data)
-    assert geometry.x_label == "longitude (°E)"
+    assert geometry.x_label == "longitude"
     assert geometry.x_axis == "lon"
     assert field["distance"].attrs["units"] == "degrees_east"
     x = np.unique(field["distance"].values)

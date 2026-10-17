@@ -1,9 +1,10 @@
-# Mid-run check of the PACMED pyesper 2015 run: a quick look while the simulation is
-# still writing restart files. Domain-mean time series over the whole run so far, the
-# alkalinity extremes and their time series, the latest restart at the surface and 200 m
-# (model only), and the latest month's observation comparisons (satellite chlorophyll,
-# Holte & Talley mixed layer depth, WOA23 nutrients, GLODAPv2 carbon), organized into
-# PDF sections with divider pages.
+# Mid-run check of a C-Star ROMS run: a quick look while the simulation is still writing
+# restart files. A run-health pass over the output itself (negative or impossible values,
+# broken fields, steps and drift in domain totals, plankton spin-up), domain-mean time
+# series over the whole run so far, the alkalinity extremes and their time series, the
+# latest restart at the surface and 200 m (model only), and the latest month's
+# observation comparisons (satellite chlorophyll, Holte & Talley mixed layer depth, WOA23
+# nutrients, GLODAPv2 carbon), organized into PDF sections with divider pages.
 #
 # Run it:
 #     ocean-skill-run mid-run-check.yaml --list    # check the page list first
@@ -37,9 +38,9 @@
 # once under defaults: below.
 #
 # This file is the shipped `mid-run-check` suite, the one copy `ocean-skill-suite new`
-# starts from. Copied by hand it runs as the suite for the PACMED run it was written
-# for; `ocean-skill-suite new` rewrites the block between the "setup" markers below for
-# your run (names, paths, dates, forcing files) and keeps everything else as it is.
+# starts from: it rewrites the block between the "setup" markers below for your run
+# (names, paths, dates) and keeps everything else as it is. The values in that block
+# are an example (a PACMED run on Anvil).
 # By hand, edit that block: mainly refresh: (output and grid paths), defaults.test, the
 # dates, output_dir, cache_dir and catalog_search_paths.
 
@@ -82,7 +83,8 @@ defaults:
   # Every page's plot: options start from these (a page's own plot: wins). Robust color
   # limits clip each panel to its central 80% (difference panels too), so coastal and
   # river-mouth extremes don't wash out the open ocean.
-  plot: {robust: true}
+  # colorbar_label_clipped: a clipped colorbar's label also gives the true min and max.
+  plot: {robust: true, colorbar_label_clipped: true}
   depths: [surface, 100]
   # Depths of the latest-snapshot pages, one page each.
   snapshot_depths: [surface, 200]
@@ -96,6 +98,40 @@ pages:
     field: {variables: [h]}
     caption: Grid depth h (m).
     plot: {robust: false}           # the full depth range, trenches included
+
+  # -- run health -------------------------------------------------------------------
+  - title: "Run health"
+    section: >-
+      Checks of the model output itself, independent of observations: every variable at
+      every level of every restart in the window defaults.period. The summary lists
+      problems first (negative or impossible values, fields that are all zero or copies
+      of another field, sudden steps in a tracer's total) and then the largest drifts.
+      Totals are volume integrals over the whole domain; segment boundaries of the run's
+      jobs are shaded. One pass over the output feeds all four pages, and each restart's
+      results are cached, so a later check reads only the new restarts.
+
+  - title: "Run health — summary"
+    health: {time: "{period}", draw: summary}
+
+  - title: "Run health — integrity of every variable"
+    health: {time: "{period}", draw: integrity}
+    caption: >-
+      Per variable, over ocean cells at every level: the worst share of cells negative or
+      outside physical bounds over the window (and when), the newest restart's share, and
+      where the minimum and maximum occur.
+
+  - title: "Run health — domain totals and deep means"
+    health: {time: "{period}", draw: inventory}
+    caption: >-
+      Volume-integrated totals (percent change from the first restart), kinetic energy,
+      the volume of water with oxygen below 60 and 20 mmol/m³, and volume means below
+      1000 m. Shading marks the run's job segments.
+
+  - title: "Run health — plankton spin-up"
+    health: {time: "{period}", draw: plankton}
+    caption: >-
+      Domain totals of each plankton group's carbon, chlorophyll, phosphorus and iron,
+      and the ratios C:P and C:Chl of those totals.
 
   # -- domain-wide trends ---------------------------------------------------------
   - title: "Domain-wide trends"
@@ -176,10 +212,10 @@ pages:
   - title: "Chlorophyll and mixed layer depth vs observations"
     section: >-
       Chlorophyll: the latest snapshot against the same day of the Copernicus gap-free
-      L4 satellite chlorophyll product (chl_gapfree_my_daily_geo). Mixed layer depth:
+      L4 satellite chlorophyll product (daily). Mixed layer depth:
       the model's density-threshold depth (0.03 kg/m3 change in sigma-theta from
       10 m) in the latest month against that calendar month of the Holte and Talley
-      Argo climatology (mld_dt_mean, which uses the same criterion).
+      Argo climatology (its density-threshold mixed layer depth, the same criterion).
 
   # Untested on this run: if it skips with 'window matched no data', check that the
   # latest restart's day exists in chl_gapfree_my_daily_geo.

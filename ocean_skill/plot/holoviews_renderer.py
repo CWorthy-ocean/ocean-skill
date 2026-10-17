@@ -371,6 +371,27 @@ def _index_on(da, *names):
     return da.swap_dims(swaps) if swaps else da
 
 
+def _degree_formatter(da, name):
+    """Return a bokeh tick formatter for a coordinate in degrees, else ``None``.
+
+    ``degrees_east``/``degrees_north`` on the coordinate (what
+    :func:`ocean_skill.plot.section.prepare_section` sets on a section's longitude or
+    latitude axis) get the same ``125°W``/``40°N`` spelling the static renderer's ticks
+    have (:mod:`ocean_skill.plot._geo_labels`); any other axis keeps bokeh's own.
+    """
+    from ocean_skill.plot._geo_labels import lat_tick_js, lon_tick_js
+
+    coord = da.coords.get(name)
+    code = {"degrees_east": lon_tick_js, "degrees_north": lat_tick_js}.get(
+        str(coord.attrs.get("units", "")) if coord is not None else ""
+    )
+    if code is None:
+        return None
+    from bokeh.models import CustomJSTickFormatter
+
+    return CustomJSTickFormatter(code=code)
+
+
 def _quadmesh(
     da,
     *,
@@ -482,6 +503,10 @@ def _quadmesh(
         # (position, label) pairs, the same Jan..Dec spelling the static
         # renderer's mesh draws.
         opts["xticks"] = list(xticks)
+    elif not geo and (formatter := _degree_formatter(da, x)) is not None:
+        # a section drawn against its own longitude/latitude: ticks spelled as the
+        # static renderer (and a map's gridlines) spell them, 125°W rather than -125
+        opts["xformatter"] = formatter
     if geo:
         projection = _output_projection(da)
         opts |= {"geo": True, "projection": projection}
@@ -7419,6 +7444,7 @@ def _target(
         _target_rings,
         _target_xy,
         _warn_mixed_variables,
+        default_marker_by,
         pretty_level,
     )
 
@@ -7478,6 +7504,9 @@ def _target(
         ]
         if not color_by and not marker_by:
             color_by = "group"
+    # the same default the static target draws: depth rides on the marker shape when a
+    # colour group spans several depths
+    marker_by = default_marker_by(recs, color_by, marker_by)
     if not normalize:
         _warn_mixed_variables(recs, "target")
     xy = np.array([_target_xy(r, normalize) for r in recs])

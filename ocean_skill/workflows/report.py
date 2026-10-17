@@ -238,6 +238,12 @@ def _tight_bbox(fig: Any, stem: str) -> Any:
     """
     from ocean_skill.plot.matplotlib_renderer import _measure
 
+    if not hasattr(fig.canvas, "get_renderer"):
+        # A bare ``Figure()`` (the run-health and river pages draw these) has only the
+        # base canvas, which cannot measure text; attach an Agg canvas to lay it out.
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+        FigureCanvasAgg(fig)
     _measure(fig)
     tight = fig.get_tightbbox(fig.canvas.get_renderer())
     if _overflows(tight):

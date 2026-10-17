@@ -144,6 +144,7 @@ refresh:                              # optional: rebuild the model's kerchunk r
     - name: base_bry                  # kind: boundary -> base_bry_south, ..., base_bry_west
       kind: boundary                  # boundary (build.add_boundary_sources) | surface (build.add_forcing_source)
                                       # | initial_conditions (build.add_initial_conditions)
+                                      # | river (build.add_river_source, for rivers: pages)
       files: [y2011/*_boundary-physics_*.nc, y2012/*_boundary-physics_*.nc]  # glob or globs, joined in order
       grid: input/grid.nc
       ref: refs/base_bry.parquet      # optional: kerchunk reference, rebuilt only when the files change
@@ -164,6 +165,10 @@ refresh:                              # optional: rebuild the model's kerchunk r
       kind: initial_conditions
       files: input/*_initial_conditions_*.nc   # exactly one file
       grid: input/grid.nc
+    - name: river_forcing             # kind: river -> one entry, river_forcing, read by a rivers: page
+      kind: river
+      files: input/*_river*.nc        # glob(s), joined along river_time
+      grid: input/grid.nc             # where each river's mouth is placed; ref: optional, as above
 
 defaults:                             # merged into every page; a page's own keys win
   test: pac_dt_ramp                   # exactly one source -- required for time: latest/month: run
@@ -171,7 +176,8 @@ defaults:                             # merged into every page; a page's own key
 
 pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
-    field: {...}          # exactly one of field: / compare: / summary: / section: / XY: / TS:
+    field: {...}          # exactly one of field: / compare: / summary: / section: / XY: / TS: / health: / rivers:
+    health: {draw: summary}   # run-health diagnostics (see below); rivers: is the river-input equivalent
     section: "..."         # a text-only divider page in report.pdf (see below): no for_each:/then:/plot:
     XY: {members: {...}, x: ..., y: ...}   # one variable against another (see below); TS: is XY: with x/y fixed
     for_each: {...}        # optional: fan this one page into several (see below)
@@ -643,6 +649,44 @@ file). Records are pooled once per compare page, however many figures the page w
 into with `plot: {max_rows}`, and a comparison dropped as all-NaN is not pooled at all
 -- so a `--self-check` or partial run's summary counts exactly the comparisons its
 compare pages drew.
+
+### `health:` and `rivers:` -- run diagnostics
+
+```yaml
+- title: "Run health -- summary"
+  health: {time: "{period}", draw: summary}
+- title: "Run health -- integrity"
+  health: {draw: integrity}
+- title: "River inputs -- map"
+  rivers: {source: river_forcing, time: "{forcing_time}", draw: map}
+```
+
+Pages that read what the run itself wrote rather than compare it with anything:
+`health:` draws the figures of `osk.health(source)` (blow-up and conservation checks, an
+inventory of the output, plankton diagnostics), `rivers:` those of `osk.rivers(source)`
+(river forcing: where the rivers enter, how big and how variable they are). One page is one
+`draw:`; several pages with the same source and time share one computation, done by the
+first of them, so a run's read is paid once.
+
+- **`source:`** -- a catalog source; default `defaults.test`. A `rivers:` page names a
+  river-forcing entry (`refresh.forcing` with `kind: river`).
+- **`time:`** -- the window to examine, as on a `field:` page (`{min, max}`, a period
+  string, `latest`). On `health:` it is pinned to the source's time axis: no `time:` is the
+  whole run, and a window with only a `min` or only a `max` takes the run's own end for the
+  other, so the page caches by the same rule as a `field:` page (see Caching). `rivers:`
+  passes it as written.
+- **`draw:`** -- `health:`: `summary` (default), `integrity`, `inventory` or `plankton`;
+  `rivers:`: `map` (default), `histograms`, `sample` or `extremes`. Anything else is a
+  schema error (a value still holding a `{placeholder}` is checked once it is filled).
+
+`for_each:` and `caption:` work as on any figure page; `then:` and `contours:` are schema
+errors, and `plot:` has no effect (these figures take no options). The restart "joins" a
+health figure marks are the start dates of the run's job segments, read from the C-Star
+workplan found as for the cover page (see Cover page) -- none are marked when it cannot be
+found. `draw: integrity` and `draw: extremes` also write their table to
+`metrics/<suite name>_<page title slug>.csv`, and the problems found go in the page's
+`results` in `manifest.json`; neither adds to the final `summary:` page. A page with nothing
+to draw (no plankton variables in the run) is skipped with that reason.
 
 ### `section:` -- a divider page
 

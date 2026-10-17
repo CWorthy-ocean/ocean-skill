@@ -306,6 +306,7 @@ _FORCING_KEYS = {
     "boundary": ("variables", "climatology", "sides", "strip", "ref", "subchunk"),
     "surface": ("variables", "climatology", "time_coord", "ref", "subchunk"),
     "initial_conditions": ("variables",),
+    "river": ("ref",),
 }
 
 
@@ -317,7 +318,8 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
     ``<name>_<side>``, plus ``<name>_strip`` when ``strip:`` names sides),
     :func:`ocean_skill.build.add_forcing_source` (``kind: surface``) or
     :func:`ocean_skill.build.add_initial_conditions` (``kind: initial_conditions``, one
-    entry from one file) write, alongside the model output ``refresh.sources``
+    entry from one file) or :func:`ocean_skill.build.add_river_source` (``kind:
+    river``, one entry) write, alongside the model output ``refresh.sources``
     rebuilt. The
     entries are rebuilt on every run. An entry with a ``ref`` reads a kerchunk
     reference kept there, which the builder rebuilds only when the matched files
@@ -341,6 +343,7 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         add_boundary_sources,
         add_forcing_source,
         add_initial_conditions,
+        add_river_source,
         save,
     )
 
@@ -348,6 +351,7 @@ def _refresh_forcing(spec: list[dict[str, Any]], catalog_path: str | Path) -> No
         "boundary": add_boundary_sources,
         "surface": add_forcing_source,
         "initial_conditions": add_initial_conditions,
+        "river": add_river_source,
     }
 
     catalog_path = Path(catalog_path).expanduser()
@@ -1449,6 +1453,14 @@ def run_suite(
         pooled_records: list[dict[str, Any]] = []
         # where the records since the last ``section:`` divider begin
         section_start = 0
+        # what ``health:``/``rivers:`` pages share: the diagnostic objects, computed by
+        # the first page that needs each, and the job-segment start dates, read from the
+        # workplan only when a health page builds (a failure there is that page's, not
+        # the report's)
+        run_context: dict[str, Any] = {
+            "joins": lambda: cover.segment_starts(suite, path),
+            "objects": {},
+        }
 
         from ocean_skill.workflows.report import PDF_DPI, PNG_DPI, SMOKE_DPI, PdfReport
 
@@ -1503,6 +1515,11 @@ def run_suite(
                                 if page.kind == "summary"
                                 and page.kwargs.get("scope") == "section"
                                 else pooled_records
+                            ),
+                            **(
+                                {"run_context": run_context}
+                                if page.kind in ("health", "rivers")
+                                else {}
                             ),
                         )
                         error = None

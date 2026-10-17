@@ -20,6 +20,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 __all__ = [
     "COMPARE_DRAWS",
+    "HEALTH_DRAWS",
+    "RIVER_DRAWS",
     "SUMMARY_KINDS",
     "SUMMARY_SCOPES",
     "PageConfig",
@@ -30,7 +32,16 @@ __all__ = [
 ]
 
 #: The mutually exclusive page kinds, in the order their error messages list them.
-_PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
+_PAGE_KINDS = (
+    "field",
+    "compare",
+    "summary",
+    "section",
+    "XY",
+    "TS",
+    "health",
+    "rivers",
+)
 
 #: The ``draw:`` values a ``compare:`` page accepts: which
 #: :class:`~ocean_skill.comparison.ComparisonSet` method draws it, with the page's
@@ -38,6 +49,19 @@ _PAGE_KINDS = ("field", "compare", "summary", "section", "XY", "TS")
 #: default) is the per-family ``.plot()``; the rest each draw the whole set as one
 #: figure.
 COMPARE_DRAWS = ("plot", "metrics_series", "target", "taylor")
+
+#: The ``draw:`` values a ``health:`` page accepts: which figures of
+#: :class:`ocean_skill.run_health.RunHealth` it draws. The single definition -- the
+#: module imports it from here.
+HEALTH_DRAWS = ("summary", "integrity", "inventory", "plankton")
+
+#: The ``draw:`` values a ``rivers:`` page accepts, for
+#: :class:`ocean_skill.river_inputs.RiverInputs`. The single definition -- the module
+#: imports it from here.
+RIVER_DRAWS = ("map", "histograms", "sample", "extremes")
+
+#: The diagnostic page kinds and the ``draw:`` values each accepts.
+_DIAGNOSTIC_DRAWS = {"health": HEALTH_DRAWS, "rivers": RIVER_DRAWS}
 
 
 #: What a ``summary:`` page's ``kind:`` may name: the overviews
@@ -107,6 +131,23 @@ def check_draw(title: str, draw: str, contours: Any) -> None:
         )
 
 
+def check_diagnostic_draw(title: str, kind: str, draw: Any) -> None:
+    """Raise unless ``draw`` names one of the figures a ``health:``/``rivers:`` page draws.
+
+    The one check of such a page's ``draw:``, called at load time (a value still holding
+    a ``{placeholder}`` is left for later) and again after the placeholders are
+    filled, by :func:`ocean_skill.workflows.pages.expand`.
+    """
+    draws = _DIAGNOSTIC_DRAWS[kind]
+    if isinstance(draw, str) and "{" in draw:
+        return
+    if draw not in draws:
+        raise ValueError(
+            f"page {title!r}: {kind}: draw: {draw!r} is not a known figure -- "
+            f"choose one of {list(draws)}"
+        )
+
+
 class RefreshSourceConfig(BaseModel):
     """One stream to rebuild before the suite runs -- forwarded to ``make_kerchunk``.
 
@@ -147,8 +188,10 @@ class RefreshForcingConfig(BaseModel):
     (one entry per side, ``<name>_<side>``), ``kind: surface`` to
     :func:`ocean_skill.build.add_forcing_source` (one entry, ``<name>``) and ``kind:
     initial_conditions`` to :func:`ocean_skill.build.add_initial_conditions` (one entry,
-    ``<name>``, one file). ``files`` is a glob or a list of globs, each expanded and
-    sorted, joined in the order given.
+    ``<name>``, one file); ``kind: river`` goes to
+    :func:`ocean_skill.build.add_river_source` (one entry, ``<name>``: the river
+    forcing, which a ``rivers:`` page reads; only ``ref`` applies). ``files`` is a glob
+    or a list of globs, each expanded and sorted, joined in the order given.
     ``ref``, when given, is where a kerchunk reference over the files is kept; it is
     rebuilt only when the matched files change, and opens in seconds where the files
     themselves can take minutes.
@@ -169,7 +212,7 @@ class RefreshForcingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    kind: Literal["boundary", "surface", "initial_conditions"]
+    kind: Literal["boundary", "surface", "initial_conditions", "river"]
     files: str | list[str]
     grid: str
     variables: list[str] | None = None
@@ -211,6 +254,17 @@ class RefreshForcingConfig(BaseModel):
                 raise ValueError(
                     f"refresh.forcing {self.name!r}: {extra} do not apply to kind: "
                     "initial_conditions (one file, read as it is)"
+                )
+        if self.kind == "river":
+            extra = [
+                key
+                for key in ("variables", "subchunk")
+                if getattr(self, key) is not None
+            ] + (["climatology"] if self.climatology else [])
+            if extra:
+                raise ValueError(
+                    f"refresh.forcing {self.name!r}: {extra} do not apply to kind: "
+                    "river (only ref: does)"
                 )
         if self.strip is not None:
             from ocean_skill.transect import check_boundary_sides
@@ -262,7 +316,9 @@ class RunInfoConfig(BaseModel):
 
 
 class PageConfig(BaseModel):
-    """One page of a report: ``field``, ``compare``, ``summary``, ``section``, XY or TS.
+    """One page of a report: ``field``, ``compare``, ``summary``, ``section``, XY, TS...
+
+    The last two kinds are ``health`` and ``rivers``, below.
 
     ``field``/``compare``/``summary`` are the raw keyword dicts a page will pass to
     :func:`ocean_skill.field.field`, :func:`ocean_skill.comparison.compare`, or
@@ -285,6 +341,12 @@ class PageConfig(BaseModel):
     ``plot:`` beside it are schema errors rather than silently ignored keys. Written
     ``section:`` with nothing after it, YAML reads ``None`` -- which is "no kind at
     all" here, not an empty divider; the error says to write ``section: ""``.
+
+    ``health`` and ``rivers`` draw the run-diagnostic figures of
+    :func:`ocean_skill.run_health.health` and :func:`ocean_skill.river_inputs.rivers`:
+    a mapping with ``source`` (default ``defaults.test``), ``time`` and ``draw`` (one of
+    :data:`HEALTH_DRAWS`/:data:`RIVER_DRAWS`). They take ``for_each:``, ``plot:`` and
+    ``caption:`` but not ``then:`` or ``contours:``.
 
     ``for_each`` fans this one page into several -- one page per element of the
     Cartesian product of its lists (see :mod:`ocean_skill.workflows.pages`).
@@ -319,6 +381,8 @@ class PageConfig(BaseModel):
     section: str | None = None
     XY: dict[str, Any] | None = None
     TS: dict[str, Any] | None = None
+    health: dict[str, Any] | None = None
+    rivers: dict[str, Any] | None = None
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
@@ -340,13 +404,18 @@ class PageConfig(BaseModel):
                 )
             raise ValueError(
                 f"page {self.title!r} must have exactly one of field:/compare:/"
-                f"summary:/section:/XY:/TS: -- found {kinds or 'none'}{hint}"
+                f"summary:/section:/XY:/TS:/health:/rivers: -- found "
+                f"{kinds or 'none'}{hint}"
             )
         return self
 
     @property
-    def kind(self) -> Literal["field", "compare", "summary", "section", "XY", "TS"]:
-        """Which page kind this is (``field``, ``compare``, ... ``XY`` or ``TS``)."""
+    def kind(
+        self,
+    ) -> Literal[
+        "field", "compare", "summary", "section", "XY", "TS", "health", "rivers"
+    ]:
+        """Which page kind this is (``field``, ``compare``, ... ``rivers``)."""
         for k in _PAGE_KINDS:
             if getattr(self, k) is not None:
                 return k  # type: ignore[return-value]
@@ -422,6 +491,13 @@ class PageConfig(BaseModel):
             (self.summary.get("kind"), self.summary.get("scope"))
         ):
             summary_kinds(self.title, self.summary)
+        return self
+
+    @model_validator(mode="after")
+    def _diagnostic_draw_is_known(self) -> PageConfig:
+        spec = self.health if self.kind == "health" else self.rivers
+        if spec is not None and "draw" in spec:
+            check_diagnostic_draw(self.title, self.kind, spec["draw"])
         return self
 
     @model_validator(mode="after")

@@ -277,7 +277,7 @@ def test_two_transects_stack_as_rows_titled_by_their_labels():
     words = {" ".join(t.get_text().split()) for t in fig.findobj(Text)}  # rows wrap
     assert {"Line A", "Line B"} <= words
     xlabels = {ax.get_xlabel() for ax in fig.axes if ax.get_xlabel()}
-    assert {"longitude (°E)", "latitude (°N)"} <= xlabels
+    assert {"longitude", "latitude"} <= xlabels
 
 
 @pytest.mark.usefixtures("_model_and_climatology")

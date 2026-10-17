@@ -35,6 +35,9 @@ The public API is intentionally small:
     osk.field(source, variable, select=...)          # one source, no reference
     osk.field(...).extremum("max").plot()            # where the max is, and how it
                                                      # evolves around that snapshot
+    osk.health("his").figures("integrity")           # run diagnostics: blow-ups, drift,
+                                                     # restarts (.table(), .problems())
+    osk.rivers("river_forcing").figures("map")       # river-forcing inputs: where, size
     osk.TS({"ROMS": roms, "WOA23": woa}).plot()      # T against S per source;
                                                      # osk.XY: any two variables
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
@@ -83,6 +86,8 @@ from ocean_skill.field import Cross, Field, FieldSet, field
 from ocean_skill.pick import pick_path
 from ocean_skill.plot.map_locations import map_locations
 from ocean_skill.plot.map_metrics import map_metrics
+from ocean_skill.river_inputs import rivers
+from ocean_skill.run_health import health
 from ocean_skill.sources import read
 from ocean_skill.xy import TS, XY
 
@@ -146,6 +151,7 @@ __all__ = [
     "field",
     "find",
     "find_catalogs",
+    "health",
     "map_locations",
     "map_metrics",
     "match_report",
@@ -155,6 +161,7 @@ __all__ = [
     "plot",
     "qc",
     "read",
+    "rivers",
     "summary",
     "table",
 ]
