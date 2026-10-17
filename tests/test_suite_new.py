@@ -361,3 +361,153 @@ def test_input_check_leaves_out_a_side_that_is_mostly_land(tmp_path):
     assert rc == 0
     defaults = yaml.safe_load(out.read_text())["defaults"]
     assert [side["name"] for side in defaults["sides"]] == ["south"]
+
+
+# -- the climatological boundary file, salinity restoring, labels ---------------------
+
+
+def _folder(root: Path) -> Path:
+    return root / "tasks" / "first" / "input" / "input_datasets"
+
+
+def _entries(out: Path) -> dict:
+    suite = SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
+    return {f.name: f for f in [*suite.refresh.sources, *suite.refresh.forcing]}
+
+
+def _expanded(out: Path):
+    from ocean_skill.workflows import pages
+
+    suite = SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
+    return suite, pages.expand(suite)
+
+
+def test_the_climatological_boundary_file_is_catalogued_with_its_own_entry(tmp_path):
+    root = inputs(tmp_path, False)
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    entries = _entries(out)
+    clim = entries["my_run_bry_bgc_clim"]
+    assert clim.kind == "boundary" and clim.climatology
+    assert clim.files.endswith("x_boundary-bgc-unified-chl_clim.nc")
+    assert clim.sides == ["south", "west"]
+    assert clim.subchunk is None  # one file: no monthly chunks to join
+    # the dated BGC entry still reads the monthly files, never the climatology
+    assert "clim" not in Path(entries["my_run_bry_bgc"].files).name
+    d = yaml.safe_load(out.read_text())["defaults"]
+    assert d["bry_bgc_clim"] == "my_run_bry_bgc_clim"
+    assert [s["name"] for s in d["clim_sides"]] == ["south", "west"]
+    assert "&id" not in out.read_text()
+
+
+def test_the_climatology_pages_are_model_only_sections_one_per_open_side(tmp_path):
+    rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
+    assert rc == 0
+    _, expanded = _expanded(out)
+    clim = [p for p in expanded if " boundary — iron" in p.title]
+    assert [p.title.split(" boundary")[0] for p in clim] == ["South", "West"]
+    page = clim[0]
+    assert page.kind == "field"
+    assert page.kwargs["source"] == "my_run_bry_bgc_clim_south"
+    assert page.kwargs["variable"][:3] == ["iron", "ammonium", "DOC"]
+    select = page.kwargs["select"]
+    assert select["month"] == 1 and select["transect"] == {"eta_rho": 0}
+    assert len(select["depth"]) == 12  # the upper 1000 m
+    assert len(page.kwargs["variable"]) <= 4  # rows per figure
+
+
+def test_no_climatological_file_means_no_climatology_pages(tmp_path):
+    root = inputs(tmp_path, False)
+    (_folder(root) / "x_boundary-bgc-unified-chl_clim.nc").unlink()
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    assert "my_run_bry_bgc_clim" not in _entries(out)
+    assert yaml.safe_load(out.read_text())["defaults"]["clim_sides"] == []
+    _, expanded = _expanded(out)
+    assert not any(" boundary — iron" in p.title for p in expanded)
+
+
+def test_a_salinity_restoring_file_is_catalogued_and_compared_with_woa23(tmp_path):
+    root = inputs(tmp_path, False)
+    _nc(
+        _folder(root) / "x_surface-restoring_clim.nc",
+        "sss",
+        ["month", "eta_rho", "xi_rho"],
+    )
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    entry = _entries(out)["my_run_surf_restoring_clim"]
+    assert entry.kind == "surface" and entry.climatology
+    assert entry.label == "salinity restoring climatology"
+    d = yaml.safe_load(out.read_text())["defaults"]
+    assert d["restoring"] == [
+        {"name": "my_run_surf_restoring_clim", "label": entry.label, "var": "sss"}
+    ]
+    # drawn on its own WOA23 page only, not again as a plain surface map
+    assert "my_run_surf_restoring_clim" not in [s["name"] for s in d["surface_clim"]]
+    _, expanded = _expanded(out)
+    (page,) = [p for p in expanded if p.title.startswith("Salinity restoring vs WOA23")]
+    assert page.kind == "compare"
+    assert page.kwargs["test"] == "my_run_surf_restoring_clim"
+    assert page.kwargs["reference"] == "woa23_salinity_month01"
+    assert page.kwargs["select"] == {
+        "test": {"month": 1},
+        "reference": {"depth": "surface"},
+    }
+
+
+def test_no_restoring_file_means_the_restoring_page_is_skipped_cleanly(tmp_path):
+    rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
+    assert rc == 0
+    assert yaml.safe_load(out.read_text())["defaults"]["restoring"] == []
+    _, expanded = _expanded(out)
+    assert not any("restoring" in p.title.lower() for p in expanded)
+    # (the sources are not catalogued here, so the pages that remain only say that)
+    assert all("Unknown source" in p.problem for p in expanded if p.problem)
+
+
+@pytest.mark.parametrize("restart", [True, False])
+def test_every_generated_entry_carries_a_label_for_figures(tmp_path, restart):
+    root = inputs(tmp_path, restart)
+    _nc(
+        _folder(root) / "x_surface-restoring_clim.nc",
+        "sss",
+        ["month", "eta_rho", "xi_rho"],
+    )
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    labels = {n: e.label for n, e in _entries(out).items()}
+    assert all(labels.values()), labels
+    assert labels["my_run_ic"] == "initial conditions"
+    assert labels["my_run_bry_phys"] == labels["my_run_bry_bgc"] == "boundary file"
+    assert labels["my_run_bry_bgc_clim"] == "climatological boundary file"
+    assert labels["my_run_river"] == "river forcing"
+    assert labels["my_run_surf_physics"] == "surface physics"
+    assert labels["my_run_surf_bgc_unified_clim"] == "surface BGC unified climatology"
+
+
+def test_a_boundary_figure_names_its_side_and_location(tmp_path):
+    rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
+    assert rc == 0
+    _, expanded = _expanded(out)
+    figures = [p for p in expanded if " boundary — " in p.title]
+    assert figures
+    for p in figures:
+        side = p.title.split(" boundary")[0]
+        title = p.plot["title"]
+        assert title.startswith(f"{side} boundary — ")
+        assert "(lon " not in title, title  # the location is in the caption
+        assert "2011-01" in title or "month of" in title
+
+
+def test_the_labels_flow_into_the_config_and_loads(tmp_path):
+    from ocean_skill.config import RefreshForcingConfig, RefreshSourceConfig
+
+    src = RefreshSourceConfig(
+        name="a", files="/x/*.nc", ref="/r.parquet", label="initial conditions"
+    )
+    assert src.model_dump(exclude_none=True)["label"] == "initial conditions"
+    frc = RefreshForcingConfig(
+        name="b", kind="river", files="/x.nc", grid="/g.nc", label="river forcing"
+    )
+    assert frc.label == "river forcing"

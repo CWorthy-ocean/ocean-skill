@@ -209,6 +209,7 @@ def test_a_figure_is_scaled_to_fit_under_a_divider_when_it_barely_must(
 def test_a_figure_that_would_shrink_below_the_minimum_leaves_the_divider_alone(
     tmp_path, monkeypatch
 ):
+    monkeypatch.setattr(_report, "MIN_FIT_SCALE", 0.7)
     pages = _capture_packed(monkeypatch)
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.section(1, "Part one", "\n".join(["A line of notes."] * 12))
@@ -1060,7 +1061,8 @@ def test_an_option_only_defaults_set_is_dropped_when_the_draw_refuses_it():
         return opts
 
     page = _page_with(default_plot=["robust"])
-    with pytest.warns(UserWarning, match=r"defaults.plot option\(s\) \['robust'\]"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # inherited options are skipped silently
         out = P._draw(page, draw, {"robust": True, "size": "page"})
     assert out == {"size": "page"}
 
@@ -1114,7 +1116,8 @@ def test_a_metrics_series_page_survives_a_suite_wide_robust():
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(osk, "compare", lambda **kw: ComparisonSet(comps))
         mp.setattr(P, "_all_nan_reason", lambda c: None)
-        with pytest.warns(UserWarning, match="defaults.plot option"):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
             ((suffix, fig),) = P.build(page)
     assert suffix == "" and fig is not None
 

@@ -90,3 +90,14 @@ def units_text(units, statistic=None) -> str:
 
     shown = display(str(units))
     return "" if shown.strip() == "1" else shown
+
+
+def bracketed_units(units, statistic=None) -> str:
+    """Return ``units`` as a label's ``[units]`` suffix, or ``""`` when there is none.
+
+    The one place a unit gets its brackets, so a dimensionless field (``units`` empty,
+    ``"1"``) draws no empty ``[]`` and a difference bar's ``"difference [mmol/m³]"``
+    reads plain ``"difference"`` for it.
+    """
+    shown = units_text(units, statistic)
+    return f"[{shown}]" if shown else ""

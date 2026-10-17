@@ -19,11 +19,16 @@ distance between the cell's own two interfaces
 (:func:`ocean_skill.vertical._roms_thickness`), so an inventory follows the free
 surface.
 
-**One dask compute per variable.** A step's 3-D field is a gigabyte-class array and a
-run has ~40 of them, so each variable's reductions are built lazily and evaluated
-together, streaming its chunks once; the step's cell volumes and depths are computed
-once and shared. (One compute for the whole step ran out of memory on a large grid.)
-Only candidate pairs of copies are read a second time.
+**Blocks of levels, reduced in numpy.** A step's 3-D field is a gigabyte-class array
+and a run has ~45 of them. Read at its storage chunks (a subchunked reference: a level
+by an eighth of the rows), a step was ~600,000 dask tasks and as many tiny reads, and
+ordering and syncing them, not moving the data, took the time; a large run's step took
+minutes and tens of GB. The scan instead reopens the source a block of levels per dask
+chunk (:func:`_scan_dataset`, about :data:`_BLOCK_BYTES` each), reads each block with
+one small compute and reduces it in numpy, a pool of threads working through the
+variables in order (:func:`_scan_step`): memory is the step's cell volumes plus a block
+per thread, and every value is read once. Only candidate pairs of copies are read a
+second time.
 
 **Per-step cache.** A restart never changes once written, so each step's table is kept
 under :mod:`ocean_skill.cache`'s ``health`` kind and a mid-run re-run reads only the
@@ -31,6 +36,16 @@ restarts that are new. The key is :data:`HEALTH_VERSION`, the source's catalog
 fingerprint, the step's time stamp and a hash of its free surface and the surface level
 of every scanned variable -- a cheap content sample that misses when a restart is
 rewritten in place, which an identity key alone would not notice.
+
+**Sudden steps.** A step is looked for in the inventories, kinetic energy and the
+low-oxygen volumes, between adjacent restarts: a change at least 20 times the series'
+median rate and over 0.1% of its value. The *living pools* -- the carbon, chlorophyll,
+phosphorus, iron, silicon and calcium carbonate of every phytoplankton group (``sp*``,
+``diat*``, ``diaz*``) and ``zooC`` -- are left out: a cold start's first days are
+spin-up biology (a small phytoplankton pool losing 15% a day), not a restart or
+forcing discontinuity. Their series are still drawn, just without step marks.
+Nutrients, carbon, oxygen, dissolved organic matter, iron, ligand, physics and kinetic
+energy keep the rule.
 
 **Test mode.** A source read under :func:`ocean_skill.sources.truncate_time`
 (``--smoke``) has a strided grid and thinned restarts, so its numbers are not physical.
@@ -44,10 +59,14 @@ package attribute (see ``_CallablePlotPackage`` in :mod:`ocean_skill`).
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
-import textwrap
+import math
+import os
+import re
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,12 +74,19 @@ import numpy as np
 import pandas as pd
 
 from ocean_skill.config import HEALTH_DRAWS
+from ocean_skill.plot._numbers import format_value
+from ocean_skill.units import display
 
 __all__ = ["HEALTH_DRAWS", "HEALTH_VERSION", "RunHealth", "health"]
 
 #: Bumped when the statistics a step records, or how they are computed, change, so a
 #: cached step from before is not served as one from after. Part of every step's key.
-HEALTH_VERSION = 2
+#: 3: sums taken a block of levels at a time, in numpy (the last bits of a total move).
+HEALTH_VERSION = 3
+
+#: About how many bytes of one variable a scan block holds: the unit a health step
+#: reads and reduces at a time, one per thread (:func:`_workers`).
+_BLOCK_BYTES = 64 * 2**20
 
 #: Said on every figure of a run read under ``truncate_time``.
 TEST_MODE_BANNER = (
@@ -164,16 +190,32 @@ _NAMES = {
     "NH4": "Ammonium",
     "O2": "Oxygen",
     "Fe": "Iron",
+    "Lig": "Ligand",
     "ALK": "Alkalinity",
     "DIC": "DIC",
+    "DOCr": "Refractory DOC",
+    "DONr": "Refractory DON",
+    "DOPr": "Refractory DOP",
+    "zooC": "Zooplankton C",
 }
+#: How a series that is not a scanned variable reads in a list of steps.
+_DERIVED_NAMES = {"KE": "KE", "O2_lt60": "O2 < 60 volume", "O2_lt20": "O2 < 20 volume"}
+#: The suffix MARBL puts on the twin tracers of a CDR run.
+_ALT = "_ALT_CO2"
+#: The living plankton pools: the quantities of a group (``spC``, ``diatChl``,
+#: ``diazFe``, ...) and the zooplankton carbon. Not looked at for sudden steps.
+_LIVING = re.compile(r"(sp|diat|diaz)(C|Chl|P|Fe|Si|CaCO3)|zooC")
 
-#: Said of a step whose two restarts a job segment starts between.
-JOIN_NOTE = " (at a segment join)"
+#: Under a series figure whose job segments are shaded.
+SEGMENT_NOTE = "Shaded bands alternate at each job of the run."
+
+#: Said of a step whose two restarts a job starts between.
+JOIN_NOTE = " (at a job join)"
 
 #: Severity order of :meth:`RunHealth.problems` kinds, most severe first.
 _SEVERITY = (
     "nonfinite",
+    "all_nan",
     "negative",
     "out_of_bounds",
     "copy",
@@ -183,10 +225,16 @@ _SEVERITY = (
 )
 
 #: Rows and panels a report page holds before it continues on the next.
-_TABLE_ROWS = 30
 _PANELS_PER_PAGE = 20
-_SUMMARY_LINES = 62
-_SUMMARY_PROBLEMS = 40
+#: One font size for every panel title of the series figures (pt).
+_PANEL_TITLE_PT = 8.0
+#: A Letter page, in inches; the summary has to fit one.
+_LETTER = (8.5, 11.0)
+#: Font sizes (pt) of the summary table (never below 8) and the integrity table.
+_SUMMARY_PT = 8.0
+_INTEGRITY_PT = 6.5
+#: A CDR difference this small next to its tracer's own inventory is zero.
+_CDR_ZERO = 1e-9
 
 
 # --------------------------------------------------------------------------------------
@@ -212,6 +260,8 @@ class _Run:
     vtransform: int
     sigma_r: np.ndarray
     cs_r: np.ndarray
+    sigma_w: np.ndarray | None  # the interfaces, when the source has them
+    cs_w: np.ndarray | None
     zeta_name: str | None
 
     def dims(self, kind: str) -> tuple[str, ...]:
@@ -277,6 +327,7 @@ def _open_run(ds, meta: dict) -> _Run:
         raise ValueError("health found no 2-D or 3-D variable on rho, u or v points.")
     hc, vtransform = roms._vertical_params(ds, meta)
     zeta_name = next((n for n in roms.FREE_SURFACE_NAMES if n in ds.variables), None)
+    interfaces = all(n in ds.variables for n in ("sigma_w", "Cs_w"))
     return _Run(
         ds=ds,
         meta=meta,
@@ -293,6 +344,8 @@ def _open_run(ds, meta: dict) -> _Run:
         vtransform=vtransform,
         sigma_r=np.asarray(ds["sigma_r"].values, dtype=float),
         cs_r=np.asarray(ds["Cs_r"].values, dtype=float),
+        sigma_w=np.asarray(ds["sigma_w"].values, dtype=float) if interfaces else None,
+        cs_w=np.asarray(ds["Cs_w"].values, dtype=float) if interfaces else None,
         zeta_name=zeta_name,
     )
 
@@ -356,28 +409,143 @@ def _native_adjacent(
 # One step
 
 
-def _geometry(run: _Run, step):
-    """Return the step's lazy ``(volume, depth)``: cell volumes (m3), depths (m, down).
+def _block_bytes(run: _Run) -> int:
+    """Return the bytes one scan block holds at most.
 
-    Volumes come from the layer thickness between each cell's own interfaces
-    (:func:`ocean_skill.vertical._roms_thickness`) times the cell area, zero where the
-    cell is land; depth is ``-z_rho``. Both are ``(s_rho, eta_rho, xi_rho)`` dask
-    arrays.
+    :data:`_BLOCK_BYTES`, or less where a block per thread (:func:`_workers`) would
+    add up to more than the largest 3-D variable of a step: what the threads hold at
+    once is then about one variable, whatever the number of threads.
     """
-    import dask.array as dsa
+    largest = max(
+        (
+            run.ds[std].nbytes // run.ds.sizes[run.tdim]
+            for name, std in run.standard.items()
+            if run.kinds[name].endswith("3")
+        ),
+        default=_BLOCK_BYTES,
+    )
+    return max(1, min(_BLOCK_BYTES, largest // _workers()))
+
+
+def _block_levels(run: _Run) -> int | None:
+    """Return the levels of one scan block, or ``None`` for a source not read by dask.
+
+    As many levels as fit in :func:`_block_bytes` of the largest 3-D variable, rounded
+    down to whole storage chunks along the vertical (a compressed chunk split in two is
+    read twice) and never fewer than one of them.
+    """
+    levels, stored = [], []
+    for name, std in run.standard.items():
+        if not run.kinds[name].endswith("3"):
+            continue
+        da = run.ds[std]
+        if da.chunks is None:
+            return None
+        nz = da.sizes[run.s_dim]
+        levels.append(da.dtype.itemsize * da.size // (da.sizes[run.tdim] * nz))
+        stored.append(max(da.chunks[da.dims.index(run.s_dim)]))
+    if not levels:
+        return None
+    base = math.lcm(*stored)
+    return min(max(base, _block_bytes(run) // max(levels) // base * base), nz)
+
+
+def _scan_dataset(source: str, run: _Run):
+    """Return ``source`` reopened for the scan: a block of levels per dask chunk.
+
+    The storage chunks a subchunked reference is opened at (a level by an eighth of
+    the rows, say) make one task, and one small read, per sliver of every variable:
+    ~600,000 tasks a step, most of the time spent ordering the graph and syncing the
+    reads. A chunk of :func:`_block_levels` levels and every row and column is one
+    read of all the storage chunks under it. The time axis keeps its stored chunks.
+    ``run.ds`` itself is returned for a source without dask chunks, one already
+    chunked like that, or one whose reader takes no ``chunks`` (with a warning).
+    """
+    from ocean_skill import sources
+
+    k = _block_levels(run)
+    if k is None:
+        return run.ds
+    chunks = {d: -1 for d in ("eta_rho", "xi_rho", "eta_v", "xi_u") if d in run.ds.dims}
+    chunks[run.s_dim] = k
+    blocked = all(
+        len(c) == 1 or (dim == run.s_dim and max(c) == k)
+        for std in run.standard.values()
+        if run.ds[std].chunks is not None
+        for dim, c in zip(run.ds[std].dims, run.ds[std].chunks, strict=True)
+        if dim != run.tdim
+    )
+    if blocked:
+        return run.ds
+    try:
+        scan = sources.read(source, chunks=chunks)
+    except (TypeError, ValueError) as err:
+        warnings.warn(
+            f"health could not reopen {source!r} in blocks of {k} levels ({err}); "
+            "it is read at its stored chunks instead, which is much slower.",
+            stacklevel=3,
+        )
+        return run.ds
+    if scan.sizes.get(run.tdim) != run.ds.sizes[run.tdim]:
+        raise RuntimeError(  # the same source, opened twice: cannot happen
+            f"health: {source!r} reopened with {scan.sizes.get(run.tdim)} steps, not "
+            f"{run.ds.sizes[run.tdim]}."
+        )
+    return scan
+
+
+def _workers() -> int:
+    """Return how many threads scan a step's blocks: dask's ``num_workers``.
+
+    One under a synchronous dask scheduler, else ``num_workers`` from dask's config,
+    else every core. Each holds a block (:func:`_block_bytes`) and its temporaries.
+    """
+    import dask
+
+    if dask.config.get("scheduler", None) in ("sync", "synchronous", "single-threaded"):
+        return 1
+    return int(dask.config.get("num_workers", None) or os.cpu_count() or 1)
+
+
+def _geometry(run: _Run, zeta: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return the step's cell volumes (m3) and the same, zero above :data:`_DEEP_M`.
+
+    Volumes come from the layer thickness between each cell's own interfaces (the
+    transform of :func:`ocean_skill.roms._s_to_z` on ``sigma_w``/``Cs_w``, with the
+    step's free surface) times the cell area, zero where the cell is land; a source
+    without interfaces estimates the thickness from the level centres
+    (:func:`ocean_skill.vertical._roms_thickness`, which warns). Depth is that of the
+    cell centre, below the moving surface. Both are ``(s_rho, eta_rho, xi_rho)``
+    numpy arrays.
+    """
+    import xarray as xr
 
     from ocean_skill import roms, vertical
 
-    depth = (-step["z_rho"]).transpose(run.s_dim, "eta_rho", "xi_rho")
-    geom = step
-    if all(n in step.variables for n in ("sigma_w", "Cs_w")):
-        geom = roms.add_interface_coord(step, run.meta)
-    dz = vertical._roms_thickness(geom, depth, run.s_dim).transpose(
-        run.s_dim, "eta_rho", "xi_rho"
-    )
-    vol = dz.chunk().data * run.area
-    volume = dsa.where(run.mask & dsa.isfinite(vol), vol, 0.0)
-    return volume, depth.chunk().data
+    def z(sigma, cs):
+        return roms._s_to_z(sigma, cs, run.h, zeta, run.hc, run.vtransform)
+
+    nz = len(run.sigma_r)
+    if run.sigma_w is None or run.cs_w is None:
+        depth = -z(run.sigma_r[:, None, None], run.cs_r[:, None, None])
+        frame = xr.DataArray(depth, dims=run.dims("rho3"))
+        volume = np.array(vertical._roms_thickness(xr.Dataset(), frame, run.s_dim))
+    else:
+        # a level at a time: a large grid's full 3-D temporary is over a gigabyte
+        volume = np.empty((nz, *run.mask.shape))
+        below = z(run.sigma_w[0], run.cs_w[0])
+        for k in range(nz):
+            above = z(run.sigma_w[k + 1], run.cs_w[k + 1])
+            np.subtract(above, below, out=volume[k])
+            below = above
+    deep = np.empty_like(volume)
+    for k in range(nz):
+        level = volume[k]
+        level *= run.area
+        level[~(run.mask & np.isfinite(level))] = 0.0
+        is_deep = -z(run.sigma_r[k], run.cs_r[k]) > _DEEP_M
+        np.copyto(deep[k], np.where(is_deep, level, 0.0))
+    return volume, deep
 
 
 def _surface(da):
@@ -385,11 +553,19 @@ def _surface(da):
     return da.isel({da.dims[0]: -1}) if da.ndim == 3 else da
 
 
+def _zeta(run: _Run, step) -> np.ndarray:
+    """Return the step's free surface, zeros when the run has none."""
+    if not run.zeta_name:
+        return np.zeros(run.mask.shape, dtype="float32")
+    return np.asarray(step[run.zeta_name].values)
+
+
 def _load_sample(run: _Run, step) -> tuple[np.ndarray, dict]:
     """Read the step's free surface and every scanned variable's surface level.
 
-    The cheap content sample the cache key hashes. Returns ``(zeta, surfaces)``;
-    ``zeta`` is zeros when the run has no free surface.
+    The cheap content sample the cache key hashes, read from the source at its stored
+    chunks (a block of the scan would read many levels for the one). Returns
+    ``(zeta, surfaces)``; ``zeta`` is zeros when the run has no free surface.
     """
     import dask
 
@@ -489,87 +665,243 @@ def _locate(run: _Run, zeta: np.ndarray, kind: str, index: tuple) -> tuple:
     return float(lon), float(lat), depth
 
 
-def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.DataFrame:
-    """Return one step's statistics: a row per scanned variable, then derived rows."""
-    import dask
-    import dask.array as dsa
+def _units(run: _Run) -> list[tuple[str, ...]]:
+    """Return the scanned variables in groups whose blocks are read together.
 
-    from ocean_skill import roms
-
-    # The step's geometry is computed once, in memory (a few full 3-D float arrays);
-    # every variable's reductions below share it.
-    volume, depth = dask.compute(*_geometry(run, step))
-    deep = depth > _DEEP_M
-    nz = run.ds.sizes[run.s_dim]
-    arrays: dict[str, Any] = {}
-    parts: dict[str, dict[str, Any]] = {}
-    for name, std in run.standard.items():
-        kind = run.kinds[name]
-        x = step[std].transpose(*run.dims(kind)).chunk().data
-        ok = run.ocean(kind)
-        fin = dsa.isfinite(x) & ok
-        xs = dsa.where(fin, x, 0.0).astype("float64")
-        low = dsa.where(fin, x, np.inf)
-        high = dsa.where(fin, x, -np.inf)
-        arrays[name] = (x, fin)
-        p = {
-            "n_fin": fin.sum(),
-            "n_nan": (dsa.isnan(x) & ok).sum(),
-            "n_inf": (dsa.isinf(x) & ok).sum(),
-            "n_neg": (fin & (x < 0)).sum(),
-            "n_bad": (fin & _out_of_bounds(name, x, run.h)).sum(),
-            "n_nonzero": (fin & (x != 0)).sum(),
-            "total": xs.sum(),
-            "sumsq": (xs * xs).sum(),
-            "min": low.min(),
-            "max": high.max(),
-            "imin": low.argmin(),
-            "imax": high.argmax(),
-        }
-        if kind == "rho3":
-            p["value"] = (xs * volume).sum()
-            if name in _DEEP_MEANS:
-                p["deep"] = (xs * volume * deep).sum()
-            if name == "O2":
-                for limit in _HYPOXIC:
-                    p[f"o2_{limit:g}"] = (volume * (fin & (x < limit))).sum()
-        parts[name] = p
-    extras: dict[str, Any] = {"deep_volume": (volume * deep).sum()}
-    if run.kinds.get("u") == "u3" and run.kinds.get("v") == "v3":
-        u, v = (
-            roms._average_to_rho(_wet(run, step, name, kind), stagger, rho).data
-            for name, kind, stagger, rho in (
-                ("u", "u3", "xi_u", "xi_rho"),
-                ("v", "v3", "eta_v", "eta_rho"),
-            )
-        )
-        speed2 = u * u + v * v
-        extras["KE"] = (
-            0.5
-            * (dsa.where(run.mask & dsa.isfinite(speed2), speed2, 0.0) * volume).sum()
-        )
-    for name in run.kinds:
+    ``u`` with ``v`` (kinetic energy needs both), a tracer with its ``_ALT_CO2`` twin
+    (the CDR difference; pH has a twin too, but a difference of pH is not an amount),
+    every other variable alone.
+    """
+    units: list[tuple[str, ...]] = []
+    taken: set[str] = set()
+    ke = run.kinds.get("u") == "u3" and run.kinds.get("v") == "v3"
+    for name in run.standard:
+        if name in taken:
+            continue
         alt = f"{name}_ALT_CO2"
-        # a CDR pair is a tracer's added amount; pH has an _ALT_CO2 twin too, but a
-        # difference of pH is not an amount, so it is left out
-        if (
+        if ke and name in ("u", "v"):
+            unit: tuple[str, ...] = ("u", "v")
+        elif (
             run.kinds[name] == "rho3"
             and run.kinds.get(alt) == "rho3"
+            and alt not in taken
             and not _is_ph(name)
         ):
-            diff = arrays[name][0] - arrays[alt][0]
-            fin = arrays[name][1] & arrays[alt][1]
-            extras[f"cdr_{name}"] = (
-                dsa.where(fin, diff, 0.0).astype("float64") * volume
-            ).sum()
-    # One compute per variable, not one for the whole step: a step of a large run is
-    # tens of GB over ~45 variables, and a single graph of all of them let dask hold
-    # much of it at once (out of memory on a 1.8 M-cell, 100-level grid). Each
-    # variable is still read once.
-    got = {name: dask.compute(p)[0] for name, p in parts.items()}
-    more = {name: dask.compute(x)[0] for name, x in extras.items()}
+            unit = (name, alt)
+        else:
+            unit = (name,)
+        units.append(unit)
+        taken.update(unit)
+    return units
 
-    copies = _find_copies(run, arrays, got)
+
+def _level_blocks(run: _Run, step, name: str) -> list[slice | None]:
+    """Return the blocks of levels ``name`` is read in; ``[None]`` for a 2-D variable.
+
+    The dask chunks along the vertical (a block of :func:`_scan_dataset`), merged up to
+    :func:`_block_bytes` where they are smaller (a source read at its stored chunks).
+    """
+    if not run.kinds[name].endswith("3"):
+        return [None]
+    da = step[run.standard[name]]
+    nz = da.sizes[run.s_dim]
+    level = da.dtype.itemsize * da.size // nz
+    most = max(1, _block_bytes(run) // max(level, 1))
+    chunks = da.chunks[da.dims.index(run.s_dim)] if da.chunks else (1,) * nz
+    blocks, start, end = [], 0, 0
+    for c in chunks:
+        if end > start and end + c - start > most:
+            blocks.append(slice(start, end))
+            start = end
+        end += c
+    blocks.append(slice(start, end))
+    return blocks
+
+
+def _read(run: _Run, step, name: str, levels: slice | None) -> np.ndarray:
+    """Read ``levels`` of the variable ``name`` at one step, as a numpy array.
+
+    One small compute on the calling thread: a block of the scan is one dask chunk.
+    """
+    da = step[run.standard[name]].transpose(*run.dims(run.kinds[name]))
+    if levels is not None:
+        da = da.isel({run.s_dim: levels})
+    data = da.data
+    if hasattr(data, "compute"):
+        data = data.compute(scheduler="sync")
+    return np.asarray(data)
+
+
+def _block_stats(
+    name: str,
+    x: np.ndarray,
+    ok: np.ndarray,
+    h: np.ndarray,
+    offset: int,
+    geometry: tuple[np.ndarray, np.ndarray] | None,
+) -> tuple[dict[str, Any], np.ndarray]:
+    """Return one block's statistics of variable ``name``, and its finite-ocean mask.
+
+    ``x`` is the block (levels ``offset`` on, for a 3-D one), ``ok`` the ocean mask of
+    its points, ``h`` the local depth; ``geometry`` is the block's ``(volume, deep
+    volume)`` for a 3-D rho variable, whose volume integrals are then kept too.
+    Minimum and maximum carry their index in the whole variable.
+    """
+    fin = np.isfinite(x)
+    fin &= ok
+    n_ok = int(ok.sum()) * (x.size // ok.size)
+    n_fin = int(np.count_nonzero(fin))
+    n_nan = int(np.count_nonzero(np.isnan(x) & ok)) if n_fin < n_ok else 0
+    xs = np.where(fin, x, 0.0).astype(np.float64, copy=False).reshape(-1)
+    p: dict[str, Any] = {
+        "n_fin": n_fin,
+        "n_nan": n_nan,
+        "n_inf": n_ok - n_fin - n_nan,
+        "n_neg": int(np.count_nonzero(xs < 0)),
+        "n_bad": int(np.count_nonzero(fin & _out_of_bounds(name, x, h))),
+        "n_nonzero": int(np.count_nonzero(xs)),
+        "total": float(xs.sum()),
+        "sumsq": float(xs @ xs),
+    }
+    for which, fill, pick in (("min", np.inf, np.argmin), ("max", -np.inf, np.argmax)):
+        masked = np.where(fin, x, fill)
+        flat = int(pick(masked))
+        index = np.unravel_index(flat, x.shape)
+        p[which] = float(masked.flat[flat])
+        p[f"i{which}"] = (int(index[0]) + offset, *map(int, index[1:]))
+        del masked
+    if geometry is not None:
+        volume, deep = (g.reshape(-1) for g in geometry)
+        p["value"] = float(xs @ volume)
+        if name in _DEEP_MEANS:
+            p["deep"] = float(xs @ deep)
+        if name == "O2":
+            for limit in _HYPOXIC:
+                low = (fin & (x < limit)).reshape(-1)
+                p[f"o2_{limit:g}"] = float(volume[low].sum())
+    return p, fin
+
+
+def _to_rho(x: np.ndarray, axis: int) -> np.ndarray:
+    """Average a staggered velocity onto rho points along ``axis``.
+
+    The numpy twin of :func:`ocean_skill.roms._average_to_rho`: an interior point is
+    the mean of the two values either side, an edge point takes the nearest one.
+    """
+    x = np.moveaxis(x, axis, -1)
+    out = np.empty((*x.shape[:-1], x.shape[-1] + 1), dtype=x.dtype)
+    out[..., 1:-1] = 0.5 * (x[..., :-1] + x[..., 1:])
+    out[..., 0], out[..., -1] = x[..., 0], x[..., -1]
+    return np.moveaxis(out, -1, axis)
+
+
+def _scan_block(
+    run: _Run, step, unit: tuple[str, ...], levels: slice | None, geometry: tuple
+) -> tuple[dict[str, dict], dict[str, float]]:
+    """Read and reduce one block of levels of the variables of ``unit``.
+
+    Returns ``(stats, extras)``: :func:`_block_stats` per variable, and the block's
+    share of the kinetic energy (``u``, ``v``) or of the CDR difference (a tracer and
+    its ``_ALT_CO2`` twin).
+    """
+    offset = levels.start if levels is not None else 0
+    volume, deep = (g[levels] for g in geometry) if levels is not None else (None,) * 2
+    stats, kept = {}, {}
+    for name in unit:
+        kind = run.kinds[name]
+        x = _read(run, step, name, levels)
+        geom = (volume, deep) if kind == "rho3" else None
+        stats[name], fin = _block_stats(name, x, run.ocean(kind), run.h, offset, geom)
+        if len(unit) > 1:
+            kept[name] = (x, fin)
+        del x, fin
+    extras: dict[str, float] = {}
+    if unit == ("u", "v"):
+        # a wall carries no flow: land (and non-finite) points are zeroed before the
+        # average to rho, so whatever a land point holds never reaches the cell beside
+        u, v = (
+            _to_rho(np.where(fin, x, 0.0), axis)
+            for (x, fin), axis in ((kept["u"], -1), (kept["v"], -2))
+        )
+        speed2 = u * u + v * v
+        del u, v
+        wet = np.where(run.mask & np.isfinite(speed2), speed2, 0.0)
+        extras["KE"] = 0.5 * float(wet.reshape(-1) @ volume.reshape(-1))
+    elif len(unit) == 2:
+        (x, fin), (x_alt, fin_alt) = kept[unit[0]], kept[unit[1]]
+        both = fin & fin_alt
+        diff = np.where(both, x - x_alt, 0.0).astype(np.float64, copy=False)
+        extras[f"cdr_{unit[0]}"] = float(diff.reshape(-1) @ volume.reshape(-1))
+    return stats, extras
+
+
+def _combine(parts: list[dict]) -> dict:
+    """Return one variable's statistics from its blocks', given in block order.
+
+    Counts and sums add up; the minimum and maximum keep the first block's on a tie,
+    so the location is the first in the whole variable, as one ``argmin`` would give.
+    """
+    out = dict(parts[0])
+    for p in parts[1:]:
+        for k, v in p.items():
+            if k not in ("min", "max", "imin", "imax"):
+                out[k] += v
+        if p["min"] < out["min"]:
+            out["min"], out["imin"] = p["min"], p["imin"]
+        if p["max"] > out["max"]:
+            out["max"], out["imax"] = p["max"], p["imax"]
+    return out
+
+
+def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.DataFrame:
+    """Return one step's statistics: a row per scanned variable, then derived rows.
+
+    ``step`` is the step of :func:`_scan_dataset`'s source; each block of levels of
+    each variable is read once and reduced in numpy, by :func:`_workers` threads in
+    variable order, so what is in memory at a time is the geometry and about one
+    variable. Only candidate pairs of copies are read a second time.
+    """
+    geometry = _geometry(run, zeta)
+    nz = run.ds.sizes[run.s_dim]
+    jobs = [
+        (unit, levels)
+        for unit in _units(run)
+        for levels in _level_blocks(run, step, unit[0])
+    ]
+
+    def scan(job):
+        return _scan_block(run, step, *job, geometry)
+
+    # a store chunked a whole variable at a time cannot be read in smaller blocks:
+    # fewer threads then, so that they still hold about one variable between them
+    largest = max(
+        step[run.standard[unit[0]]].isel({run.s_dim: levels}).nbytes
+        if levels is not None
+        else step[run.standard[unit[0]]].nbytes
+        for unit, levels in jobs
+    )
+    room = max(_BLOCK_BYTES, _block_bytes(run) * _workers())
+    workers = min(_workers(), len(jobs), max(1, room // max(largest, 1)))
+    if workers > 1:
+        with ThreadPoolExecutor(workers, thread_name_prefix="health") as pool:
+            results = list(pool.map(scan, jobs))
+    else:
+        results = [scan(job) for job in jobs]
+    parts: dict[str, list[dict]] = {}
+    sums: dict[str, float] = {}
+    for stats, extras in results:
+        for name, p in stats.items():
+            parts.setdefault(name, []).append(p)
+        for k, v in extras.items():
+            sums[k] = sums.get(k, 0.0) + v
+    got = {name: _combine(parts[name]) for name in run.standard}
+    more: dict[str, float] = {"deep_volume": float(geometry[1].sum())}
+    if "KE" in sums:
+        more["KE"] = sums["KE"]
+    more.update((f"cdr_{n}", sums[f"cdr_{n}"]) for n in run.kinds if f"cdr_{n}" in sums)
+    geometry = None  # the step's volumes are not needed past here
+
+    copies = _find_copies(run, step, got)
     rows = []
     for name, r in got.items():
         kind = run.kinds[name]
@@ -593,10 +925,8 @@ def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.Dat
             sumsq=float(r["sumsq"]),
         )
         if n_fin:
-            shape = arrays[name][0].shape
-            for which, flat in (("min", r["imin"]), ("max", r["imax"])):
-                index = np.unravel_index(int(flat), shape)
-                lon, lat, z = _locate(run, zeta, kind, index)
+            for which in ("min", "max"):
+                lon, lat, z = _locate(run, zeta, kind, r[f"i{which}"])
                 row.update(
                     {
                         which: float(r[which]),
@@ -612,28 +942,14 @@ def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.Dat
     return pd.DataFrame(rows, columns=list(_COLUMNS))
 
 
-def _wet(run: _Run, step, name: str, kind: str):
-    """Return the staggered velocity ``name`` with its land points set to zero.
-
-    A wall carries no flow; zeroing it before the average to rho keeps whatever a land
-    point holds from reaching the ocean cell beside it.
-    """
-    import dask.array as dsa
-
-    da = step[run.standard[name]].transpose(*run.dims(kind)).chunk()
-    wet = run.ocean(kind) & dsa.isfinite(da.data)
-    return da.copy(data=dsa.where(wet, da.data, 0.0))
-
-
-def _find_copies(run: _Run, arrays: dict, got: dict) -> dict[str, str]:
+def _find_copies(run: _Run, step, got: dict) -> dict[str, str]:
     """Return ``{variable: the earlier-named variable it equals at every ocean cell}``.
 
     Cheap first: only variables of one layout whose finite count, minimum, maximum and
-    sum all agree are candidates, and only candidates are read again to compare cell by
-    cell. A field that is zero everywhere is not a copy of another zero field.
+    sum all agree are candidates, and only candidates are read again, a block at a
+    time, to compare cell by cell. A field that is zero everywhere is not a copy of
+    another zero field.
     """
-    import dask
-
     groups: dict[tuple, list[str]] = {}
     for name, r in got.items():
         if not int(r["n_nonzero"]):
@@ -646,24 +962,24 @@ def _find_copies(run: _Run, arrays: dict, got: dict) -> dict[str, str]:
             float(r["total"]),
         )
         groups.setdefault(key, []).append(name)
-    pairs = [
-        (a, b)
-        for names in groups.values()
-        for i, a in enumerate(names)
-        for b in names[i + 1 :]
-    ]
-    if not pairs:
-        return {}
-    same = {}
-    for a, b in pairs:
-        (xa, fa), (xb, fb) = arrays[a], arrays[b]
-        same[(a, b)] = ((xa == xb) | ~(fa | fb)).all()
-    equal = dask.compute(same)[0]
     copies: dict[str, str] = {}
-    for (a, b), is_same in equal.items():
-        if is_same and b not in copies:
-            copies[b] = a
+    for names in groups.values():
+        for i, a in enumerate(names):
+            for b in names[i + 1 :]:
+                if b not in copies and _same(run, step, a, b):
+                    copies[b] = a
     return copies
+
+
+def _same(run: _Run, step, a: str, b: str) -> bool:
+    """Return whether ``a`` and ``b`` agree wherever either is a finite ocean value."""
+    ok = run.ocean(run.kinds[a])
+    for levels in _level_blocks(run, step, a):
+        xa, xb = _read(run, step, a, levels), _read(run, step, b, levels)
+        either = (np.isfinite(xa) | np.isfinite(xb)) & ok
+        if not np.all((xa == xb) | ~either):
+            return False
+    return True
 
 
 def _derived_rows(stamp: pd.Timestamp, got: dict, more: dict) -> list[dict]:
@@ -746,6 +1062,7 @@ def health(
     ref = sources.resolve(source)
     ds = sources.read(source)
     run = _open_run(ds, ref.metadata)
+    scan = None  # reopened in blocks only once a step is not in the cache
     times = run.ds.indexes[run.tdim]
     chosen = _positions(times, time)
     use_cache = bool(cache) and _cache.enabled()
@@ -762,8 +1079,10 @@ def health(
             if hit is not None:
                 frames.append(_from_dataset(hit))
                 continue
-        zeta = sample[0] if sample else _load_sample(run, step)[0]
-        frame = _scan_step(run, step, stamp, zeta)
+        zeta = sample[0] if sample else _zeta(run, step)
+        if scan is None:
+            scan = _scan_dataset(source, run)
+        frame = _scan_step(run, scan.isel({run.tdim: i}), stamp, zeta)
         if key is not None:
             _cache.save(key, _to_dataset(frame), kind="health")
         frames.append(frame)
@@ -801,14 +1120,27 @@ def _lonlat(lon: float, lat: float) -> str:
 
 def _pct(x: float) -> str:
     """Return a percentage to the digits that matter: ``0.31``, ``12``, ``0.0042``."""
-    return f"{x:.2g}" if abs(x) < 10 else f"{x:.0f}"
+    return format_value(x, 2)
+
+
+def _signed(x: float) -> str:
+    """Return a signed number: ``+5``, ``−1.1`` (a true minus sign), ``+inf``."""
+    text = format_value(abs(x), 2)
+    return f"{'−' if x < 0 else '+'}{text}"
 
 
 def _name(variable: str) -> str:
     """Return the readable name of a scanned or derived variable."""
     if variable in _NAMES:
         return _NAMES[variable]
+    if variable.endswith(_ALT) and variable != _ALT:
+        return f"{_name(variable[: -len(_ALT)])} (ALT_CO2)"
     return variable
+
+
+def _all_nan_steps(g: pd.DataFrame) -> int:
+    """Return in how many of a variable's steps no ocean cell holds a valid value."""
+    return int(((g["n_ocean"] > 0) & (g["n_nan"] >= g["n_ocean"])).sum())
 
 
 class RunHealth:
@@ -847,6 +1179,7 @@ class RunHealth:
         self.test_mode = test_mode
         self._adjacent = adjacent  # per neighboring pair of steps; None = all adjacent
         self._problems: list[dict] | None = None
+        self._jump_table: pd.DataFrame | None = None
 
     def __repr__(self) -> str:
         t = self._times()
@@ -893,7 +1226,11 @@ class RunHealth:
         (``worst_pct_neg``, ``worst_neg_time``) and out of bounds (``worst_pct_bad``,
         ``worst_bad_time``), the same at the latest step, the run-wide ``min`` and
         ``max`` with ``_lon``, ``_lat``, ``_depth`` and ``_time``, ``n_nonfinite`` (NaN
-        plus Inf ocean cells at the worst step) and ``flags``.
+        plus Inf ocean cells at the worst step, at ``nonfinite_time``),
+        ``all_nan_steps`` (steps in which not one ocean cell is valid, of ``n_steps``)
+        and ``flags``.
+        For a concentration the out-of-bounds cells *are* the negative ones, so
+        ``worst_pct_bad`` is the one percentage to read.
         """
         rows = []
         latest = self.steps["time"].max()
@@ -937,7 +1274,11 @@ class RunHealth:
                             for k in ("", "_lon", "_lat", "_depth", "_time")
                         }
                     )
-            row["n_nonfinite"] = int((g["n_nan"] + g["n_inf"]).max())
+            nonfinite = g["n_nan"] + g["n_inf"]
+            row["n_nonfinite"] = int(nonfinite.max())
+            row["nonfinite_time"] = g.loc[nonfinite.idxmax(), "time"]
+            row["all_nan_steps"] = _all_nan_steps(g)
+            row["n_steps"] = len(g)
             row["flags"] = self._flags(variable, g)
             rows.append(row)
         return pd.DataFrame(rows)
@@ -959,6 +1300,9 @@ class RunHealth:
     def _flags(self, variable: str, g: pd.DataFrame) -> str:
         n = len(g)
         flags = []
+        nan = _all_nan_steps(g)
+        if nan:
+            flags.append("all NaN" if nan == n else f"all NaN in {nan}/{n}")
         zero = int(g["all_zero"].sum())
         if zero:
             flags.append("all zero" if zero == n else f"all zero in {zero}/{n}")
@@ -1016,12 +1360,18 @@ class RunHealth:
     def _jumps(self) -> pd.DataFrame:
         """Sudden steps of the inventory series, between adjacent steps.
 
-        A step is flagged where the rate of change between two neighboring restarts
+        The living plankton pools are not looked at (see the module docstring). A step
+        is flagged where the rate of change between two neighboring restarts
         exceeds :data:`_JUMP_FACTOR` times the series' median rate and the change is
         more than :data:`_JUMP_MIN_FRACTION` of its value. Columns ``time`` (the later
         step), ``previous``, ``variable``, ``change_pct``, ``ratio`` (inf if the series
         is otherwise flat) and ``at_join``.
         """
+        if self._jump_table is None:
+            self._jump_table = self._find_jumps()
+        return self._jump_table
+
+    def _find_jumps(self) -> pd.DataFrame:
         times = self._times()
         adjacent = self._pair_adjacent(times)
         days = np.asarray((times[1:] - times[:-1]) / pd.Timedelta(days=1), dtype=float)
@@ -1039,7 +1389,7 @@ class RunHealth:
                 ]
             )
         names = [
-            *self._inventories(),
+            *(v for v in self._inventories() if not _LIVING.fullmatch(v)),
             *(v for v in self._derived() if v in ("KE", "O2_lt60", "O2_lt20")),
         ]
         for variable in names:
@@ -1078,10 +1428,12 @@ class RunHealth:
     def problems(self) -> list[dict]:
         """Return what is wrong, most severe first, as JSON-safe dicts.
 
-        Each has ``kind`` (``nonfinite``, ``negative``, ``out_of_bounds``, ``copy``,
-        ``all_zero``, ``step`` or ``repeat``), ``variable``, a plain-words ``message``
-        and the numbers behind it. Variables negative or out of bounds in under 0.1% of
-        their ocean cells at every step are in :meth:`table` only.
+        Each has ``kind`` (``nonfinite``, ``all_nan``, ``negative``, ``out_of_bounds``,
+        ``copy``, ``all_zero``, ``step`` or ``repeat``), ``variable``, a plain-words
+        ``message`` and the numbers behind it (a ``step`` has one item per series, with
+        the ``previous`` and ``time`` of its two restarts). Variables negative or out of
+        bounds in under 0.1% of their ocean cells at every step are in :meth:`table`
+        only. The summary page groups these by kind.
         """
         if self._problems is None:
             found = [
@@ -1100,6 +1452,19 @@ class RunHealth:
         out = []
         for row in self.table().itertuples(index=False):
             variable = row.variable
+            if row.all_nan_steps == row.n_steps:
+                out.append(
+                    {
+                        "kind": "all_nan",
+                        "variable": variable,
+                        "message": f"{variable} is NaN in every ocean cell, always.",
+                        "count": int(row.n_nonfinite),
+                        "restarts": int(row.n_steps),
+                        "n_restarts": int(row.n_steps),
+                        "magnitude": float(row.n_nonfinite),
+                    }
+                )
+                continue
             if row.n_nonfinite:
                 out.append(
                     {
@@ -1107,9 +1472,10 @@ class RunHealth:
                         "variable": variable,
                         "message": (
                             f"{variable} has {row.n_nonfinite} NaN or Inf ocean "
-                            "cells at its worst restart."
+                            f"cells at its worst restart ({_day(row.nonfinite_time)})."
                         ),
                         "count": int(row.n_nonfinite),
+                        "time": _day(row.nonfinite_time),
                         "magnitude": float(row.n_nonfinite),
                     }
                 )
@@ -1121,7 +1487,8 @@ class RunHealth:
                     row.latest_pct_neg,
                 )
                 where = (
-                    f" (lowest {row.min:.4g} at {_lonlat(row.min_lon, row.min_lat)}, "
+                    f" (lowest {format_value(row.min)} at "
+                    f"{_lonlat(row.min_lon, row.min_lat)}, "
                     f"{_meters(row.min_depth)}, {_day(row.min_time)})"
                 )
             elif row.worst_pct_bad > _PROBLEM_PCT:
@@ -1131,7 +1498,7 @@ class RunHealth:
                     row.worst_bad_time,
                     row.latest_pct_bad,
                 )
-                where = f" (range {row.min:.4g} to {row.max:.4g})"
+                where = f" (range {format_value(row.min)} to {format_value(row.max)})"
             else:
                 continue
             out.append(
@@ -1139,9 +1506,9 @@ class RunHealth:
                     "kind": kind,
                     "variable": variable,
                     "message": (
-                        f"{variable} is {what} in {_pct(worst)}% of ocean cells at "
-                        f"worst ({_day(when)}) and {_pct(now)}% at the latest restart"
-                        f"{where}."
+                        f"{variable} is {what} in {format_value(worst)}% of ocean "
+                        f"cells at worst ({_day(when)}) and {format_value(now)}% at "
+                        f"the latest restart{where}."
                     ),
                     "worst_pct": float(worst),
                     "latest_pct": float(now),
@@ -1173,6 +1540,7 @@ class RunHealth:
                         "message": f"{variable} is identical to {of} {span}.",
                         "copy_of": of,
                         "restarts": len(copy),
+                        "n_restarts": int(n_steps),
                         "magnitude": float(len(copy)),
                     }
                 )
@@ -1188,6 +1556,7 @@ class RunHealth:
                         "variable": variable,
                         "message": f"{variable} is zero everywhere {span}.",
                         "restarts": len(zero),
+                        "n_restarts": int(n_steps),
                         "magnitude": float(len(zero)),
                     }
                 )
@@ -1195,49 +1564,29 @@ class RunHealth:
 
     def _step_problems(self) -> list[dict]:
         out = []
-        jumps = self._jumps()
-        for when, g in jumps.groupby("time", sort=True):
-            g = g.sort_values("ratio", ascending=False)
-            at_join = bool(g["at_join"].iloc[0])
-            for row in g.head(3).itertuples(index=False):
-                size = (
-                    "while it is otherwise flat"
-                    if np.isinf(row.ratio)
-                    else f"{row.ratio:.0f} times the typical step"
-                )
-                out.append(
-                    {
-                        "kind": "step",
-                        "variable": row.variable,
-                        "message": (
-                            f"{row.variable} changed {row.change_pct:+.2g}% between "
-                            f"{_day(row.previous)} and {_day(row.time)}, {size}"
-                            f"{JOIN_NOTE if row.at_join else ''}."
-                        ),
-                        "time": _day(row.time),
-                        "change_pct": float(row.change_pct),
-                        "ratio": None if np.isinf(row.ratio) else float(row.ratio),
-                        "at_join": bool(row.at_join),
-                        "magnitude": 1e3 if np.isinf(row.ratio) else float(row.ratio),
-                    }
-                )
-            rest = g.iloc[3:]
-            if len(rest):
-                out.append(
-                    {
-                        "kind": "step",
-                        "variable": "(several)",
-                        "message": (
-                            f"{len(rest)} more series changed suddenly at {_day(when)}"
-                            f"{JOIN_NOTE if at_join else ''}: "
-                            f"{', '.join(rest['variable'].head(6))}"
-                            f"{', ...' if len(rest) > 6 else ''}."
-                        ),
-                        "time": _day(when),
-                        "at_join": at_join,
-                        "magnitude": 0.0,
-                    }
-                )
+        for row in self._jumps().itertuples(index=False):
+            size = (
+                "while it is otherwise flat"
+                if np.isinf(row.ratio)
+                else f"{format_value(row.ratio)} times the typical step"
+            )
+            out.append(
+                {
+                    "kind": "step",
+                    "variable": row.variable,
+                    "message": (
+                        f"{row.variable} changed {_signed(row.change_pct)}% between "
+                        f"{_day(row.previous)} and {_day(row.time)}, {size}"
+                        f"{JOIN_NOTE if row.at_join else ''}."
+                    ),
+                    "previous": _day(row.previous),
+                    "time": _day(row.time),
+                    "change_pct": float(row.change_pct),
+                    "ratio": None if np.isinf(row.ratio) else float(row.ratio),
+                    "at_join": bool(row.at_join),
+                    "magnitude": 1e3 if np.isinf(row.ratio) else float(row.ratio),
+                }
+            )
         return out
 
     def _repeat_problems(self) -> list[dict]:
@@ -1261,6 +1610,7 @@ class RunHealth:
                         f"one in {_pct(100 * share[when])}% of variables."
                     ),
                     "time": _day(when),
+                    "share_pct": float(100 * share[when]),
                     "magnitude": float(share[when]) + 1.0,
                 }
             )
@@ -1310,147 +1660,330 @@ class RunHealth:
             )
         return f"Run health: {what}\n{self.source} ({span})"
 
+    # ---- the summary page
+
+    def _cdr_is_zero(self, variable: str) -> bool:
+        """Return whether ``variable`` (``cdr_X``) is zero in every restart.
+
+        Zero means within :data:`_CDR_ZERO` of the inventory of ``X`` itself: the
+        rounding of subtracting two equal numbers, nothing a perturbation could be.
+        """
+        s = self._series(variable).dropna()
+        if s.empty:
+            return False
+        base = self._series(variable[4:]).dropna()
+        reference = float(base.abs().mean()) if len(base) else 0.0
+        return float(s.abs().max()) <= _CDR_ZERO * reference
+
+    def _summary_rows(self, cap: int, step_rows: int) -> list[tuple[str, str, str]]:
+        """Return the summary table: ``(check, what was found, where/when)`` per kind.
+
+        One row per kind of problem, left out when there is none. A list in a row shows
+        at most ``cap`` items and says how many more the integrity table has; at most
+        ``step_rows`` sudden-step dates get a row of their own.
+        """
+        problems = self.problems()
+        rows: list[tuple[str, str, str]] = []
+
+        def of(kind: str) -> list[dict]:
+            return [p for p in problems if p["kind"] == kind]
+
+        def listing(items: list[str], sep: str = ", ", more: str = "") -> str:
+            text = sep.join(items[:cap])
+            rest = len(items) - cap
+            if rest > 0:
+                text += f"{sep.rstrip()} +{rest} more {more or '(see integrity table)'}"
+            return text
+
+        def sticky(text: str) -> str:
+            return text.replace(" ", "\u00a0")  # a name and its number wrap together
+
+        def span(items: list[dict]) -> str:
+            full = all(p["restarts"] == p["n_restarts"] for p in items)
+            return "every restart" if full else "some restarts"
+
+        def partial(p: dict) -> str:
+            full = p["restarts"] == p["n_restarts"]
+            return "" if full else f" ({p['restarts']}/{p['n_restarts']})"
+
+        bad = sorted(of("nonfinite"), key=lambda p: -p["count"])
+        if bad:
+            top = bad[0]
+            items = [sticky(f"{p['variable']} {format_value(p['count'])}") for p in bad]
+            rows.append(
+                (
+                    "NaN / Inf",
+                    (
+                        f"{len(bad)} variable{'s' if len(bad) != 1 else ''}, worst "
+                        f"cell count: {listing(items)}"
+                    ),
+                    f"worst {top['variable']}, {top['time']}",
+                )
+            )
+        nan = of("all_nan")
+        if nan:
+            names = [sticky(p["variable"]) for p in nan]
+            rows.append(
+                (
+                    "Entirely NaN",
+                    f"no valid ocean cell at all: {listing(names)}",
+                    span(nan),
+                )
+            )
+        zero = of("all_zero")
+        if zero:
+            names = [sticky(p["variable"] + partial(p)) for p in zero]
+            rows.append(("All zero", listing(names), span(zero)))
+
+        neg = sorted(of("negative"), key=lambda p: -p["worst_pct"])
+        if neg:
+            table = self.table()
+            n_tracers = int(
+                sum(
+                    1
+                    for v in table["variable"]
+                    if v not in _NOT_CONCENTRATION and not _is_ph(v)
+                )
+            )
+            items = [sticky(f"{p['variable']} {_pct(p['worst_pct'])}%") for p in neg]
+            still = sum(1 for p in neg if p["latest_pct"] > 0)
+            rows.append(
+                (
+                    "Negative concentrations",
+                    f"{len(neg)} of {n_tracers} tracers; worst {listing(items)}",
+                    (
+                        f"worst {neg[0]['variable']}, {neg[0]['time']}; "
+                        + (
+                            f"{still} still negative at the latest restart"
+                            if still
+                            else "none negative at the latest restart"
+                        )
+                    ),
+                )
+            )
+        oob = sorted(of("out_of_bounds"), key=lambda p: -p["worst_pct"])
+        if oob:
+            items = [sticky(f"{p['variable']} {_pct(p['worst_pct'])}%") for p in oob]
+            rows.append(
+                (
+                    "Outside physical bounds",
+                    f"share of ocean cells at worst: {listing(items)}",
+                    f"worst {oob[0]['variable']}, {oob[0]['time']}",
+                )
+            )
+        copies = of("copy")
+        if copies:
+            items = [
+                sticky(f"{p['variable']} = {p['copy_of']}{partial(p)}") for p in copies
+            ]
+            rows.append(("Exact copies", listing(items, "; "), span(copies)))
+        rows += self._cdr_rows()
+        rows += self._step_rows(of("step"), cap, step_rows)
+        repeats = of("repeat")
+        if repeats:
+            items = [
+                sticky(
+                    f"{p['time']}: {_pct(p['share_pct'])}% of variables"
+                    if p["variable"] == "(all)"
+                    else f"{p['variable']} x{p['restarts']}"
+                )
+                for p in repeats
+            ]
+            rows.append(
+                (
+                    "Repeated restart",
+                    f"identical to the previous restart: {listing(items)}",
+                    "",
+                )
+            )
+        drift = self.drift()
+        # a living pool's drift is mostly spin-up biology, as for the steps
+        drift = drift[~drift["variable"].map(lambda v: bool(_LIVING.fullmatch(v)))]
+        if len(drift):
+            items = []
+            for r in drift.head(min(cap, 6)).itertuples(index=False):
+                name = _name(r.variable[5:] if r.series == "deep mean" else r.variable)
+                name = f"deep {name.lower()}" if r.series == "deep mean" else name
+                items.append(sticky(f"{name} {_signed(r.pct_per_year)}"))
+            rows.append(
+                (
+                    "Largest drift",
+                    f"{', '.join(items)} %/yr",
+                    "linear fit over the record",
+                )
+            )
+        if not rows:
+            rows.append(("Result", "nothing flagged by any check", ""))
+        return rows
+
+    def _cdr_rows(self) -> list[tuple[str, str, str]]:
+        """Return the CDR row: is any added alkalinity or carbon in the tracers."""
+        cdr = [v for v in self._derived() if v.startswith("cdr_")]
+        if not cdr:
+            return []
+        zero = [v[4:] for v in cdr if self._cdr_is_zero(v)]
+        moving = [v for v in cdr if v[4:] not in zero]
+        parts = []
+        if zero:
+            parts.append(
+                " and ".join(f"{x} − {x}{_ALT}" for x in zero) + " = 0 in every restart"
+            )
+        unit = display("mmol")
+        for v in moving:
+            s = self._series(v).dropna()
+            if len(s):
+                parts.append(
+                    f"{v[4:]} − {v[4:]}{_ALT} {format_value(float(s.iloc[0]))} → "
+                    f"{format_value(float(s.iloc[-1]))} {unit} (first → latest)"
+                )
+        if not moving:
+            parts[-1] += ": no CDR signal in the tracers"
+        return [("CDR tracers", "; ".join(parts), "all restarts" if not moving else "")]
+
+    def _step_rows(
+        self, steps: list[dict], cap: int, step_rows: int
+    ) -> list[tuple[str, str, str]]:
+        """One row per pair of restarts a sudden step falls between."""
+        pairs: dict[tuple[str, str], list[dict]] = {}
+        for p in steps:
+            pairs.setdefault((p["previous"], p["time"]), []).append(p)
+
+        def size(g: list[dict]) -> float:
+            return max(p["magnitude"] for p in g)
+
+        chosen = sorted(pairs, key=lambda k: -size(pairs[k]))[:step_rows]
+        rows = []
+        for key in sorted(chosen):
+            g = sorted(pairs[key], key=lambda p: -p["magnitude"])
+            items = [
+                f"{_DERIVED_NAMES.get(p['variable'], p['variable'])} "
+                f"{_signed(p['change_pct'])}%".replace(" ", "\u00a0")
+                for p in g
+            ]
+            text = ", ".join(items[:cap])
+            if len(items) > cap:
+                text += f", +{len(items) - cap} more (see inventory figures)"
+            if any(p["ratio"] is None for p in g):
+                text += " (otherwise flat)"
+            else:
+                biggest = format_value(max(p["ratio"] for p in g))
+                text += f" (up to {biggest}× the typical change)"
+            first, last = key
+            last = last[5:] if last[:4] == first[:4] else last
+            when = f"{first} → {last}" + ("\nat a job join" if g[0]["at_join"] else "")
+            rows.append(("Sudden step", text, when))
+        rest = len(pairs) - len(chosen)
+        if rest > 0:
+            rows.append(
+                ("Sudden step", f"+{rest} more step dates", "see inventory figures")
+            )
+        return rows
+
     def _draw_summary(self) -> list:
         from matplotlib.figure import Figure
 
         from ocean_skill.plot.typography import PAGE_W
 
-        lines: list[tuple[str, str]] = []  # (style, text)
-        problems = self.problems()
-        if problems:
-            lines.append(("h", "Problems"))
-            for i, p in enumerate(problems[:_SUMMARY_PROBLEMS], 1):
-                for j, text in enumerate(textwrap.wrap(p["message"], 112)):
-                    lines.append(("p", (f"{i}. " if j == 0 else "    ") + text))
-            if len(problems) > _SUMMARY_PROBLEMS:
-                more = len(problems) - _SUMMARY_PROBLEMS
-                lines.append(("p", f"... and {more} more (see the integrity table)."))
-        drift = self.drift()
-        if len(drift):
-            lines.append(("h", "Drift, % per year (linear fit over the record)"))
-            for row in drift.head(12).itertuples(index=False):
-                lines.append(("kv", f"{row.label}|{row.pct_per_year:+.3g} %/yr"))
-        cdr = [v for v in self._derived() if v.startswith("cdr_")]
-        if cdr:
-            lines.append(
-                ("h", "CDR tracers: inventory of X minus X_ALT_CO2 (first, latest)")
+        # shorten the lists until the table fits the page (one item is the floor)
+        for cap in (8, 6, 5, 4, 3, 2, 1):
+            rows = self._summary_rows(cap, cap)
+            cells, widths, heights = _lay_out(
+                [("Check", "What was found", "Where / when"), *rows],
+                PAGE_W - 0.6,
+                _SUMMARY_PT,
+                fixed={0: 1.1, 2: 1.8},
+                flexible=1,
             )
-            for variable in cdr:
-                s = self._series(variable).dropna()
-                if len(s):
-                    lines.append(
-                        (
-                            "kv",
-                            f"{variable[4:]} added|{s.iloc[0]:.4g}, {s.iloc[-1]:.4g}",
-                        )
-                    )
-        pages = []
-        for start in range(0, max(len(lines), 1), _SUMMARY_LINES):
-            chunk = lines[start : start + _SUMMARY_LINES]
-            height = 1.3 + sum(0.3 if s == "h" else 0.17 for s, _ in chunk)
-            fig = Figure(figsize=(PAGE_W, height))
-            title = self._title("summary") + (" (cont.)" if start else "")
-            y = _draw_title(fig, title, self.test_mode)
-            for style, text in chunk:
-                y -= (0.3 if style == "h" else 0.17) / height
-                if style == "h":
-                    fig.text(0.06, y, text, fontsize=10, fontweight="bold", va="top")
-                elif style == "kv":
-                    left, right = text.split("|")
-                    fig.text(0.08, y, left, fontsize=8.5, va="top")
-                    fig.text(0.52, y, right, fontsize=8.5, va="top", ha="right")
-                else:
-                    fig.text(0.06, y, text, fontsize=8.5, va="top")
-            pages.append(fig)
-        return pages
+            top = _TITLE_IN + (0.3 if self.test_mode else 0.0)
+            height = top + sum(heights) + 0.25
+            if height <= _LETTER[1]:
+                break
+        fig = Figure(figsize=(PAGE_W, height))
+        _draw_title(fig, self._title("summary"), self.test_mode)
+        _draw_grid(fig, 0.3, height - top, widths, heights, cells, _SUMMARY_PT)
+        return [fig]
 
     def _draw_integrity(self) -> list:
         from matplotlib.figure import Figure
-        from matplotlib.table import Table
 
         from ocean_skill.plot.typography import PAGE_W
 
-        table = self.table()
-        head = [
+        head = (
             "Variable",
-            "Worst %\nnegative",
-            "Worst %\nout of bounds",
-            "Latest %\nneg / bad",
+            "Bound",
+            "Worst %\nbad (date)",
+            "Latest\n%",
             "Minimum",
             "Maximum",
             "NaN/Inf",
             "Flags",
-        ]
-        widths = [0.9, 0.7, 0.8, 0.65, 1.55, 1.55, 0.45, 1.3]
+        )
         rows = []
-        for r in table.itertuples(index=False):
+        for r in self.table().itertuples(index=False):
             rows.append(
-                [
+                (
                     r.variable,
-                    "–"
-                    if r.variable in _NOT_CONCENTRATION
-                    else f"{_pct(r.worst_pct_neg)}\n{_day(r.worst_neg_time)}"
-                    if r.worst_pct_neg
-                    else "0",
-                    f"{_pct(r.worst_pct_bad)}\n{_day(r.worst_bad_time)}"
+                    _bound_text(r.variable),
+                    f"{format_value(r.worst_pct_bad)}\n{_day(r.worst_bad_time)}"
                     if r.worst_pct_bad
                     else "0",
-                    "– / " + _pct(r.latest_pct_bad)
-                    if r.variable in _NOT_CONCENTRATION
-                    else f"{_pct(r.latest_pct_neg)} / {_pct(r.latest_pct_bad)}",
+                    format_value(r.latest_pct_bad),
                     _extreme(r, "min"),
                     _extreme(r, "max"),
-                    str(r.n_nonfinite) if r.n_nonfinite else "0",
-                    "\n".join(textwrap.wrap(r.flags, 22)) if r.flags else "",
-                ]
+                    format_value(int(r.n_nonfinite)),
+                    r.flags,
+                )
             )
-        pages = []
-        scale = (PAGE_W - 0.6) / sum(widths)
-        widths = [w * scale for w in widths]
-        size, line_in = 6.5, 6.5 * 1.35 / 72
-        for part, start in enumerate(range(0, max(len(rows), 1), _TABLE_ROWS)):
-            chunk = rows[start : start + _TABLE_ROWS]
-            heights = [2 * line_in + 0.05] + [
-                max(c.count("\n") + 1 for c in row) * line_in + 0.05 for row in chunk
-            ]
-            fig_h = 1.2 + sum(heights)
-            fig = Figure(figsize=(PAGE_W, fig_h))
+        size = _INTEGRITY_PT
+        while True:  # the font shrinks only if the columns cannot fit at this one
+            cells, widths, heights = _lay_out(
+                [head, *rows], PAGE_W - 0.6, size, flexible=7, min_flexible=0.9
+            )
+            if sum(widths) <= PAGE_W - 0.6 + 1e-9 or size <= 5.0:
+                break
+            size -= 0.5
+        top = _TITLE_IN + (0.3 if self.test_mode else 0.0)
+        budget = _LETTER[1] - top - 0.25
+        pages, chunk, used = [], [], 0.0
+        for row, h in zip(cells[1:], heights[1:], strict=True):
+            if chunk and used + h > budget - heights[0]:
+                pages.append(chunk)
+                chunk, used = [], 0.0
+            chunk.append((row, h))
+            used += h
+        pages.append(chunk)
+        figures = []
+        for part, chunk in enumerate(pages):
+            hs = [heights[0], *(h for _, h in chunk)]
+            height = top + sum(hs) + 0.25
+            fig = Figure(figsize=(PAGE_W, height))
             title = self._title("integrity by variable") + (" (cont.)" if part else "")
             _draw_title(fig, title, self.test_mode)
-            ax = fig.add_axes(
-                (0.3 / PAGE_W, 0.1 / fig_h, sum(widths) / PAGE_W, sum(heights) / fig_h)
+            _draw_grid(
+                fig,
+                0.3,
+                height - top,
+                widths,
+                hs,
+                [cells[0], *(row for row, _ in chunk)],
+                size,
+                centered=(1, 2, 3, 6),
             )
-            ax.axis("off")
-            tab = Table(ax, loc="upper left")
-            tab.auto_set_font_size(False)
-            for i, cells in enumerate([head, *chunk]):
-                for j, text in enumerate(cells):
-                    tab.add_cell(
-                        i,
-                        j,
-                        widths[j] / sum(widths),
-                        heights[i] / sum(heights),
-                        text=text,
-                        loc="center" if i == 0 or j in (1, 2, 3, 6) else "left",
-                        facecolor="0.9" if i == 0 else ("0.96" if i % 2 == 0 else "w"),
-                        edgecolor="0.75",
-                    )
-                    cell = tab[i, j]
-                    cell.set_linewidth(0.4)
-                    cell.get_text().set_fontsize(size)
-                    if i == 0:
-                        cell.get_text().set_fontweight("bold")
-            ax.add_table(tab)
-            pages.append(fig)
-        return pages
+            figures.append(fig)
+        return figures
 
-    def _panel(self, variable: str, title: str, units: str) -> dict | None:
+    # ---- the series pages
+
+    def _panel(
+        self, variable: str, title: str, units: str, note: str | None = None
+    ) -> dict | None:
         """One series panel of ``variable``, or ``None`` if the run has no such series.
 
         ``units="%"`` draws the series as percent change from its first step (so many
         inventories share a scale); any other ``units`` draws it as it is, in those
-        units. A series that starts at zero has nothing to scale by and is drawn as it
-        is.
+        units (spelled by :func:`ocean_skill.units.display`). A series that starts at
+        zero has nothing to scale by and is drawn as it is. ``note`` replaces the line
+        with a centered sentence (a series with nothing to show).
         """
         s = (
             self._series(variable).dropna()
@@ -1463,17 +1996,15 @@ class RunHealth:
         first = float(s.iloc[0])
         if units == "%" and first != 0:
             s = 100.0 * (s / first - 1.0)
-            return {
-                "title": f"{title} (% change)",
-                "series": s,
-                "unit": "% change",
-                "flagged": flagged,
-            }
+            unit = "% change"
+        else:
+            unit = "" if units == "%" else display(units)
         return {
             "title": title,
             "series": s,
-            "unit": "" if units == "%" else units,
+            "unit": unit,
             "flagged": flagged,
+            "note": note,
         }
 
     def _flagged(self, variable: str) -> list:
@@ -1485,15 +2016,23 @@ class RunHealth:
         """Lay ``panels`` out as grids of small series panels (the series family).
 
         Each panel is one line (:class:`~ocean_skill.plot.spec.PlotSpec` ``series``
-        family, so the static and interactive renderers draw it alike), with the job
-        segments shaded (``highlight=``) and each flagged step ringed in red.
+        family, so the static and interactive renderers draw it alike), every other job
+        segment shaded and each flagged step ringed in red. Every title is the same
+        size; a panel with a ``note`` shows that sentence instead of its line.
         """
         import xarray as xr
+        from matplotlib.ticker import FuncFormatter
 
         from ocean_skill.plot.registry import render
+        from ocean_skill.plot.series import HIGHLIGHT_ALPHA, HIGHLIGHT_COLORS
         from ocean_skill.plot.spec import PlotSpec
         from ocean_skill.plot.typography import PAGE_W
 
+        bands = self._bands()
+        footer = [TEST_MODE_BANNER] if self.test_mode else []
+        if bands:
+            footer.append(SEGMENT_NOTE)
+        foot_in = 0.14 * len(footer) + (0.1 if footer else 0.0)
         pages = []
         for part, start in enumerate(range(0, len(panels), _PANELS_PER_PAGE)):
             chunk = panels[start : start + _PANELS_PER_PAGE]
@@ -1517,29 +2056,45 @@ class RunHealth:
                 )
             ncols = min(3, len(chunk))
             nrows = -(-len(chunk) // ncols)
+            height = 0.9 + 2.0 * nrows + foot_in
             options: dict[str, Any] = {
                 "titles": [p["title"] for p in chunk],
                 "ncols": ncols,
                 "legend": False,
                 "encode": {"color": None, "marker": None, "linestyle": None},
-                "figsize": (PAGE_W, 0.9 + 2.0 * nrows),
+                "figsize": (PAGE_W, height),
                 "title": self._title(what) + (" (cont.)" if part else ""),
             }
-            if self._segments():
-                options["highlight"] = self._segments()
             with warnings.catch_warnings():
-                warnings.simplefilter("ignore")  # a segment with no step in a panel
+                warnings.simplefilter("ignore")
                 spec = PlotSpec(family="series", items=items, options=options)
                 fig = render(spec, renderer="matplotlib")
+            if footer:
+                fig.get_layout_engine().set(
+                    rect=(0, foot_in / height, 1, 1 - foot_in / height)
+                )
             by_title = {ax.get_title(): ax for ax in fig.axes}
             for p in chunk:
                 ax = by_title.get(p["title"])
                 if ax is None:
                     continue
+                ax.title.set_fontsize(_PANEL_TITLE_PT)
                 ax.set_ylabel(p["unit"], fontsize=7)
-                # plain tick values: an offset label ("1e-5+2.1975") collides with
-                # the panel title above it
-                ax.ticklabel_format(axis="y", useOffset=False, style="plain")
+                # tick values the way every number here is printed, and no offset label
+                # ("1e-5+2.1975"), which collides with the panel title above it
+                ax.yaxis.set_major_formatter(FuncFormatter(_tick_label(ax)))
+                xlim = ax.get_xlim()
+                for low, high in bands:
+                    ax.axvspan(
+                        low,
+                        high,
+                        color=HIGHLIGHT_COLORS[0],
+                        alpha=HIGHLIGHT_ALPHA,
+                        linewidth=0,
+                        zorder=0,
+                    )
+                ax.set_xlim(xlim)
+                _date_ticks(ax)
                 marks = [t for t in p["flagged"] if t in p["series"].index]
                 if marks:
                     ax.plot(
@@ -1551,28 +2106,42 @@ class RunHealth:
                         ms=7,
                         zorder=5,
                     )
-            if self.test_mode:
+                if p.get("note"):
+                    for line in list(ax.lines):
+                        line.remove()
+                    ax.set_yticks([])
+                    ax.set_ylabel("")
+                    ax.text(
+                        0.5,
+                        0.5,
+                        p["note"],
+                        transform=ax.transAxes,
+                        ha="center",
+                        va="center",
+                        fontsize=8,
+                        color="0.35",
+                    )
+            for k, line in enumerate(footer):
                 fig.text(
                     0.5,
-                    0.005,
-                    TEST_MODE_BANNER,
+                    (0.05 + 0.14 * (len(footer) - 1 - k)) / height,
+                    line,
                     ha="center",
                     va="bottom",
-                    color="firebrick",
-                    fontsize=8,
+                    color="firebrick" if line == TEST_MODE_BANNER else "0.35",
+                    fontsize=8 if line == TEST_MODE_BANNER else 7,
                 )
             pages.append(fig)
         return pages
 
-    def _segments(self) -> dict:
-        """Return the job segments to shade (every other one), as ``highlight=``."""
+    def _bands(self) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+        """Return the job segments to shade (every other one) as ``(start, end)``."""
         times = self._times()
+        if not len(times):
+            return []
         joins = [j for j in self.joins if times[0] < j <= times[-1]]
         edges = [times[0], *joins, times[-1]]
-        return {
-            f"segment {i + 1}": {"min": edges[i], "max": edges[i + 1]}
-            for i in range(1, len(edges) - 1, 2)
-        }
+        return [(edges[i], edges[i + 1]) for i in range(1, len(edges) - 1, 2)]
 
     def _draw_inventory(self) -> list:
         plankton = {f"{g}{p}" for g, _ in _GROUPS for p in _PLANKTON_PARTS} | {_ZOO}
@@ -1580,23 +2149,32 @@ class RunHealth:
             (v for v in self._inventories() if v not in plankton),
             key=lambda v: ({"temp": 0, "salt": 1}.get(v, 2), v),
         )
-        wanted = [(v, f"{_name(v)} inventory", "%") for v in tracers[:2]]
+        deep = f"(> {format_value(_DEEP_M)} m)"
+        conc = display("mmol/m3")
+        wanted = [(v, _name(v), "%") for v in tracers[:2]]
         wanted += [
             ("KE", "Kinetic energy", "%"),
-            ("O2_lt60", "Volume with oxygen below 60", "%"),
-            ("O2_lt20", "Volume with oxygen below 20", "%"),
-            ("deep_temp", "Deep temperature (below 1000 m)", "degC"),
-            ("deep_salt", "Deep salinity (below 1000 m)", "psu"),
-            ("deep_O2", "Deep oxygen (below 1000 m)", "mmol/m3"),
-            ("deep_DIC", "Deep DIC (below 1000 m)", "mmol/m3"),
+            ("O2_lt60", f"O2 volume < 60 {conc}", "%"),
+            ("O2_lt20", f"O2 volume < 20 {conc}", "%"),
+            ("deep_temp", f"Deep temperature {deep}", "degC"),
+            ("deep_salt", f"Deep salinity {deep}", "psu"),
+            ("deep_O2", f"Deep oxygen {deep}", "mmol/m3"),
+            ("deep_DIC", f"Deep DIC {deep}", "mmol/m3"),
         ]
-        wanted += [(v, f"{_name(v)} inventory", "%") for v in tracers[2:]]
-        wanted += [
-            (v, f"{v[4:]} minus {v[4:]}_ALT_CO2 inventory", "")
-            for v in self._derived()
-            if v.startswith("cdr_")
-        ]
+        wanted += [(v, _name(v), "%") for v in tracers[2:]]
         panels = [self._panel(*w) for w in wanted]
+        for v in self._derived():
+            if not v.startswith("cdr_"):
+                continue
+            x = v[4:]
+            same = self._cdr_is_zero(v)
+            panel = self._panel(
+                v,
+                f"{_name(x)} minus ALT_CO2",
+                "mmol",
+                note=f"identical to {x} in every restart" if same else None,
+            )
+            panels.append(panel)
         return self._series_figures([p for p in panels if p], "inventories")
 
     def _draw_plankton(self) -> list:
@@ -1605,11 +2183,9 @@ class RunHealth:
         for group, label in _GROUPS:
             for part in _PLANKTON_PARTS:
                 panels.append(
-                    self._panel(
-                        f"{group}{part}", f"{label.capitalize()} {part} inventory", "%"
-                    )
+                    self._panel(f"{group}{part}", f"{label.capitalize()} {part}", "%")
                 )
-        panels.append(self._panel(_ZOO, "Zooplankton C inventory", "%"))
+        panels.append(self._panel(_ZOO, _name(_ZOO), "%"))
         panels = [p for p in panels if p]
         for group, label in _GROUPS:
             for den, scale, name, unit in (
@@ -1624,31 +2200,224 @@ class RunHealth:
                     )
                     ratio = ratio.replace([np.inf, -np.inf], np.nan).dropna()
                     if len(ratio):
-                        title = f"{label.capitalize()} {name}"
                         panels.append(
                             {
-                                "title": title,
+                                "title": f"{label.capitalize()} {name}",
                                 "series": ratio,
-                                "unit": unit,
+                                "unit": display(unit),
                                 "flagged": [],
+                                "note": None,
                             }
                         )
         return self._series_figures(panels, "plankton") if panels else []
+
+
+# --------------------------------------------------------------------------------------
+# Tables and text
+
+
+def _bound_text(variable: str) -> str:
+    """Return the bound a variable's "bad" count is measured against, short."""
+    if variable in _RANGES:
+        low, high = _RANGES[variable]
+        return f"{_minus(low)} to {_minus(high)}"
+    if variable in _ABS_LIMITS:
+        unit = display("m/s" if variable != "zeta" else "m")
+        return f"≤ {format_value(_ABS_LIMITS[variable])} {unit}"
+    if _is_ph(variable):
+        return f"{format_value(_PH_RANGE[0])} to {format_value(_PH_RANGE[1])}"
+    if variable in _LAYER_DEPTHS:
+        return "0 to depth"
+    return "≥ 0"
+
+
+def _tick_label(ax):
+    """Return a tick formatter for ``ax``'s value axis that spells ticks as numbers are.
+
+    Zero is ``0`` however near it the tick landed, and a tick gets as many digits as it
+    takes to tell it from its neighbor (a total of 1.0399e13 beside 1.0401e13).
+    """
+
+    def label(value: float, _position) -> str:
+        ticks = np.asarray(ax.get_yticks(), dtype=float)
+        gaps = np.abs(np.diff(ticks))
+        step = float(gaps[gaps > 0].min()) if (gaps > 0).any() else 0.0
+        if step == 0.0 or abs(value) < 1e-6 * step:
+            return "0" if step else format_value(value)
+        digits = int(np.ceil(np.log10(abs(value) / step))) + 1
+        return format_value(value, max(3, min(digits, 9))).replace("-", "−")
+
+    return label
+
+
+def _minus(x: float) -> str:
+    """Return a number with a true minus sign."""
+    return format_value(x).replace("-", "−")
 
 
 def _extreme(r, which: str) -> str:
     """Return the table cell of a run-wide minimum or maximum: value, date, place."""
     value = getattr(r, which)
     if np.isnan(value):
-        return ""
+        return "–"
     lon, lat, depth = (getattr(r, f"{which}_{k}") for k in ("lon", "lat", "depth"))
     when = _day(getattr(r, f"{which}_time"))
-    return f"{value:.4g}  {when}\n{_lonlat(lon, lat)}, {_meters(depth)}"
+    return f"{format_value(value)}  {when}\n{_lonlat(lon, lat)}, {_meters(depth)}"
 
 
 def _meters(depth: float) -> str:
     """``"130 m"``; a cell just above z = 0 reads ``"0 m"``, not ``"-0 m"``."""
-    return f"{max(float(depth), 0.0):.0f} m"
+    return f"{format_value(round(max(float(depth), 0.0)))} m"
+
+
+@functools.lru_cache(maxsize=1)
+def _measurer():
+    """Return a renderer that measures text in points (72 dpi), without a figure."""
+    from matplotlib.backends.backend_agg import RendererAgg
+
+    return RendererAgg(100, 100, 72)
+
+
+def _text_width(text: str, size: float, bold: bool = False) -> float:
+    """Return the width in inches of one line of ``text`` at ``size`` pt."""
+    from matplotlib.font_manager import FontProperties
+
+    prop = FontProperties(size=size, weight="bold" if bold else "normal")
+    width, _, _ = _measurer().get_text_width_height_descent(text, prop, ismath=False)
+    return width / 72.0
+
+
+def _wrap(text: str, width: float, size: float, bold: bool = False) -> list[str]:
+    """Wrap ``text`` to lines no wider than ``width`` inches; break a too-long word."""
+    lines: list[str] = []
+    for paragraph in text.split("\n"):
+        current = ""
+        for word in paragraph.split(" "):
+            trial = f"{current} {word}" if current else word
+            if not current or _text_width(trial, size, bold) <= width:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+    out = []
+    for line in lines:
+        while len(line) > 1 and _text_width(line, size, bold) > width:
+            k = max(
+                (
+                    i
+                    for i in range(1, len(line))
+                    if _text_width(line[:i], size, bold) <= width
+                ),
+                default=1,
+            )
+            out.append(line[:k])
+            line = line[k:]
+        out.append(line)
+    return [line.replace("\u00a0", " ") for line in out]
+
+
+#: Space (in) around the text of a table cell, and between its lines.
+_PAD_X, _PAD_Y = 0.05, 0.035
+#: Height (in) the page title and its gap take at the top of a table page.
+_TITLE_IN = 0.75
+
+
+def _lay_out(
+    rows: list,
+    avail: float,
+    size: float,
+    *,
+    fixed: dict[int, float] | None = None,
+    flexible: int,
+    min_flexible: float = 0.0,
+) -> tuple[list[list[str]], list[float], list[float]]:
+    r"""Size a text table from its content: return ``(cells, widths, heights)``.
+
+    Every column is as wide as its widest line (``fixed`` ones have the width given), so
+    no cell is ever cut off; the ``flexible`` column takes what is left of ``avail``
+    inches and wraps. A cell's lines are its text with the wrapped breaks joined by
+    ``\n``; a row is as tall as its tallest cell.
+    """
+    fixed = fixed or {}
+    ncol = len(rows[0])
+    widths = [0.0] * ncol
+    for j in range(ncol):
+        if j == flexible:
+            continue
+        if j in fixed:
+            widths[j] = fixed[j]
+            continue
+        longest = max(
+            _text_width(line, size, bold=i == 0)
+            for i, row in enumerate(rows)
+            for line in str(row[j]).replace("\u00a0", " ").split("\n")
+        )
+        widths[j] = longest + 2 * _PAD_X + 0.02
+    widths[flexible] = max(avail - sum(widths), min_flexible)
+    cells: list[list[str]] = []
+    heights: list[float] = []
+    line_in = size * 1.3 / 72.0
+    for i, row in enumerate(rows):
+        wrapped = [
+            "\n".join(_wrap(str(text), widths[j] - 2 * _PAD_X, size, bold=i == 0))
+            if j in fixed or j == flexible
+            else str(text)
+            for j, text in enumerate(row)
+        ]
+        cells.append(wrapped)
+        heights.append(max(c.count("\n") + 1 for c in wrapped) * line_in + 2 * _PAD_Y)
+    return cells, widths, heights
+
+
+def _draw_grid(
+    fig,
+    left: float,
+    top: float,
+    widths: list[float],
+    heights: list[float],
+    cells: list[list[str]],
+    size: float,
+    *,
+    centered: tuple[int, ...] = (),
+) -> None:
+    """Draw ``cells`` as a grid, the top-left corner at ``(left, top)`` inches.
+
+    The first row is the header (gray, bold); the others alternate white and light
+    gray. ``centered`` columns center their text, the others align left.
+    """
+    from matplotlib.patches import Rectangle
+
+    w, h = fig.get_size_inches()
+    y = top
+    for i, (row, height) in enumerate(zip(cells, heights, strict=True)):
+        x = left
+        face = "0.9" if i == 0 else ("0.96" if i % 2 == 0 else "w")
+        for j, (text, width) in enumerate(zip(row, widths, strict=True)):
+            fig.add_artist(
+                Rectangle(
+                    (x / w, (y - height) / h),
+                    width / w,
+                    height / h,
+                    transform=fig.transFigure,
+                    facecolor=face,
+                    edgecolor="0.75",
+                    linewidth=0.4,
+                )
+            )
+            middle = i == 0 or j in centered
+            fig.text(
+                (x + width / 2 if middle else x + _PAD_X) / w,
+                (y - height / 2) / h,
+                text,
+                ha="center" if middle else "left",
+                va="center",
+                fontsize=size,
+                fontweight="bold" if i == 0 else "normal",
+                linespacing=1.15,
+            )
+            x += width
+        y -= height
 
 
 def _draw_title(fig, title: str, test_mode: bool) -> float:
@@ -1680,3 +2449,26 @@ def _draw_title(fig, title: str, test_mode: bool) -> float:
         )
         y -= 0.3 / h
     return y - 0.1 / h
+
+
+def _date_ticks(ax) -> None:
+    """Give a time axis few enough ticks that its labels never run together.
+
+    Three small panels share a page width, so a multi-year record gets one tick a year
+    (``2011``, ``2012``), and a shorter one a tick every few months (``Jan``, ``Apr``),
+    with the year on its first tick.
+    """
+    import matplotlib.dates as mdates
+
+    low, high = ax.get_xlim()
+    days = high - low
+    if days > 540:
+        step = max(1, round(days / 365.25 / 4))
+        ax.xaxis.set_major_locator(mdates.YearLocator(step))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+    else:
+        months = 1 if days < 120 else 3
+        locator = mdates.MonthLocator(interval=months)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    ax.xaxis.set_minor_locator(mdates.MonthLocator())

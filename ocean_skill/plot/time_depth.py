@@ -151,7 +151,7 @@ def prepare_time_depth(da: xr.DataArray) -> tuple[xr.DataArray, TimeDepthGeometr
         x_name="time" if date_axis else tdim,
         y_name="depth",
         x_label="time" if date_axis else tdim,
-        y_label=f"Depth [{display(depth_units or 'm')}]",
+        y_label=f"Depth [{display(depth_units or 'm')}]".replace(" []", ""),
         place_note=_place_of(da),
         period_note=_period_of(da[tdim]),
         date_axis=date_axis,

@@ -35,7 +35,8 @@ from ocean_skill.plot._colorbar import (
     resolve_diff_quantile,
     round_limits,
 )
-from ocean_skill.plot._statistic import statistic_of, units_text
+from ocean_skill.plot._numbers import format_value
+from ocean_skill.plot._statistic import bracketed_units, statistic_of, units_text
 from ocean_skill.plot.coastline import (
     DEFAULT_COASTLINE_RESOLUTION,
     is_gshhs,
@@ -196,7 +197,7 @@ def _extend(lo: float, hi: float, data_range: tuple[float, float] | None) -> str
 
 def _clip_text(end: str, value: float) -> str:
     """``"max 29.9"`` / ``"min −1.8"``: the true extreme a clipped bar end hides."""
-    return f"{end} {value:.3g}".replace("-", "\N{MINUS SIGN}")
+    return f"{end} {format_value(value)}".replace("-", "\N{MINUS SIGN}")
 
 
 def _with_range(norm, *arrays):
@@ -687,6 +688,19 @@ def _meshes_hidden(fig):
             artist.set_visible(True)
 
 
+def _layout_is_live(fig) -> bool:
+    """Whether a layout engine would recompute the axes' positions on the next draw.
+
+    ``fig.set_layout_engine("none")`` on a figure that had an engine leaves matplotlib's
+    ``PlaceHolderLayoutEngine`` behind, which is an engine object and moves nothing;
+    only a real one (constrained, tight) is live.
+    """
+    from matplotlib.layout_engine import PlaceHolderLayoutEngine
+
+    engine = fig.get_layout_engine()
+    return engine is not None and not isinstance(engine, PlaceHolderLayoutEngine)
+
+
 def _measure(fig) -> None:
     """Draw ``fig`` to settle its layout and text extents, painting nothing.
 
@@ -792,6 +806,10 @@ def _align_colorbars(fig, renderer=None) -> None:
 #: Air (display points) kept between a colorbar's labelling and the panel beside it.
 _CBAR_CLEARANCE = 2.0
 
+#: The smallest a colorbar's label or ticks are shrunk to when they cannot otherwise
+#: clear a neighboring panel (points) -- the floor the rest of the figure's text keeps.
+_CBAR_TYPE_FLOOR = 6.0
+
 #: Air kept between two tick labels on one colorbar, as a multiple of the type's size.
 _TICK_LABEL_GAP = 0.3
 
@@ -864,7 +882,7 @@ def _clear_colorbar_labels(fig, renderer) -> bool:
     :func:`_align_colorbars`); under a live one the move would be undone on the next
     draw, so there is nothing to do.
     """
-    if fig.get_layout_engine() is not None:
+    if _layout_is_live(fig):
         return False
     caxes = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
     if not caxes:
@@ -914,6 +932,10 @@ def _clear_colorbar_labels(fig, renderer) -> bool:
                 and b.x0 >= bar.x0
                 and b.x0 < reach + clearance
             ]
+            # the figure's own right edge stops a last column's labelling just as a
+            # neighbor's map stops the others'
+            if reach + clearance > fig_w:
+                hit.append(fig_w)
             overlap = reach + clearance - min(hit) if hit else 0.0
         if overlap <= 0:
             continue
@@ -946,6 +968,33 @@ def _clear_colorbar_labels(fig, renderer) -> bool:
             else:
                 thinner = max(pos.width - overlap / fig_w, pos.width * 0.5)
                 cax.set_position([pos.x0, pos.y0, thinner, pos.height])
+        if overlap > 0:
+            # last, the type itself: the label first, then the ticks, each only as far
+            # as the overlap needs and never past the floor the rest of the figure's
+            # text is held to. Along the bar a label's thickness is its own size, so
+            # the shrink is proportional.
+            for group in ([axis.label], [t for t in ticks if t.get_text()]):
+                group = [
+                    t
+                    for t in group
+                    if t.get_visible()
+                    and t.get_text()
+                    and not getattr(t, "_osk_size_pinned", False)
+                ]
+                if overlap <= 0 or not group:
+                    continue
+                thickness = max(
+                    t.get_window_extent(renderer).height
+                    if horizontal
+                    else t.get_window_extent(renderer).width
+                    for t in group
+                )
+                size = max(t.get_fontsize() for t in group)
+                floor = min(size, _CBAR_TYPE_FLOOR)
+                new_size = max(size * (1.0 - overlap / max(thickness, 1e-6)), floor)
+                overlap -= thickness * (1.0 - new_size / size)
+                for t in group:
+                    t.set_fontsize(min(t.get_fontsize(), new_size))
         changed = True
     return changed
 
@@ -1413,7 +1462,7 @@ def _draw_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units_text(units, statistic)}]" if units else "")
+    return ims, bracketed_units(units, statistic)
 
 
 def _draw_section_row(
@@ -1601,7 +1650,7 @@ def _draw_section_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units_text(units, statistic)}]" if units else "")
+    return ims, bracketed_units(units, statistic)
 
 
 def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
@@ -1617,7 +1666,7 @@ def metric_value_text(metrics: dict[str, Any] | None, name: str) -> str:
     value = (metrics or {}).get(name)
     if isinstance(value, bool) or not isinstance(value, int | float):
         return ""
-    return f"{value:.3g}"
+    return format_value(value)
 
 
 #: Where a statistics box sits inside its corner, in axes coordinates.
@@ -3168,7 +3217,7 @@ def field_row(
         fig,
         ims[2],
         axes[2],
-        f"difference {lab}",
+        f"difference {lab}".strip(),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
@@ -3529,7 +3578,7 @@ def _fit_text_widths(fig, renderer=None) -> None:
         _measure(fig)
         if _thin_colorbar_ticks(fig, fig.canvas.get_renderer()):
             _measure(fig)
-        if fig.get_layout_engine() is None:
+        if not _layout_is_live(fig):
             _clear_colorbar_labels(fig, fig.canvas.get_renderer())
 
 
@@ -4216,7 +4265,7 @@ def field_grid(
             fig,
             ims[2],
             axes[i][2],
-            f"test − reference {lab}",
+            f"test − reference {lab}".strip(),
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
             label_clipped=colorbar_label_clipped,
@@ -4454,7 +4503,7 @@ def _difference_grid(
         fig,
         ims[0],
         flat[:n],
-        f"test − reference [{units_text(units, statistic)}]" if units else "",
+        f"test − reference {bracketed_units(units, statistic)}".strip(),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
@@ -4635,6 +4684,7 @@ def _elide(text: str, limit: int = _MAX_TITLE_PART_CHARS) -> str:
     the title can run past ``limit`` by the window's length, which is a date range or a
     depth and short by construction.
     """
+    text = _titles.collapse_single_day(text)
     if len(text) <= limit:
         return text
     phrase, over, window = text.rpartition(" over ")
@@ -5180,7 +5230,7 @@ def field_facet(
     for ax in flat[n_panels:]:
         ax.set_visible(False)
 
-    bar_label = f"[{units_text(units, statistic)}]" if units else ""
+    bar_label = bracketed_units(units, statistic)
     if per_row_bars:
         for row in range(nrows):
             span = slice(row * ncols, (row + 1) * ncols)
@@ -5711,6 +5761,36 @@ def _degree_x_ticks(ax, geometry) -> None:
     spell = {"lon": format_lon, "lat": format_lat}.get(geometry.x_axis)
     if spell is not None:
         ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _pos: spell(value)))
+        # a handful of whole-degree ticks for the panel's width, not matplotlib's
+        # default, which on a path across the dateline (113°E to 78°W) packs in five
+        # labels that touch
+        ax.xaxis.set_major_locator(_degree_locator())
+
+
+def _degree_locator():
+    """Return a locator for whole-degree ticks, as many as the axes' width can label.
+
+    The width is read each time ticks are asked for, not when the locator is made: a
+    panel's final size is only known once the layout has run, and a figure that is
+    resized or re-laid-out must re-decide. (Built here rather than at module level
+    because matplotlib is imported lazily in this module.)
+    """
+    from matplotlib.ticker import MaxNLocator
+
+    from ocean_skill.plot._geo_labels import tick_count
+
+    class DegreeLocator(MaxNLocator):
+        def __init__(self):
+            super().__init__(nbins=6, steps=[1, 2, 5, 10])
+
+        def tick_values(self, vmin, vmax):
+            axes = getattr(self.axis, "axes", None)
+            if axes is not None:
+                width = axes.get_window_extent().width / axes.get_figure().dpi
+                self.set_params(nbins=tick_count(width))
+            return super().tick_values(vmin, vmax)
+
+    return DegreeLocator()
 
 
 def boundary_corners(values, x_name: str) -> list[float]:
@@ -5811,7 +5891,8 @@ def _draw_section(
         # inverted before the lines go on, and only once: invert_yaxis flips whatever
         # the axis is now, so a second call would put the seafloor back at the top
         ax.invert_yaxis()
-    xlim = ax.get_xlim()
+    # the data's own extent, less any all-land ends (see section.trimmed_x_range)
+    xlim = geometry.x_trim or ax.get_xlim()
     if seafloor is not None:
         _draw_seafloor(ax, seafloor, ylim_bottom, seafloor_kwargs)
     if ylim_bottom is not None:
@@ -7322,7 +7403,7 @@ def _draw_time_depth_row(
             zorder=5,
             **metrics_kwargs,
         )
-    return ims, (f"[{units_text(units, statistic)}]" if units else "")
+    return ims, bracketed_units(units, statistic)
 
 
 def time_depth_row(
@@ -7463,7 +7544,7 @@ def time_depth_row(
         fig,
         ims[2],
         axes[2],
-        f"difference {lab}",
+        f"difference {lab}".strip(),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
@@ -7661,7 +7742,7 @@ def time_depth_row_grid(
             fig,
             ims[2],
             axes[i][2],
-            f"difference {lab}",
+            f"difference {lab}".strip(),
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
             label_clipped=colorbar_label_clipped,
@@ -7739,9 +7820,9 @@ def field_map_grid(
     :func:`~ocean_skill.plot._facets.resolve_limit_groups`.
 
     The grid is free (these panels have no inherent order) unfaceted: ``ncols``
-    defaults to :func:`~ocean_skill.plot.typography.facet_layout`, which reads the
-    orientation off the domain's own aspect ratio, the same rule :func:`field_facet`'s
-    one-facet-axis case and :func:`skill_map`'s single-item case use.
+    defaults to :func:`~ocean_skill.plot.typography.map_grid_layout` -- three across,
+    two for a very wide domain, a smaller set filling one row -- so a panel is the same
+    size whether the page holds two variables or nine.
 
     ``rows=``/``cols=`` facet the grid on purpose instead, on ``variable`` (alias
     ``standard_name``) or ``source`` -- the same vocabulary and implied-complement rule
@@ -7807,7 +7888,7 @@ def field_map_grid(
         resolve_facets,
         resolve_limit_groups,
     )
-    from ocean_skill.plot.typography import facet_figsize, facet_layout
+    from ocean_skill.plot.typography import facet_figsize, map_grid_layout
 
     _warn_if_interactive_only(rasterize, hover, tiles)
     if not items:
@@ -7846,7 +7927,7 @@ def field_map_grid(
     else:
         margins = False
         if ncols is None:
-            ncols, nrows = facet_layout(n, aspect, canvas=canvas)
+            ncols, nrows = map_grid_layout(n, aspect)
         else:
             ncols = max(int(ncols), 1)
             nrows = -(-n // ncols)
@@ -7977,11 +8058,7 @@ def field_map_grid(
                 panel_scale[i] = (cmap, norm)
 
     def _bar_label(item):
-        return (
-            f"[{units_text(item['units'], statistic_of(item))}]"
-            if item.get("units")
-            else ""
-        )
+        return bracketed_units(item.get("units"), statistic_of(item))
 
     column_bars: list[list[int]] = []
     if colorbars == "column":
@@ -8326,7 +8403,7 @@ def section_row(
         fig,
         ims[2],
         axes[2],
-        f"difference {lab}",
+        f"difference {lab}".strip(),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
@@ -8684,7 +8761,7 @@ def section_row_grid(
             fig,
             ims[2],
             axes[i][2],
-            f"difference {lab}",
+            f"difference {lab}".strip(),
             colorbar_kwargs,
             defaults["colorbar_kwargs"],
             label_clipped=colorbar_label_clipped,
@@ -9218,8 +9295,7 @@ def _units_label(da) -> str:
     :func:`field_facet` every panel here has a bar of its own and a title copy would
     say it twice.
     """
-    units = units_text(da.attrs.get("units"))
-    return f"[{units}]" if units else ""
+    return bracketed_units(da.attrs.get("units"))
 
 
 #: Output formats :func:`field_movie` writes, and which matplotlib writer does each.
@@ -9583,7 +9659,7 @@ def field_movie(
         fig,
         ims[2],
         axes[2],
-        f"difference {lab}",
+        f"difference {lab}".strip(),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,
@@ -9820,7 +9896,7 @@ def facet_movie(
         fig,
         im,
         ax,
-        f"[{units_text(units, statistic)}]" if units else "",
+        bracketed_units(units, statistic),
         colorbar_kwargs,
         defaults["colorbar_kwargs"],
         label_clipped=colorbar_label_clipped,

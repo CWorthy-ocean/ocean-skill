@@ -105,8 +105,9 @@ def test_fahrenheit(spelling):
         ("dbar", "dbar"),
         ("K", "K"),
         ("%", "%"),
+        # dimensionless: nothing for a label to say
+        ("1", ""),
         # not units pint knows: left as they came
-        ("1", "1"),
         ("unknown_thing", "unknown_thing"),
         ("", ""),
         (None, ""),
@@ -310,7 +311,7 @@ REALISTIC = [
     ("1/s", "1/s"),
     ("1e-3", "1e-3"),
     ("1e-06", "1e-06"),
-    ("1", "1"),
+    ("1", ""),
     ("", ""),
     # still the temperature spellings, with or without a space
     ("deg C", "°C"),

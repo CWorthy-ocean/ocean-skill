@@ -247,7 +247,8 @@ def _vertical_label(specs) -> str:
     if str(specs[0].values.dims[0]) == "sigma0":
         return "σ₀ [kg/m³]"
     units = _vertical_coord(specs[0].values).attrs.get("units") or "m"
-    return f"Depth [{units_text(units)}]"
+    shown = units_text(units)
+    return f"Depth [{shown}]" if shown else "Depth"
 
 
 #: Resample frequency-alias prefixes (stripped of any leading multiplier, e.g.

@@ -73,6 +73,7 @@ __all__ = [
     "prepare_section",
     "prepare_section_row",
     "seafloor_line",
+    "trimmed_x_range",
 ]
 
 
@@ -111,6 +112,9 @@ class SectionGeometry:
     native_s: bool
     path_note: str
     x_axis: str = "distance"
+    #: ``(lo, hi)`` on the x axis when its all-land ends are cut off (see
+    #: :func:`trimmed_x_range`), ``None`` when every column has something to show.
+    x_trim: tuple[float, float] | None = None
 
 
 def _band_note(axis: str, band) -> str:
@@ -458,8 +462,53 @@ def prepare_section(
         native_s=native_s,
         path_note=_path_note(da, lon_name, lat_name),
         x_axis=x_axis,
+        x_trim=trimmed_x_range([result], "distance"),
     )
     return result, geometry
+
+
+def trimmed_x_range(
+    lanes: Sequence[xr.DataArray], x_name: str = "distance"
+) -> tuple[float, float] | None:
+    """Return the x range that leaves out leading/trailing columns with no data at all.
+
+    A section along a boundary or coast can run through land at one or both ends -- the
+    CCS north boundary is mostly land -- and every cell there is NaN in every lane, so
+    the panel is mostly grey. ``lanes`` are the panels' prepared fields (one per panel
+    of the figure: test, reference, difference); a column is empty only when it is NaN
+    in *all* of them, at every depth, so the panels of a row keep one shared extent.
+    Only the ends are trimmed -- a gap in the middle is a real gap.
+
+    The range is the drawn cell edges: halfway to the neighboring column that is cut,
+    so the first and last column that stay are whole cells. ``None`` when nothing can
+    be cut (no empty end), when nothing at all has data, or when fewer than two columns
+    would be left to draw.
+    """
+    from ocean_skill.align import ALONG_DIM
+
+    lanes = [lane for lane in lanes if lane is not None]
+    if not lanes or ALONG_DIM not in lanes[0].dims or x_name not in lanes[0].coords:
+        return None
+    size = lanes[0].sizes[ALONG_DIM]
+    has_data = np.zeros(size, dtype=bool)
+    for lane in lanes:
+        if lane.sizes.get(ALONG_DIM) != size:
+            return None
+        along_only = [d for d in lane.dims if d != ALONG_DIM]
+        has_data |= np.isfinite(lane).any(along_only).values
+    live = np.flatnonzero(has_data)
+    if live.size < 2 or (live[0] == 0 and live[-1] == size - 1):
+        return None
+    coord = lanes[0][x_name]
+    x = np.asarray(
+        coord.isel({d: 0 for d in coord.dims if d != ALONG_DIM}), dtype="float64"
+    )
+    first, last = int(live[0]), int(live[-1])
+    if not (np.isfinite(x[first]) and np.isfinite(x[last])):
+        return None
+    lo = x[first] if first == 0 else (x[first - 1] + x[first]) / 2.0
+    hi = x[last] if last == size - 1 else (x[last] + x[last + 1]) / 2.0
+    return (float(min(lo, hi)), float(max(lo, hi)))
 
 
 def prepare_section_row(
@@ -510,6 +559,8 @@ def prepare_section_row(
             geometry = lane_geometry
             x = lane_geometry.x_axis
     assert geometry is not None
+    # the three panels keep one extent: only columns empty in all of them are cut
+    geometry.x_trim = trimmed_x_range(list(values.values()), geometry.x_name)
     return values, geometry
 
 

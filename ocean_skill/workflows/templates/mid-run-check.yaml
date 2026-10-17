@@ -80,6 +80,7 @@ defaults:
   period: {min: "2011-01-01"}
 # <<< setup
   # (the rest of defaults: is the same for every run)
+  # The page texts say "the run so far": reword them if you narrow `period:` above.
   # Every page's plot: options start from these (a page's own plot: wins). Robust color
   # limits clip each panel to its central 80% (difference panels too), so coastal and
   # river-mouth extremes don't wash out the open ocean.
@@ -103,11 +104,11 @@ pages:
   - title: "Run health"
     section: >-
       Checks of the model output itself, independent of observations: every variable at
-      every level of every restart in the window defaults.period. The summary lists
+      every level of every restart over the whole run so far. The summary lists
       problems first (negative or impossible values, fields that are all zero or copies
       of another field, sudden steps in a tracer's total) and then the largest drifts.
-      Totals are volume integrals over the whole domain; segment boundaries of the run's
-      jobs are shaded. One pass over the output feeds all four pages, and each restart's
+      Totals are volume integrals over the whole domain; alternating shading marks the
+      run's jobs. One pass over the output feeds all four pages, and each restart's
       results are cached, so a later check reads only the new restarts.
 
   - title: "Run health — summary"
@@ -117,15 +118,15 @@ pages:
     health: {time: "{period}", draw: integrity}
     caption: >-
       Per variable, over ocean cells at every level: the worst share of cells negative or
-      outside physical bounds over the window (and when), the newest restart's share, and
-      where the minimum and maximum occur.
+      outside physical bounds over the run so far (and when), the newest restart's share,
+      and where the minimum and maximum occur.
 
   - title: "Run health — domain totals and deep means"
     health: {time: "{period}", draw: inventory}
     caption: >-
       Volume-integrated totals (percent change from the first restart), kinetic energy,
       the volume of water with oxygen below 60 and 20 mmol/m³, and volume means below
-      1000 m. Shading marks the run's job segments.
+      1000 m. Alternating shading marks the run's jobs.
 
   - title: "Run health — plankton spin-up"
     health: {time: "{period}", draw: plankton}
@@ -136,11 +137,10 @@ pages:
   # -- domain-wide trends ---------------------------------------------------------
   - title: "Domain-wide trends"
     section: >-
-      Area-weighted means over the whole model domain at each restart snapshot in the
-      window defaults.period (the whole run so far, by default), at the surface (the
-      top model level), at 100 m and at 200 m. A mean at depth covers only the water
-      deeper than that depth, so the 100 m and 200 m lines leave out the shallower
-      parts of the domain.
+      Area-weighted means over the whole model domain at each restart snapshot of the
+      run so far, at the surface (the top model level), at 100 m and at 200 m. A mean
+      at depth covers only the water deeper than that depth, so the 100 m and 200 m
+      lines leave out the shallower parts of the domain.
 
   - title: "Domain-mean time series"
     field:
@@ -163,17 +163,17 @@ pages:
   - title: "Extreme values"
     section: >-
       Where surface alkalinity is lowest and highest, searched over every grid cell and
-      every restart snapshot in the window defaults.period (the whole run so far, by
-      default), and how dissolved inorganic carbon, temperature, salinity and nitrate
-      evolved at that one grid point over the same window. These are point time series
-      at the location of the extremum, not domain means.
+      every restart snapshot of the run so far, and how dissolved inorganic carbon,
+      temperature, salinity and nitrate evolved at that one grid point over the same
+      period. These are point time series at the location of the extremum, not domain
+      means.
 
   # The whole window's surface field is loaded to search it, so these two pages read
   # more data than a single-snapshot page does.
   - title: "Surface alkalinity minimum — time series"
     caption: >-
-      The grid cell and restart with the lowest surface alkalinity in the window, and the
-      surface time series of the other variables at that one cell.
+      The grid cell and restart with the lowest surface alkalinity over the run so far,
+      and the surface time series of the other variables at that one cell.
     field:
       variables: [alkalinity]
       select: {depth: surface, time: "{period}"}
@@ -183,8 +183,8 @@ pages:
 
   - title: "Surface alkalinity maximum — time series"
     caption: >-
-      The grid cell and restart with the highest surface alkalinity in the window, and the
-      surface time series of the other variables at that one cell.
+      The grid cell and restart with the highest surface alkalinity over the run so far,
+      and the surface time series of the other variables at that one cell.
     field:
       variables: [alkalinity]
       select: {depth: surface, time: "{period}"}
@@ -195,8 +195,9 @@ pages:
   # -- latest model snapshot -------------------------------------------------------
   - title: "Latest model snapshot"
     section: >-
-      The newest restart on its own, with no observations: every variable at the surface,
-      then at 200 m, each map with its own robust color limits (central 80%).
+      The newest restart on its own, with no observations: temperature, salinity,
+      nitrate, phosphate, oxygen, dissolved inorganic carbon and alkalinity at the
+      surface, then at 200 m, each map with its own robust color limits (central 80%).
 
   - title: "Latest snapshot — {depth.label}"
     for_each:

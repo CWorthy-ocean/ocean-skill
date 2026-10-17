@@ -233,6 +233,14 @@ def _is_whole(field_name: str | None, value: Any) -> bool:
     return field_name == "time" and not _season_like(value)
 
 
+_SAME_DAY_RE = re.compile(r"(\d{4}-\d{2}-\d{2})–\1(?!\d)")
+
+
+def _collapse_range(text: str) -> str:
+    """Spell a one-day span as that day: ``2013-01-01–2013-01-01`` is ``2013-01-01``."""
+    return _SAME_DAY_RE.sub(r"\1", text)
+
+
 def _level_text(field_name: str, value: Any) -> str:
     """One level as a table reads it: depth bands as ``"0-5 m"``, windows as spans."""
     if value is None:
@@ -252,7 +260,7 @@ def _level_text(field_name: str, value: Any) -> str:
     if field_name == "time" and isinstance(value, dict | list | tuple):
         from ocean_skill.comparison import _time_label
 
-        return _time_label(value)
+        return _collapse_range(_time_label(value))
     if isinstance(value, dict | list | tuple):
         return str(value)
     from ocean_skill.plot.summary import pretty_level
@@ -611,7 +619,11 @@ class MetricsTable:
         return df.loc[:, [c for c in df.columns if (df[c] != "").any()]]
 
     def to_figures(
-        self, *, max_rows: int | None = 24, title: str | None = "Metrics"
+        self,
+        *,
+        max_rows: int | None = 24,
+        title: str | None = "Metrics",
+        common_notes: bool = False,
     ) -> list:
         """Draw the table as matplotlib figures of at most ``max_rows`` rows each.
 
@@ -622,6 +634,11 @@ class MetricsTable:
         fit a Letter page. ``max_rows`` counts rows (a row that spans several lines
         counts once); ``None`` limits only by the page. Spanning
         cells (a table built with ``split=``) are drawn on their first line only.
+
+        ``common_notes=True`` moves what every row's ``Notes`` has in common (one
+        ``;``-separated part, say ``200 m``) out of the column and into the title's
+        parenthetical, so a table of rows that all share a depth and window says so
+        once; a ``Notes`` column left empty is dropped.
         """
         import matplotlib.pyplot as plt
         from matplotlib.table import Table
@@ -635,6 +652,8 @@ class MetricsTable:
         body = [[c.text if c is not None else "" for c in line] for line in lay.body]
         aligns = [c.align for c in lay.cols]
         starts = [*lay.row_starts, len(body)]
+        if common_notes and "Notes" in header:
+            title = _factor_notes(header, body, aligns, starts, title)
         rows = [body[a:b] for a, b in itertools.pairwise(starts)]
         if not rows:
             raise ValueError("table has no rows to draw")
@@ -777,6 +796,37 @@ class _Row:
     rep: dict[str, Any] = field(default_factory=dict)  # the record that speaks for it
 
 
+def _factor_notes(
+    header: list[str],
+    body: list[list[str]],
+    aligns: list[str],
+    starts: list[int],
+    title: str | None,
+) -> str | None:
+    """Move the parts every row's Notes share into ``title``; drop an emptied column.
+
+    Edits ``header``, ``body`` and ``aligns`` in place (the Notes column is removed
+    when nothing is left in it) and returns the title with the shared parts after it
+    in parentheses. Parts are the ``"; "``-separated pieces of a note; a part is shared
+    when every row has it, so with a single row its whole note goes to the title.
+    """
+    if not title:  # nowhere to say it: the column stays as it is
+        return title
+    j = header.index("Notes")
+    firsts = starts[:-1]
+    notes = [[p for p in body[i][j].split("; ") if p] for i in firsts]
+    shared = [p for p in dict.fromkeys(notes[0]) if all(p in n for n in notes)]
+    for i, parts in zip(firsts, notes, strict=True):
+        body[i][j] = "; ".join(p for p in parts if p not in shared)
+    if shared and title:
+        title = f"{title} ({'; '.join(shared)})"
+    if not any(body[i][j] for i in firsts):
+        del header[j], aligns[j]
+        for line in body:
+            del line[j]
+    return title
+
+
 def _wrap_cell(text: str, width: int) -> list[str]:
     """Wrap one cell's text to about ``width`` characters, at word boundaries only.
 
@@ -856,7 +906,7 @@ def _auto_note(rec: dict[str, Any], skip: set[str]) -> str:
     depth = rec.get("depth")
     if "depth" not in skip and depth is not None:
         text = _level_text("depth", depth)
-        if text and text != "no vertical axis":
+        if text and text not in ("no vertical axis", "n/a"):
             parts.append(text)
     time = rec.get("time")
     if "time" not in skip and time is not None:

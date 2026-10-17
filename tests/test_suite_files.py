@@ -394,3 +394,45 @@ def test_pacmed_zonal_current_pages_are_lon_mean_slabs_with_zero_contours(
     }
     assert page.contours is True
     assert page.plot["contour_levels"] == [0]
+
+
+# -- input-check and mid-run-check: plain words, boundary titles, optional pages -------
+
+
+def _page_texts(path: Path) -> list[str]:
+    raw = yaml.safe_load(path.read_text())["pages"]
+    return [t for page in raw for t in (page.get("section"), page.get("caption")) if t]
+
+
+@pytest.mark.parametrize("name", ["mid-run-check.yaml", "input-check.yaml"])
+def test_section_texts_and_captions_use_no_yaml_jargon(name):
+    for text in _page_texts(TEMPLATES_DIR / name):
+        assert "defaults." not in text, text
+
+
+def test_the_health_text_says_alternating_shading_marks_the_jobs():
+    path = TEMPLATES_DIR / "mid-run-check.yaml"
+    health = [t for t in _page_texts(path) if "shading" in t]
+    assert health and all(
+        "alternating shading marks the run's jobs" in t.lower() for t in health
+    )
+
+
+def test_input_check_expands_with_its_boundary_climatology_and_restoring_pages():
+    _, expanded = _expand(TEMPLATES_DIR / "input-check.yaml")
+    titles = [p.title for p in expanded]
+    clim = [t for t in titles if "iron, ammonium, DOC" in t]
+    assert [t.split(" boundary")[0] for t in clim] == ["South", "West"]
+    assert any(t.startswith("Salinity restoring vs WOA23") for t in titles)
+    assert not [p for p in expanded if p.problem]
+    # every boundary figure names its side
+    for p in expanded:
+        if p.kind in ("compare", "field") and " boundary — " in p.title:
+            assert p.plot["title"].startswith(
+                p.title.split(" boundary")[0] + " boundary"
+            )
+            # the location is in the caption (a full title runs off the page)
+            assert "(lon " not in p.plot["title"], p.plot["title"]
+    section = next(p for p in expanded if p.title == "Boundary conditions")
+    text = section.kwargs["text"]
+    assert "2011-01" in text and "{" not in text

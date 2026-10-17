@@ -2392,3 +2392,51 @@ def test_the_c_star_blueprint_and_workplan_are_copied_under_run_info(
     assert (result.report_dir / "run_info" / "bp.yaml").read_text() == "name: bp"
     assert (result.report_dir / "run_info" / "wp.yaml").read_text() == "name: wp"
     assert json.loads(result.manifest.read_text())["run_info"]["name"] == "x"
+
+
+def test_a_field_pages_plot_title_replaces_the_figures_suptitle(tmp_path, stub_model):
+    """``plot: {title: page}`` draws the page's own title (placeholders filled)."""
+    from ocean_skill.config import SuiteConfig
+
+    cfg = _model_only_suite(tmp_path)
+    cfg["pages"] = [
+        {
+            "title": "{side} boundary -- temperature",
+            "for_each": {"side": ["South"]},
+            "field": {
+                "variables": ["temperature"],
+                "select": {"depth": "surface", "time": "latest"},
+            },
+            "plot": {"title": "page"},
+        },
+        {
+            "title": "Other",
+            "field": {
+                "variables": ["temperature"],
+                "select": {"depth": "surface", "time": "latest"},
+            },
+            "plot": {"title": "Only this"},
+        },
+    ]
+    suite = SuiteConfig.model_validate(cfg)
+    south, other = _pages.expand(suite)
+    ((_, fig),) = _pages.build(south)
+    assert fig._suptitle.get_text() == "South boundary -- temperature"
+    ((_, fig),) = _pages.build(other)
+    assert fig._suptitle.get_text() == "Only this"
+
+
+def test_a_refreshed_sources_label_is_how_figures_name_it(isolated_catalogs, tmp_path):
+    _segment(tmp_path / "out.0.nc", 0.0, 1.0)
+    _refresh_sources(
+        [
+            {
+                "name": "GOM_bgc",
+                "files": str(tmp_path / "out.*.nc"),
+                "ref": str(tmp_path / "refs" / "gom_bgc.json"),
+                "label": "Gulf of Maine BGC",
+            }
+        ],
+        isolated_catalogs / "run.yaml",
+    )
+    assert _catalog.source_label("GOM_bgc") == "Gulf of Maine BGC"

@@ -73,6 +73,7 @@ from ocean_skill.plot.section import (
 )
 from ocean_skill.plot.section import contour_levels as _contour_levels_for
 from ocean_skill.plot.typography import (
+    CSS_PX_PER_INCH,
     PAGE_W,
     PT_PER_CSS_PX,
     SERIES_ASPECT,
@@ -418,6 +419,7 @@ def _quadmesh(
     data_range: tuple[float, float] | None = None,
     label_clipped: bool = False,
     statistic: str | None = None,
+    x_trim: tuple[float, float] | None = None,
 ):
     """One interactive map panel with hover readout.
 
@@ -507,6 +509,11 @@ def _quadmesh(
         # a section drawn against its own longitude/latitude: ticks spelled as the
         # static renderer (and a map's gridlines) spell them, 125°W rather than -125
         opts["xformatter"] = formatter
+        # and as few of them as the width holds (a path across the dateline would
+        # otherwise run its labels together), as the static renderer's locator does
+        from ocean_skill.plot._geo_labels import tick_count
+
+        opts["xticks"] = tick_count(frame_w / CSS_PX_PER_INCH)
     if geo:
         projection = _output_projection(da)
         opts |= {"geo": True, "projection": projection}
@@ -594,6 +601,10 @@ def _quadmesh(
         # bokeh plot class accepts it fine) -- confirmed by applying it via
         # .opts() on the already-built element instead, which this does.
         result = result.opts(invert_yaxis=True)
+    if x_trim is not None and not geo:
+        # a section's all-land ends cut off (see section.trimmed_x_range); on the built
+        # element, like invert_y, as hvplot's own option resolution drops it
+        result = result.opts(xlim=tuple(x_trim))
     if data_range is None:
         data_range = _data_range(da, log=log)
     return _mark_clipped(
@@ -642,6 +653,7 @@ _LINE_DASH = {
 #: fill needs the same of, so the polygons sit in the very same frame, axes and type.
 _PANEL_OPTS = (
     "bgcolor",
+    "xlim",
     "fontsize",
     "frame_height",
     "frame_width",
@@ -1655,7 +1667,7 @@ def _field_row(
             cmap=div,
             clim=div_clim,
             data_range=div_range,
-            units=f"test − reference {units}",
+            units=f"test − reference {units}".strip(),
             statistic=statistic,
             geo=geo,
             font_scale=font_scale,
@@ -1958,7 +1970,7 @@ def _difference_grid(
     standard_name = items[0].get("standard_name")
     statistic = statistic_of(items[0])
     _, div = cmaps_for(standard_name, statistic=statistic)
-    units = f"test − reference {units_text(items[0].get('units'), statistic)}"
+    units = f"test − reference {units_text(items[0].get('units'), statistic)}".strip()
     dmax = difference_limit(
         np.concatenate([np.asarray(d).ravel() for d in diffs]),
         resolve_diff_quantile(diff_quantile, robust),
@@ -2015,6 +2027,7 @@ def _difference_grid(
                     x=x_name,
                     y=geometry.y_name,
                     aspect=SECTION_ASPECT,
+                    x_trim=geometry.x_trim,
                     invert_y=True,
                     bgcolor="#d9d9d9",
                     axis_labels=(geometry.x_label, geometry.y_label),
@@ -2500,6 +2513,7 @@ def _section(
         x=geometry.x_name,
         y=geometry.y_name,
         aspect=SECTION_ASPECT,
+        x_trim=geometry.x_trim,
         invert_y=True,
         bgcolor="#d9d9d9",
         label_clipped=colorbar_label_clipped,
@@ -3245,10 +3259,11 @@ def _field_map_grid(
     same as the static renderer, either way.
 
     The column count comes from the shared
-    :func:`~ocean_skill.plot.typography.facet_layout` unfaceted, so the two renderers
-    arrange the same panels the same way -- the grid is free here too, these panels
-    having no inherent order either. Faceted, the shape is the facets' own -- ``ncols=``
-    is then refused, matching the static renderer.
+    :func:`~ocean_skill.plot.typography.map_grid_layout` unfaceted, so the two renderers
+    arrange the same panels the same way -- three across (two for a very wide
+    domain) however few the panels, these having no inherent order either. Faceted,
+    the shape is the facets' own -- ``ncols=`` is then refused, matching the static
+    renderer.
 
     ``tiles`` puts a web basemap under every panel, on by default -- see
     :func:`_field_facet`'s docstring for what it accepts. Resolved once across every
@@ -3286,7 +3301,7 @@ def _field_map_grid(
         resolve_limit_groups,
     )
     from ocean_skill.plot.matplotlib_renderer import grid_suptitle
-    from ocean_skill.plot.typography import facet_layout
+    from ocean_skill.plot.typography import map_grid_layout
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
@@ -3324,9 +3339,7 @@ def _field_map_grid(
     else:
         margins = False
         if ncols is None:
-            ncols, _nrows = facet_layout(
-                n, _aspect_of(items[0]["field"]), canvas=resolve_canvas(size, zoom)
-            )
+            ncols, _nrows = map_grid_layout(n, _aspect_of(items[0]["field"]))
         ncols = max(int(ncols), 1)
         nrows = -(-n // ncols)
         cell_items = list(items)
@@ -3695,6 +3708,7 @@ def _section_row(
         x=x_name,
         y=geometry.y_name,
         aspect=SECTION_ASPECT,
+        x_trim=geometry.x_trim,
         invert_y=True,
         # a missing cell shows the panel's background: the grey of "no data" -- unless
         # the seafloor is drawn, which already says where the rock is, and what is
@@ -3752,7 +3766,7 @@ def _section_row(
             title=diff_title,
             cmap=div,
             clim=div_clim,
-            units=f"test − reference {units}",
+            units=f"test − reference {units}".strip(),
             statistic=statistic,
             data_range=div_range,
             **section_opts,
@@ -4210,7 +4224,13 @@ def _time_depth_row(
         _panel(t, test_title, seq, seq_clim, units, log, seq_range),
         _panel(r, ref_title, seq, seq_clim, units, log, seq_range),
         _panel(
-            d, diff_title, div, div_clim, f"test − reference {units}", False, div_range
+            d,
+            diff_title,
+            div,
+            div_clim,
+            f"test − reference {units}".strip(),
+            False,
+            div_range,
         ),
     ]
     row = panels[0] + panels[1] + panels[2]
@@ -5856,7 +5876,7 @@ def _field_movie(
             cmap=div,
             clim=(-dmax, dmax),
             data_range=diff_reach,
-            units=f"test − reference {units}",
+            units=f"test − reference {units}".strip(),
             statistic=statistic,
             geo=geo,
             font_scale=font_scale,

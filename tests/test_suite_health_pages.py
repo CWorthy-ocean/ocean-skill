@@ -379,3 +379,41 @@ def test_segment_joins_come_from_overrides_when_steps_share_a_blueprint(tmp_path
         pd.Timestamp("2013-02-01").to_pydatetime(),
         pd.Timestamp("2013-03-01").to_pydatetime(),
     ]
+
+
+def test_segment_joins_include_earlier_tasks_beside_the_workplans_steps(tmp_path):
+    # a run continued under a new workplan keeps its earlier jobs' folders next to the
+    # current ones: their resolved blueprints (and directives) still mark joins
+    suite = _write_workplan(tmp_path, ["2013-07-01"])
+    tasks = tmp_path / "cstar" / "tasks"
+    for name, start, end in [
+        ("jan", "2013-01-01", "2013-02-01"),
+        ("feb", "2013-02-01", "2013-06-30"),
+    ]:
+        (tasks / name / "work").mkdir(parents=True)
+        (tasks / name / "work" / "B.ovrd.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "initial_conditions": {},
+                    "runtime_params": {"start_date": start, "end_date": end},
+                }
+            )
+        )
+    # a folder with only directives overrides, and one with nothing at all
+    (tasks / "fix" / "work").mkdir(parents=True)
+    (tasks / "fix" / "work" / "directives.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "directives": {
+                    "apply-overrides": {
+                        "overrides": {"runtime_params": {"start_date": "2013-03-15"}}
+                    }
+                }
+            }
+        )
+    )
+    (tasks / "rst_files").mkdir()
+    assert cover.segment_starts(suite) == [
+        pd.Timestamp(d).to_pydatetime()
+        for d in ("2013-02-01", "2013-03-15", "2013-07-01")
+    ]

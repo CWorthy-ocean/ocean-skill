@@ -1617,3 +1617,58 @@ def test_refresh_forcing_builds_a_strip_entry(isolated_catalogs, tmp_path, capsy
     _refresh_forcing([entry], isolated_catalogs / "run.yaml")
     assert "-> bry_west, bry_south, bry_strip" in capsys.readouterr().out
     assert _entry_strip("bry_strip", {"depth": [20.0]}).sizes["along"] == NY + NX - 1
+
+
+def test_a_label_reaches_the_entry_metadata_and_names_the_source(
+    isolated_catalogs, tmp_path
+):
+    """``label=`` (a suite's ``refresh: ... label:``) is how figures name a source."""
+    grid, _, _ = _grid(tmp_path)
+    cat = build.new_catalog(title="labelled")
+    f = tmp_path / "bry.nc"
+    _boundary_file(f, [0, 1, 2])
+    build.add_boundary_sources(cat, "run_bry", f, grid, label="boundary file")
+    surf = tmp_path / "surf.nc"
+    _surface_file(surf)
+    build.add_forcing_source(cat, "run_surf", surf, grid, label="surface physics")
+    build.save(cat, isolated_catalogs / "labelled.yaml")
+    assert sources.resolve("run_bry_south").metadata["label"] == "boundary file"
+    assert sources.resolve("run_surf").metadata["label"] == "surface physics"
+    from ocean_skill.catalog import source_label
+
+    assert source_label("run_bry_west") == "boundary file"
+    assert source_label("run_surf") == "surface physics"
+
+
+def test_refresh_forcing_label_is_how_figures_name_each_entry(
+    isolated_catalogs, tmp_path
+):
+    from ocean_skill import catalog
+    from ocean_skill.workflows.run import _refresh_forcing
+
+    grid = _forcing_files(tmp_path)
+    catalog_path = isolated_catalogs / "run.yaml"
+    _refresh_forcing(
+        [
+            {
+                "name": "bry",
+                "kind": "boundary",
+                "files": [str(tmp_path / "y2011/*.nc")],
+                "grid": str(grid),
+                "sides": ["south"],
+                "variables": ["temp", "salt"],
+                "label": "Boundary physics",
+            },
+            {
+                "name": "surf",
+                "kind": "surface",
+                "files": str(tmp_path / "surface.nc"),
+                "grid": str(grid),
+                "time_coord": "time",
+                "label": "Surface physics",
+            },
+        ],
+        catalog_path,
+    )
+    assert catalog.source_label("bry_south") == "Boundary physics"
+    assert catalog.source_label("surf") == "Surface physics"

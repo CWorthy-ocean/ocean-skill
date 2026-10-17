@@ -550,7 +550,7 @@ class Extremum:
         each panel's own title only names a place and a period and so reads like a
         station record or a domain-wide trend::
 
-            Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at
+            Time series at the surface alkalinity minimum: 126.1 mmol/m³ at
             16.1°N 97.6°E on 2010-10-31
 
         The depth phrase (``surface``, ``100 m``) comes from the parent field's own
@@ -693,7 +693,7 @@ class Extremum:
     def _series_title(self) -> str:
         """Return the default suptitle of :meth:`series`: what the point *is*.
 
-        ``"Time series at the surface alkalinity minimum: 126.1 mmol/m^3 at 16.1°N
+        ``"Time series at the surface alkalinity minimum: 126.1 mmol/m³ at 16.1°N
         97.6°E on 2010-10-31"``. Each panel's own title names a place and a period
         (``alkalinity · 16.1°N 97.6°E · 2010-07 to 2010-10``), and read alone that is
         indistinguishable from a station's record -- or worse, from a domain-wide
@@ -733,7 +733,11 @@ class Extremum:
             kind = f"{kind} (#{self.rank})"
         name = _short_variable_label(self.variable)
         subject = f"{depth} {name}" if depth else name
-        value = f"{self.value:.4g}" + (f" {self.units}" if self.units else "")
+        from ocean_skill.plot._numbers import format_value
+        from ocean_skill.units import display
+
+        units = display(self.units)
+        value = format_value(self.value, sig=4) + (f" {units}" if units else "")
         title = f"Time series at the {subject} {kind}: {value}"
         if self.lon is not None and self.lat is not None:
             title += f" at {lonlat_label(self.lon, self.lat)}"

@@ -78,6 +78,7 @@ __all__ = [
     "facet_figsize",
     "facet_layout",
     "frame_px",
+    "map_grid_layout",
     "reference_scale",
     "resolve_canvas",
     "row_height",
@@ -767,6 +768,32 @@ def facet_layout(
         if cost < best_cost:
             best, best_cost = (ncols, nrows), cost
     return best
+
+
+#: A map grid of unordered panels is at most this many columns wide, and at most
+#: :data:`WIDE_MAP_GRID_COLS` once the domain is wider than :data:`WIDE_MAP_ASPECT`.
+MAP_GRID_COLS = 3
+WIDE_MAP_GRID_COLS = 2
+WIDE_MAP_ASPECT = 1.6
+
+
+def map_grid_layout(n: int, aspect: float) -> tuple[int, int]:
+    """Return ``(ncols, nrows)`` for ``n`` unordered maps of the given aspect ratio.
+
+    The column count depends on the *domain*, never on how many panels there happen to
+    be: three across for an ordinary box, two for a domain wider than
+    :data:`WIDE_MAP_ASPECT` (a basin-wide strip, where three panels would each be a
+    sliver). A set smaller than that simply fills one row. So a page of two variables
+    or three has the panels of a page of nine -- :func:`facet_layout`, which scores the
+    page's shape against the cells, instead stacked two or three wide maps down the
+    page, each as large as the whole page allows, and one panel size read as "a page of
+    its own" depending only on the variable count.
+    """
+    if n <= 0:
+        raise ValueError(f"a map grid needs at least one panel, got {n}")
+    wide = clamp_aspect(aspect) > WIDE_MAP_ASPECT
+    ncols = min(n, WIDE_MAP_GRID_COLS if wide else MAP_GRID_COLS)
+    return ncols, math.ceil(n / ncols)
 
 
 def auto_figsize(

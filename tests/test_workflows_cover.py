@@ -280,3 +280,41 @@ def test_cover_figures_are_letter_size_and_paginate(tmp_path):
     with PdfPages(io.BytesIO()) as pdf:
         for fig in many:
             pdf.savefig(fig)
+
+
+def test_the_cover_spans_the_whole_workplan_not_the_newest_task(tmp_path):
+    """A restarted run is one workplan of several tasks: its dates run first to last."""
+    run_dir = _tree(tmp_path)
+    root = run_dir.parent.parent
+    steps = []
+    for name, start, end in (
+        ("task_1", "2013-01-02", "2013-02-15"),
+        ("task_2", "2013-02-15", "2013-03-26"),
+        ("task_3", "2013-03-26 00:00:00", "2013-05-01 00:00:00"),
+    ):
+        overrides = {"runtime_params": {"start_date": start, "end_date": end}}
+        directives = {"apply-overrides": {"overrides": overrides}}
+        wd = root / "tasks" / name
+        steps.append(
+            {
+                "name": name,
+                "working_dir": str(run_dir if name == "task_3" else wd),
+                "directives": directives,
+            }
+        )
+    wp = {"name": "WP", "steps": steps}
+    (root / "wp.yaml").write_text(_dump(wp))
+    info = _gather(*_suite(tmp_path, run_dir))
+    assert "Simulated 2013-01-02 to 2013-05-01" in info.subtitle
+    assert "00:00:00" not in info.subtitle
+    assert _rows(info, "Simulation")["Run dates"] == "2013-01-02 -> 2013-05-01"
+
+
+def test_a_generated_blueprint_description_is_not_the_subtitle(tmp_path):
+    run_dir = _tree(tmp_path)
+    work = run_dir / "work"
+    text = "Generated blueprint; overridden keys [runtime_params, working_dir]"
+    (work / "B.ovrd.cfrom.yaml").write_text(_dump(_bp(run_dir, description=text)))
+    info = _gather(*_suite(tmp_path, run_dir))
+    assert "Generated blueprint" not in info.subtitle
+    assert _rows(info, "Simulation")["Description"].startswith("Generated blueprint")

@@ -680,7 +680,8 @@ def _axis_label(items, axis: str) -> str:
     shown = [s for spellings in by_unit.values() for s in spellings if not _bare(s)]
     from ocean_skill.units import display
 
-    return f"{label} [{display(shown[0])}]" if shown else label
+    text = display(shown[0]) if shown else ""
+    return f"{label} [{text}]" if text else label
 
 
 def _unit_key(spelling: str) -> str:

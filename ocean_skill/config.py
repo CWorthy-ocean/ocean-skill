@@ -172,6 +172,7 @@ class RefreshSourceConfig(BaseModel):
     keep: str | None = None
     min_age: float | None = None
     subchunk: dict[str, int] | None = None
+    label: str | None = None  # how figures name this source (entry metadata ``label``)
 
     @field_validator("files")
     @classmethod
@@ -223,6 +224,7 @@ class RefreshForcingConfig(BaseModel):
     hc: float | None = None
     ref: str | None = None
     subchunk: dict[str, int] | None = None
+    label: str | None = None  # how figures name this source (entry metadata ``label``)
 
     @model_validator(mode="after")
     def _kind_keys(self) -> RefreshForcingConfig:
