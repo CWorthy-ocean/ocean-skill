@@ -110,6 +110,8 @@ def pick_subchunk(grid: Path) -> tuple[dict[str, int], int]:
 
 
 #: Boundary side -> the grid dimension and index its edge lies on.
+#: A boundary side gets pages only if at least this share of its edge cells is water.
+MIN_WET = 0.1
 SIDES = {"south": ("eta_rho", 0), "north": ("eta_rho", -1)}
 SIDES |= {"west": ("xi_rho", 0), "east": ("xi_rho", -1)}
 
@@ -143,6 +145,8 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
     from datetime import datetime, timedelta
 
     import xarray as xr
+
+    from ocean_skill.plot._geo_labels import format_lat, format_lon
 
     folder = _abs(args.inputs) if args.inputs else _first_inputs(roots)
     grids = [_abs(args.grid)] if args.grid else sorted(folder.glob("*_grid.nc"))
@@ -185,7 +189,15 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
     if first is None:
         raise SuiteNewError(f"no *boundary-physics_*.nc in {folder}")
     with xr.open_dataset(first, decode_times=False) as ds:
-        open_sides = [s for s in SIDES if f"temp_{s}" in ds]
+        forced = [s for s in SIDES if f"temp_{s}" in ds]
+    # a side that is almost all land (a closed edge roms-tools still writes) gets no
+    # page: under MIN_WET of its edge cells are water
+    with xr.open_dataset(grid) as g:
+        mask = g["mask_rho"]
+        wet = {s: float(mask.isel({SIDES[s][0]: SIDES[s][1]}).mean()) for s in forced}
+    open_sides = [s for s in forced if wet[s] >= MIN_WET]
+    if dropped := [f"{s} ({wet[s]:.0%} water)" for s in forced if s not in open_sides]:
+        warn.append(f"boundary sides left out as mostly land: {', '.join(dropped)}")
     bgc = _by_glob(folder, "*boundary-bgc-*.nc")
     bgc = [k for k in bgc if not Path(k).stem.endswith(("_clim", "-clim"))]
 
@@ -202,7 +214,10 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
         dim, i = SIDES[side]
         cut = (i, slice(None)) if dim == "eta_rho" else (slice(None), i)
         (x0, x1), (y0, y1) = lon[cut][[0, -1]], lat[cut][[0, -1]]
-        label = f"lon {x0:.1f} to {x1:.1f}, lat {y0:.1f} to {y1:.1f}"
+        label = (
+            f"lon {format_lon(x0)} to {format_lon(x1)}, "
+            f"lat {format_lat(y0)} to {format_lat(y1)}"
+        )
         sides.append(
             {"name": side, "title": side.title(), "label": label}
             | {"transect": {dim: i}}
@@ -240,11 +255,22 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
     rivers = sorted(folder.glob("*river*.nc"))
     add("river", "river", str(rivers[0]) if rivers else None)
 
-    # the first date: the restart's day (to the nearest), else the first boundary month
+    # the first date: the restart's day (to the nearest), else a roms-tools initial
+    # conditions file's own ini_time, else the first boundary month -- which can be a
+    # month early, since boundary files are padded before the start
     stamp = re.search(r"output_rst\.(\d{14})", ic.name)
     month = re.search(r"_(\d{4})(\d{2})\.nc$", first.name)
+    ini_time = None
+    if not stamp:
+        try:
+            with xr.open_dataset(ic, decode_times=False) as ds:
+                ini_time = ds.attrs.get("ini_time")
+        except (OSError, ValueError):  # unreadable: fall back to the boundary month
+            warn.append(f"could not read ini_time from {ic.name}; check forcing_time")
     if stamp:
         when = datetime.strptime(stamp[1], "%Y%m%d%H%M%S") + timedelta(hours=12)
+    elif ini_time:
+        when = datetime.fromisoformat(str(ini_time).strip())
     elif month:
         when = datetime(int(month[1]), int(month[2]), 1)
     else:
@@ -260,7 +286,11 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
 
     def dump(data: dict) -> str:
         text = yaml.safe_dump(
-            data, sort_keys=False, default_flow_style=None, width=10**6
+            data,
+            sort_keys=False,
+            default_flow_style=None,
+            width=10**6,
+            allow_unicode=True,  # "132°W", not "132\xB0W"
         )
         return textwrap.indent(text.rstrip(), "  ")
 

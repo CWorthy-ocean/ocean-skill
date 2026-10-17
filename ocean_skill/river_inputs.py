@@ -10,6 +10,12 @@ time), keeping only what each figure needs -- per-river maxima and minima with t
 they happened at, counts outside :data:`RIVER_BOUNDS` -- and ``river_volume`` is
 streamed the same way for the time-mean discharge that ranks the rivers.
 
+Real files are mostly rivers with no water or no grid cell, and the zero-flow ones carry
+absurd concentrations. :meth:`RiverInputs.classes` sorts every river once -- **active**
+(a mouth and a positive time-mean discharge), mouth but no flow, flow but no grid cell
+(no cell of its own in river_index: reported, to be checked), neither -- and every
+concentration view uses active rivers only, at the steps where they actually flow.
+
 Four views (:data:`RIVER_DRAWS`), each a list of ``(name, matplotlib Figure)``:
 
 ``map``
@@ -303,7 +309,9 @@ class RiverInputs:
             ds["river_index"].values, ds["river_fraction"].values, glon, glat, self.ids
         )
         self._q: dict[str, Any] | None = None
+        self._classes: dict[str, Any] | None = None
         self._scan_cache: dict[str, Any] | None = None
+        self._identical: list[tuple[int, int]] | None = None
 
     # -- reading -----------------------------------------------------------------
 
@@ -372,51 +380,162 @@ class RiverInputs:
         """Time-mean discharge of each river, m3/s."""
         return self._discharge()["mean"]
 
+    def classes(self) -> dict[str, Any]:
+        """Sort the rivers by whether they have a mouth and a flow, once.
+
+        A river is **active** when it has a mouth (a cell in ``river_index``) and a
+        positive time-mean discharge; the rest are ``mouth_no_flow`` (a cell, but no
+        water), ``flow_no_mouth`` (water with no grid cell of its own -- roms-tools'
+        ``overlap_*`` rivers may enter through another river's cell) or ``neither``.
+        Returns the four counts, the masks (``active``,
+        ``mouth``, ``flow``) and, for ``flow_no_mouth``, the time-mean discharge lost
+        (``lost_m3s``, ``lost_pct`` of all river discharge) and the ``largest`` five
+        such rivers.
+        """
+        if self._classes is not None:
+            return self._classes
+        q = self.discharge
+        mouth = np.isfinite(self.lon) & np.isfinite(self.lat)
+        flow = np.isfinite(q) & (q > 0)
+        lost = flow & ~mouth
+        total = float(q[flow].sum())
+        lost_q = float(q[lost].sum())
+        biggest = np.flatnonzero(lost)
+        biggest = biggest[np.argsort(-q[biggest], kind="stable")][:5]
+        self._classes = {
+            "active": int((mouth & flow).sum()),
+            "mouth_no_flow": int((mouth & ~flow).sum()),
+            "flow_no_mouth": int(lost.sum()),
+            "neither": int((~mouth & ~flow).sum()),
+            "mask_active": mouth & flow,
+            "mask_mouth": mouth,
+            "mask_flow": flow,
+            "lost_m3s": lost_q,
+            "lost_pct": 100.0 * lost_q / total if total > 0 else 0.0,
+            "largest": [
+                {
+                    "river": self.names[i],
+                    "river_id": int(self.ids[i]),
+                    "discharge_m3s": float(q[i]),
+                }
+                for i in biggest
+            ],
+        }
+        return self._classes
+
+    @property
+    def active(self) -> np.ndarray:
+        """Boolean mask of the active rivers (a mouth and a positive mean discharge)."""
+        return self.classes()["mask_active"]
+
     def _scan(self) -> dict[str, Any]:
-        """One pass over ``river_tracer`` in slabs: per-river extremes and counts."""
+        """One pass over ``river_tracer`` in slabs: per-river extremes and counts.
+
+        Only **active** rivers count, and each only at the steps its discharge is
+        positive: a concentration carried by no water is meaningless (and in real
+        files absurd). Per tracer and river: the highest and lowest value, the step and
+        the discharge there, and the sum; per tracer: counts of NaN and out-of-bounds.
+        """
         if self._scan_cache is not None:
             return self._scan_cache
         n_tr, n = len(self.tracers), self.n_rivers
+        active = self.active
         hi = np.full((n_tr, n), -np.inf)
         lo = np.full((n_tr, n), np.inf)
         hi_t = np.zeros((n_tr, n), dtype=np.int64)
         lo_t = np.zeros((n_tr, n), dtype=np.int64)
+        hi_q = np.zeros((n_tr, n))
+        lo_q = np.zeros((n_tr, n))
+        total = np.zeros((n_tr, n))
         n_nan = np.zeros(n_tr, dtype=np.int64)
         n_above = np.zeros(n_tr, dtype=np.int64)
         n_below = np.zeros(n_tr, dtype=np.int64)
         lower = np.array([_bound(t)[0] for t in self.tracers])[None, :, None]
         upper = np.array([_bound(t)[1] for t in self.tracers])[None, :, None]
         step = self._slab_steps(n_tr * n)
+        cols = np.arange(n)[None, :]
         self.n_slabs = 0
         for t0 in range(0, self.n_times, step):
             a = self._tracer_slab(t0, t0 + step)
+            vol = self._volume_slab(t0, t0 + step)
             self.n_slabs += 1
+            flowing = ((vol > 0) & active[None, :])[:, None, :]  # (time, 1, river)
             nan = np.isnan(a)
-            n_nan += nan.sum(axis=(0, 2))
-            n_above += ((a > upper) & ~nan).sum(axis=(0, 2))
-            n_below += ((a < lower) & ~nan).sum(axis=(0, 2))
-            top = np.where(nan, -np.inf, a)
+            use = flowing & ~nan
+            n_nan += (flowing & nan).sum(axis=(0, 2))
+            n_above += ((a > upper) & use).sum(axis=(0, 2))
+            n_below += ((a < lower) & use).sum(axis=(0, 2))
+            total += np.where(use, a, 0.0).sum(axis=0)
+            top = np.where(use, a, -np.inf)
             arg = top.argmax(axis=0)
             val = np.take_along_axis(top, arg[None], axis=0)[0]
             better = val > hi
             hi = np.where(better, val, hi)
             hi_t = np.where(better, t0 + arg, hi_t)
-            bot = np.where(nan, np.inf, a)
+            hi_q = np.where(better, vol[arg, cols], hi_q)
+            bot = np.where(use, a, np.inf)
             arg = bot.argmin(axis=0)
             val = np.take_along_axis(bot, arg[None], axis=0)[0]
             better = val < lo
             lo = np.where(better, val, lo)
             lo_t = np.where(better, t0 + arg, lo_t)
+            lo_q = np.where(better, vol[arg, cols], lo_q)
         self._scan_cache = {
             "max": np.where(np.isfinite(hi), hi, np.nan),
             "max_t": hi_t,
+            "max_q": hi_q,
             "min": np.where(np.isfinite(lo), lo, np.nan),
             "min_t": lo_t,
+            "min_q": lo_q,
+            "sum": total,
             "n_nan": n_nan,
             "n_above": n_above,
             "n_below": n_below,
         }
         return self._scan_cache
+
+    def identical_tracers(self) -> list[tuple[int, int]]:
+        """Return ``(first, other)`` tracer indices equal everywhere that has flow.
+
+        Cheap candidates first -- the scan's per-river maximum, minimum and sum match
+        -- then confirmed by comparing the values slab by slab (read only when there
+        is a candidate). Constant tracers (all zero, say) are left out: they are
+        reported on their own and would all "equal" each other. Each tracer is paired
+        with the first earlier one it equals.
+        """
+        if self._identical is not None:
+            return self._identical
+        scan = self._scan()
+        varies = [
+            k
+            for k in range(len(self.tracers))
+            if np.nanmax(scan["max"][k], initial=-np.inf)
+            > np.nanmin(scan["min"][k], initial=np.inf)
+        ]
+        seen: dict[int, int] = {}
+        for j in varies:
+            for i in varies:
+                if i >= j or j in seen:
+                    continue
+                if all(
+                    np.allclose(scan[key][i], scan[key][j], rtol=1e-12, equal_nan=True)
+                    for key in ("max", "min", "sum")
+                ):
+                    seen[j] = i
+        confirmed = dict.fromkeys(seen, True)
+        if seen:
+            active = self.active
+            step = self._slab_steps(len(self.tracers) * self.n_rivers)
+            for t0 in range(0, self.n_times, step):
+                a = self._tracer_slab(t0, t0 + step)
+                flowing = (self._volume_slab(t0, t0 + step) > 0) & active[None, :]
+                for j, i in seen.items():
+                    if confirmed[j]:
+                        x, y = a[:, i], a[:, j]
+                        same = (x == y) | (np.isnan(x) & np.isnan(y))
+                        confirmed[j] = bool(same[flowing].all())
+        self._identical = [(i, j) for j, i in seen.items() if confirmed[j]]
+        return self._identical
 
     # -- helpers ---------------------------------------------------------------------
 
@@ -448,15 +567,17 @@ class RiverInputs:
         date it happened -- for the :data:`TOP_N` highest rivers of each tracer in
         :data:`MAIN_TRACERS`, plus (``kind == "below bound"``) the lowest values under
         the tracer's lower bound in :data:`RIVER_BOUNDS`, so a negative concentration
-        always shows. Columns: ``tracer``, ``kind``, ``rank``, ``value``, ``unit``,
-        ``river``, ``river_id``, ``lon``, ``lat``, ``date``.
+        always shows. Only active rivers (see :meth:`classes`) at steps where their
+        discharge is positive are considered, so every row has a position. Columns:
+        ``tracer``, ``kind``, ``rank``, ``value``, ``unit``, ``river``, ``river_id``,
+        ``lon``, ``lat``, ``date``, ``discharge`` (m3/s at that date).
         """
         import pandas as pd
 
         scan = self._scan()
         rows: list[dict[str, Any]] = []
 
-        def add(tracer, kind, rank, value, t, unit, i):
+        def add(tracer, kind, rank, value, t, q, unit, i):
             rows.append(
                 {
                     "tracer": tracer,
@@ -469,6 +590,7 @@ class RiverInputs:
                     "lon": float(self.lon[i]),
                     "lat": float(self.lat[i]),
                     "date": self._date(t),
+                    "discharge": float(q),
                 }
             )
 
@@ -478,14 +600,32 @@ class RiverInputs:
             hi = np.where(np.isnan(scan["max"][k]), -np.inf, scan["max"][k])
             for rank, i in enumerate(np.argsort(-hi, kind="stable")[:TOP_N], start=1):
                 if np.isfinite(hi[i]):
-                    add(name, "highest", rank, hi[i], scan["max_t"][k, i], unit, int(i))
+                    add(
+                        name,
+                        "highest",
+                        rank,
+                        hi[i],
+                        scan["max_t"][k, i],
+                        scan["max_q"][k, i],
+                        unit,
+                        int(i),
+                    )
             lower = _bound(name)[0]
             lo = np.where(np.isnan(scan["min"][k]), np.inf, scan["min"][k])
             under = np.flatnonzero(lo < lower)
             for rank, i in enumerate(
                 under[np.argsort(lo[under], kind="stable")][:TOP_N], start=1
             ):
-                add(name, "below bound", rank, lo[i], scan["min_t"][k, i], unit, int(i))
+                add(
+                    name,
+                    "below bound",
+                    rank,
+                    lo[i],
+                    scan["min_t"][k, i],
+                    scan["min_q"][k, i],
+                    unit,
+                    int(i),
+                )
         return pd.DataFrame(
             rows,
             columns=[
@@ -499,6 +639,7 @@ class RiverInputs:
                 "lon",
                 "lat",
                 "date",
+                "discharge",
             ],
         )
 
@@ -506,10 +647,13 @@ class RiverInputs:
         """Return what is out of range, as JSON-safe records.
 
         Each record has ``kind`` (``"negative_discharge"``, ``"nan_discharge"``,
-        ``"no_mouth"``, ``"below_bound"``, ``"above_bound"``, ``"nan"``), ``variable``,
-        ``message``, ``count`` (river-time values) and ``n_rivers``; a bound check also
-        has ``bound`` and ``worst`` (the most extreme value). An empty list is a clean
-        file.
+        ``"flow_without_mouth"``, ``"below_bound"``, ``"above_bound"``, ``"nan"``,
+        ``"identical_tracers"``), ``variable``, ``message``, ``count`` (river-time
+        values) and ``n_rivers``. A bound check also has ``bound`` and ``worst`` (the
+        most extreme value); ``flow_without_mouth`` has ``lost_m3s``, ``lost_pct`` and
+        the five ``largest`` rivers; ``identical_tracers`` names the other tracer in
+        ``equals``. Concentrations are checked for active rivers at steps where they
+        have flow only. An empty list is a clean file.
         """
         out: list[dict[str, Any]] = []
         q = self._discharge()
@@ -538,15 +682,28 @@ class RiverInputs:
                     "n_rivers": int(np.isnan(q["mean"]).sum()),
                 }
             )
-        no_mouth = int(np.isnan(self.lon).sum())
-        if no_mouth:
+        cls = self.classes()
+        if cls["flow_no_mouth"]:
+            names = ", ".join(
+                f"{r['river']} ({r['discharge_m3s']:.4g} m3/s)" for r in cls["largest"]
+            )
             out.append(
                 {
-                    "kind": "no_mouth",
+                    "kind": "flow_without_mouth",
                     "variable": "river_index",
-                    "message": f"{no_mouth} rivers have no grid cell in river_index",
-                    "count": no_mouth,
-                    "n_rivers": no_mouth,
+                    "message": (
+                        f"{cls['flow_no_mouth']} rivers have discharge but no grid "
+                        f"cell of their own in river_index: {cls['lost_m3s']:.4g} "
+                        f"m3/s ({cls['lost_pct']:.3g}% of all river discharge, time "
+                        "mean). Check how the model places them -- roms-tools names "
+                        "rivers that share a cell overlap_*, and those may enter "
+                        f"through another river's cell. Largest: {names}"
+                    ),
+                    "count": int(cls["flow_no_mouth"]),
+                    "n_rivers": int(cls["flow_no_mouth"]),
+                    "lost_m3s": cls["lost_m3s"],
+                    "lost_pct": cls["lost_pct"],
+                    "largest": cls["largest"],
                 }
             )
         scan = self._scan()
@@ -599,6 +756,18 @@ class RiverInputs:
                         "worst": worst,
                     }
                 )
+        for i, j in self.identical_tracers():
+            a, b = self.tracers[i], self.tracers[j]
+            out.append(
+                {
+                    "kind": "identical_tracers",
+                    "variable": a,
+                    "equals": b,
+                    "message": f"river {a} equals river {b} in every river",
+                    "count": int(self.active.sum()),
+                    "n_rivers": int(self.active.sum()),
+                }
+            )
         return out
 
     # -- figures ---------------------------------------------------------------
@@ -642,10 +811,10 @@ class RiverInputs:
             float(
                 np.clip(width * (y1 - y0 + 2 * pad_y) / (x1 - x0 + 2 * pad_x), 3.5, 9.5)
             )
-            + 1.0
+            + 1.2
         )
         fig = self._figure(height)
-        ax = fig.add_axes((0.08, 0.5 / height, 0.72, 1 - 1.3 / height), projection=proj)
+        ax = fig.add_axes((0.08, 0.5 / height, 0.72, 1 - 1.5 / height), projection=proj)
         shift = central
         ax.set_extent(
             (x0 - pad_x - shift, x1 + pad_x - shift, y0 - pad_y, y1 + pad_y), crs=proj
@@ -676,9 +845,9 @@ class RiverInputs:
             zorder=4,
         )
         mouth_lon = np.mod(self.lon, 360.0) if central else self.lon
-        good = np.isfinite(mouth_lon) & np.isfinite(self.lat) & np.isfinite(q) & (q > 0)
+        cls = self.classes()
+        good = cls["mask_active"]
         order = np.flatnonzero(good)[np.argsort(q[good], kind="stable")]  # large on top
-        n_bad = int((~good).sum())
         if order.size:
             qs = q[order]
             lo, hi = float(qs.min()), float(qs.max())
@@ -701,49 +870,70 @@ class RiverInputs:
                 edgecolors="0.2",
                 rasterized=True,
             )
-            cax = fig.add_axes((0.84, 0.5 / height, 0.025, 1 - 1.3 / height))
+            cax = fig.add_axes((0.84, 0.5 / height, 0.025, 1 - 1.5 / height))
             cb = fig.colorbar(sc, cax=cax)
             cb.set_label("time-mean discharge (m3/s)", fontsize=_FS)
             cb.ax.tick_params(labelsize=_FS, which="both")
-        note = (
-            f"; {n_bad} with no mouth or no positive discharge not drawn"
-            if n_bad
+        lost = (
+            f", {cls['lost_m3s']:.4g} m3/s ({cls['lost_pct']:.3g}%) lost"
+            if cls["flow_no_mouth"]
             else ""
         )
         fig.suptitle(
-            f"River mouths: {self.n_rivers:,} rivers, time-mean discharge{note}",
-            fontsize=_FS_TITLE,
-            y=1 - 0.15 / height,
+            f"River mouths: {self.n_rivers:,} rivers, time-mean discharge\n"
+            f"drawn: {cls['active']:,} active (mouth and flow); not drawn: "
+            f"{cls['mouth_no_flow']:,} mouth but no flow, "
+            f"{cls['flow_no_mouth']:,} flow but no grid cell{lost}, "
+            f"{cls['neither']:,} neither",
+            fontsize=_FS_TITLE - 1,
+            y=1 - 0.12 / height,
         )
         return [("river_map", fig)]
 
     def _draw_histograms(self) -> list:
         q = self.discharge
-        a = self._tracer_slab(self.time_index, self.time_index + 1)[
-            0
-        ]  # (ntracers, nriver)
+        active = self.active
+        ti = self.time_index
+        a = self._tracer_slab(ti, ti + 1)[0]  # (ntracers, nriver)
+        flowing = active & (self._volume_slab(ti, ti + 1)[0] > 0)
         panels: list[tuple[str, np.ndarray, str, int | None, tuple[float, float]]] = [
-            ("discharge (time mean)", q, "m3/s", None, (-math.inf, math.inf))
+            ("discharge (time mean)", q[active], "m3/s", None, (-math.inf, math.inf))
         ]
+        zero, constant = [], []
         for k, name in enumerate(self.tracers):
-            panels.append((name, a[k], self.units[k], k, _bound(name)))
+            v = a[k][flowing]
+            v = v[np.isfinite(v)]
+            if v.size and np.ptp(v) == 0:
+                (zero if v[0] == 0 else constant).append(
+                    name if v[0] == 0 else f"{name} = {v[0]:.4g}"
+                )
+                continue
+            panels.append((name, v, self.units[k], k, _bound(name)))
+        notes = "; ".join(
+            f"{label}: {', '.join(items)}"
+            for label, items in (("all zero", zero), ("constant", constant))
+            if items
+        )
         per = _HIST_COLS * _HIST_ROWS
         n_pages = math.ceil(len(panels) / per)
-        when = self._date(self.time_index)
+        when = self._date(ti)
+        n_flow = int(flowing.sum())
         out = []
         for page in range(n_pages):
             shown = panels[page * per : (page + 1) * per]
             rows = math.ceil(len(shown) / _HIST_COLS)
-            height = 1.0 + 1.55 * rows
+            height = 1.2 + 1.55 * rows
             fig = self._figure(height)
             fig.subplots_adjust(
                 left=0.07,
                 right=0.98,
-                top=1 - 0.5 / height,
+                top=1 - 0.7 / height,
                 bottom=0.4 / height,
                 hspace=0.75,
                 wspace=0.35,
             )
+            if notes:
+                fig.text(0.5, 1 - 0.38 / height, notes, ha="center", fontsize=_FS)
             for slot, (name, vals, unit, _k, (lower, upper)) in enumerate(shown):
                 ax = fig.add_subplot(rows, _HIST_COLS, slot + 1)
                 v = vals[np.isfinite(vals)]
@@ -777,8 +967,8 @@ class RiverInputs:
                 ax.tick_params(labelsize=_FS - 1)
             suffix = f" ({page + 1} of {n_pages})" if n_pages > 1 else ""
             fig.suptitle(
-                f"River inputs: distributions across {self.n_rivers:,} rivers at "
-                f"{when}{suffix}",
+                f"River inputs: distributions across {n_flow:,} active rivers with "
+                f"flow at {when}{suffix}",
                 fontsize=_FS_TITLE,
             )
             out.append((f"river_histograms_{page + 1}", fig))
@@ -787,13 +977,14 @@ class RiverInputs:
     def sample_rivers(self) -> list[tuple[int, str]]:
         """Twelve rivers ``(index, class)`` by time-mean discharge, deterministically.
 
-        The three largest, then -- terciles of the rivers with positive discharge,
-        ranked from smallest -- the three rivers at the middle of each tercile
+        Among the active rivers (see :meth:`classes`): the three largest, then --
+        terciles of the rivers ranked from smallest -- the three rivers at the middle
+        of each tercile
         (``small``, ``medium``, ``large``), skipping any already taken so the twelve
         are distinct (fewer when the file has fewer rivers).
         """
         q = self.discharge
-        ranked = np.flatnonzero(np.isfinite(q) & (q > 0))
+        ranked = np.flatnonzero(self.active)
         ranked = ranked[np.argsort(q[ranked], kind="stable")]  # smallest first
         taken: list[tuple[int, str]] = []
         used: set[int] = set()
@@ -849,6 +1040,8 @@ class RiverInputs:
             dtype="float64",
         )
         series = {name: arr[j][:, np.argsort(order)] for j, name in enumerate(names)}
+        for data in series.values():  # a concentration carried by no water is no value
+            data[~(vol > 0)] = np.nan
         x = self.times if self.times is not None else np.arange(self.n_times)
         x = (
             mdates.date2num(x.astype("datetime64[ms]").astype(object))
@@ -856,14 +1049,16 @@ class RiverInputs:
             else x
         )
         n_pan = 1 + len(names)
-        fig = self._figure(1.3 * n_pan + 1.6)
+        legend_h = 0.2 + 0.15 * math.ceil(len(chosen) / 3)  # inches, below the axes
+        height = 1.3 * n_pan + 1.0 + 0.45 + legend_h
+        fig = self._figure(height)
         axes = fig.subplots(n_pan, 1, sharex=True)
         axes = np.atleast_1d(axes)
         fig.subplots_adjust(
             left=0.1,
             right=0.97,
-            top=0.95,
-            bottom=0.14 + 0.012 * len(chosen),
+            top=1 - 0.5 / height,
+            bottom=(0.45 + legend_h) / height,
             hspace=0.25,
         )
         colors = colormaps["tab20"].colors
@@ -893,11 +1088,19 @@ class RiverInputs:
         else:
             axes[-1].set_xlabel("time step", fontsize=_FS)
         handles, labels = axes[0].get_legend_handles_labels()
+        # right under the last panel's tick labels
         fig.legend(
-            handles, labels, loc="lower center", ncol=3, fontsize=_FS - 1, frameon=False
+            handles,
+            labels,
+            loc="upper center",
+            bbox_to_anchor=(0.5, legend_h / height),
+            ncol=3,
+            fontsize=_FS - 1,
+            frameon=False,
         )
         fig.suptitle(
-            f"Sample rivers: {len(chosen)} of {self.n_rivers:,} by time-mean discharge",
+            f"Sample rivers: {len(chosen)} of {int(self.active.sum()):,} active rivers "
+            "by time-mean discharge",
             fontsize=_FS_TITLE,
         )
         return [("river_sample", fig)]
@@ -924,8 +1127,20 @@ class RiverInputs:
             "lon",
             "lat",
             "date",
+            "discharge",
         ]
-        heads = ["tracer", "kind", "#", "value", "unit", "river", "lon", "lat", "date"]
+        heads = [
+            "tracer",
+            "kind",
+            "#",
+            "value",
+            "unit",
+            "river",
+            "lon",
+            "lat",
+            "date",
+            "Q (m3/s)",
+        ]
         text = [
             [
                 str(r.tracer),
@@ -937,6 +1152,7 @@ class RiverInputs:
                 f"{r.lon:.2f}",
                 f"{r.lat:.2f}",
                 str(r.date),
+                f"{r.discharge:.4g}",
             ]
             for r in df[cols].itertuples()
         ]
@@ -953,7 +1169,7 @@ class RiverInputs:
             tab = ax.table(
                 cellText=rows,
                 colLabels=heads,
-                colWidths=[0.07, 0.1, 0.04, 0.11, 0.11, 0.26, 0.09, 0.09, 0.13],
+                colWidths=[0.07, 0.09, 0.04, 0.1, 0.09, 0.22, 0.08, 0.08, 0.11, 0.12],
                 loc="upper center",
                 cellLoc="left",
             )
@@ -968,7 +1184,7 @@ class RiverInputs:
                     cell.get_text().set_fontweight("bold")
             suffix = f" ({n} of {len(pages)})" if len(pages) > 1 else ""
             fig.suptitle(
-                f"Extreme river concentrations, all times{suffix}",
+                f"Extreme river concentrations, active rivers with flow{suffix}",
                 fontsize=_FS_TITLE,
                 y=1 - 0.12 / height,
             )

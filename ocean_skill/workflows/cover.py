@@ -15,7 +15,7 @@ import re
 import textwrap
 import warnings
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -185,8 +185,12 @@ def segment_starts(
 ) -> list[datetime]:
     """Return when the run's job segments after the first began (its restart "joins").
 
-    A run restarted in pieces is one workplan with a step per piece, each step's
-    blueprint carrying that piece's ``runtime_params.start_date``. The workplan is found
+    A run restarted in pieces is one workplan with a step per piece. A step's dates are
+    its ``runtime_params`` ``start_date``/``end_date``: from its blueprint, then the
+    resolved blueprint in its working folder (``work/*.yaml``), then the workplan's own
+    ``apply-overrides`` for that step, later ones winning -- steps often share one base
+    blueprint and differ only in the latter two. Every start and end is a join except
+    the run's first start and last end. The workplan is found
     as :func:`gather` finds it (``run_info.workplan``, relative to the suite file's
     folder, else the one with a step in the ``refresh:`` run folder); a step's
     blueprint, when its path is relative, is read relative to the workplan's folder.
@@ -215,23 +219,52 @@ def segment_starts(
         wp = None if wp_path is None else _load(wp_path)
         if wp is None:
             return []
-        starts = []
+        def stamp(value):
+            t = pd.Timestamp(value)
+            t = t.tz_convert("UTC").tz_localize(None) if t.tzinfo is not None else t
+            return t.to_pydatetime()
+
+        starts, ends = [], []
         for step in wp.get("steps") or []:
-            blueprint = step.get("blueprint") if isinstance(step, dict) else None
-            if not isinstance(blueprint, str):
+            if not isinstance(step, dict):
                 continue
-            bp_path = Path(blueprint).expanduser()
-            bp_path = bp_path if bp_path.is_absolute() else wp_path.parent / bp_path
-            bp = _load(bp_path) if bp_path.is_file() else None
-            runtime = (bp or {}).get("runtime_params")
-            start = runtime.get("start_date") if isinstance(runtime, dict) else None
-            if start is None:
-                continue
-            stamp = pd.Timestamp(start)
-            if stamp.tzinfo is not None:
-                stamp = stamp.tz_convert("UTC").tz_localize(None)
-            starts.append(stamp.to_pydatetime())
-        return sorted(set(starts))[1:]
+            runtime: dict = {}  # later sources win: base blueprint, task's, overrides
+            blueprint = step.get("blueprint")
+            if isinstance(blueprint, str):
+                bp_path = Path(blueprint).expanduser()
+                bp_path = bp_path if bp_path.is_absolute() else wp_path.parent / bp_path
+                bp = _load(bp_path) if bp_path.is_file() else None
+                runtime |= (bp or {}).get("runtime_params") or {}
+            work = step.get("working_dir")
+            task_bp = newest_blueprint(Path(work)) if isinstance(work, str) else None
+            if task_bp is not None:
+                runtime |= (_load(task_bp) or {}).get("runtime_params") or {}
+            overrides = (
+                ((step.get("directives") or {}).get("apply-overrides") or {})
+                .get("overrides", {})
+                .get("runtime_params")
+            )
+            runtime |= overrides or {}
+            if runtime.get("start_date") is not None:
+                starts.append(stamp(runtime["start_date"]))
+            if runtime.get("end_date") is not None:
+                ends.append(stamp(runtime["end_date"]))
+        if not starts and not ends:
+            return []
+        # every step's start and end is a join, except where the whole run starts and
+        # ends (steps that share one base blueprint carry their own dates in the
+        # task's blueprint or the workplan's overrides, so ends are read as well)
+        first = min(starts) if starts else None
+        last = max(ends) if ends else None
+        joins: list[datetime] = []
+        for t in sorted({t for t in (*starts, *ends) if t != first and t != last}):
+            # one segment's end and the next one's start (often a day apart) are one
+            # join: keep the later, where the new segment begins
+            if joins and t - joins[-1] < timedelta(days=2):
+                joins[-1] = t
+            else:
+                joins.append(t)
+        return joins
     except Exception as exc:
         warnings.warn(f"cover: no segment start dates ({exc})", stacklevel=2)
         return []
