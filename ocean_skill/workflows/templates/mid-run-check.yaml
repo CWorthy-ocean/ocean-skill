@@ -180,6 +180,7 @@ pages:
     then:
       - extremum: min
       - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate], time: "{period}"}
+    plot: {figsize: [8.0, 8.5]}     # five stacked panels: keep within a Letter page
 
   - title: "Surface alkalinity maximum — time series"
     caption: >-
@@ -191,6 +192,7 @@ pages:
     then:
       - extremum: max
       - series: {variables: [dissolved_inorganic_carbon, temperature, salinity, nitrate], time: "{period}"}
+    plot: {figsize: [8.0, 8.5]}     # five stacked panels: keep within a Letter page
 
   # -- latest model snapshot -------------------------------------------------------
   - title: "Latest model snapshot"

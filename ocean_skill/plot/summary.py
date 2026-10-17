@@ -456,6 +456,10 @@ def _default_level(field, value) -> str:
             from ocean_skill.comparison import _depth_label
 
             return _depth_label(value)
+        from ocean_skill.comparison import NO_VERTICAL_AXIS
+
+        if value == NO_VERTICAL_AXIS:  # mixed layer depth and the like: not "n/a"
+            return "no depth"
         return str(value)
     if field == "month":
         from ocean_skill.plot.series import month_label
