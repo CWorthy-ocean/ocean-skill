@@ -357,3 +357,25 @@ def test_the_river_refresh_kind_dispatches_to_add_river_source(
                 "forcing": [{**entry, "variables": ["x"]}],
             },
         )
+
+
+def test_segment_joins_come_from_overrides_when_steps_share_a_blueprint(tmp_path):
+    # C-Star workplans often point every step at one base blueprint and give each step
+    # its own end date in apply-overrides: the joins are those end dates
+    suite = _write_workplan(tmp_path, ["2013-01-01"] * 3)
+    wp_path = tmp_path / "cstar" / "wp.yaml"
+    wp = yaml.safe_load(wp_path.read_text())
+    for step, end in zip(wp["steps"], ["2013-01-31", "2013-03-01", "2013-04-01"]):
+        step["directives"] = {
+            "apply-overrides": {"overrides": {"runtime_params": {"end_date": end}}}
+        }
+    # the second step also states its own start, a day after the first one's end:
+    # one join, not two
+    wp["steps"][1]["directives"]["apply-overrides"]["overrides"]["runtime_params"][
+        "start_date"
+    ] = "2013-02-01"
+    wp_path.write_text(yaml.safe_dump(wp))
+    assert cover.segment_starts(suite) == [
+        pd.Timestamp("2013-02-01").to_pydatetime(),
+        pd.Timestamp("2013-03-01").to_pydatetime(),
+    ]

@@ -19,10 +19,11 @@ distance between the cell's own two interfaces
 (:func:`ocean_skill.vertical._roms_thickness`), so an inventory follows the free
 surface.
 
-**One dask compute per step.** A step's 3-D field is a gigabyte-class array and a run
-has ~40 of them, so every reduction is built lazily and all of a step's are evaluated
-together, streaming the chunks once. Only candidate pairs of copies are read a second
-time.
+**One dask compute per variable.** A step's 3-D field is a gigabyte-class array and a
+run has ~40 of them, so each variable's reductions are built lazily and evaluated
+together, streaming its chunks once; the step's cell volumes and depths are computed
+once and shared. (One compute for the whole step ran out of memory on a large grid.)
+Only candidate pairs of copies are read a second time.
 
 **Per-step cache.** A restart never changes once written, so each step's table is kept
 under :mod:`ocean_skill.cache`'s ``health`` kind and a mid-run re-run reads only the
@@ -59,7 +60,7 @@ __all__ = ["HEALTH_DRAWS", "HEALTH_VERSION", "RunHealth", "health"]
 
 #: Bumped when the statistics a step records, or how they are computed, change, so a
 #: cached step from before is not served as one from after. Part of every step's key.
-HEALTH_VERSION = 1
+HEALTH_VERSION = 2
 
 #: Said on every figure of a run read under ``truncate_time``.
 TEST_MODE_BANNER = (
@@ -495,7 +496,9 @@ def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.Dat
 
     from ocean_skill import roms
 
-    volume, depth = _geometry(run, step)
+    # The step's geometry is computed once, in memory (a few full 3-D float arrays);
+    # every variable's reductions below share it.
+    volume, depth = dask.compute(*_geometry(run, step))
     deep = depth > _DEEP_M
     nz = run.ds.sizes[run.s_dim]
     arrays: dict[str, Any] = {}
@@ -547,13 +550,24 @@ def _scan_step(run: _Run, step, stamp: pd.Timestamp, zeta: np.ndarray) -> pd.Dat
         )
     for name in run.kinds:
         alt = f"{name}_ALT_CO2"
-        if run.kinds[name] == "rho3" and run.kinds.get(alt) == "rho3":
+        # a CDR pair is a tracer's added amount; pH has an _ALT_CO2 twin too, but a
+        # difference of pH is not an amount, so it is left out
+        if (
+            run.kinds[name] == "rho3"
+            and run.kinds.get(alt) == "rho3"
+            and not _is_ph(name)
+        ):
             diff = arrays[name][0] - arrays[alt][0]
             fin = arrays[name][1] & arrays[alt][1]
             extras[f"cdr_{name}"] = (
                 dsa.where(fin, diff, 0.0).astype("float64") * volume
             ).sum()
-    got, more = dask.compute(parts, extras)
+    # One compute per variable, not one for the whole step: a step of a large run is
+    # tens of GB over ~45 variables, and a single graph of all of them let dask hold
+    # much of it at once (out of memory on a 1.8 M-cell, 100-level grid). Each
+    # variable is still read once.
+    got = {name: dask.compute(p)[0] for name, p in parts.items()}
+    more = {name: dask.compute(x)[0] for name, x in extras.items()}
 
     copies = _find_copies(run, arrays, got)
     rows = []
@@ -1108,7 +1122,7 @@ class RunHealth:
                 )
                 where = (
                     f" (lowest {row.min:.4g} at {_lonlat(row.min_lon, row.min_lat)}, "
-                    f"{row.min_depth:.0f} m, {_day(row.min_time)})"
+                    f"{_meters(row.min_depth)}, {_day(row.min_time)})"
                 )
             elif row.worst_pct_bad > _PROBLEM_PCT:
                 kind, what = "out_of_bounds", "outside its physical bounds"
@@ -1629,7 +1643,12 @@ def _extreme(r, which: str) -> str:
         return ""
     lon, lat, depth = (getattr(r, f"{which}_{k}") for k in ("lon", "lat", "depth"))
     when = _day(getattr(r, f"{which}_time"))
-    return f"{value:.4g}  {when}\n{_lonlat(lon, lat)}, {depth:.0f} m"
+    return f"{value:.4g}  {when}\n{_lonlat(lon, lat)}, {_meters(depth)}"
+
+
+def _meters(depth: float) -> str:
+    """``"130 m"``; a cell just above z = 0 reads ``"0 m"``, not ``"-0 m"``."""
+    return f"{max(float(depth), 0.0):.0f} m"
 
 
 def _draw_title(fig, title: str, test_mode: bool) -> float:

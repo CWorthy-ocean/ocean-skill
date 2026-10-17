@@ -30,6 +30,7 @@ def _grid(path: Path, n_eta: int) -> None:
     )
     xr.Dataset(
         {"h": (dims, np.zeros(shape)), "lon_rho": (dims, lon), "lat_rho": (dims, lat)}
+        | {"mask_rho": (dims, np.ones(shape))}
     ).to_netcdf(path)
 
 
@@ -260,6 +261,7 @@ def test_input_check_finds_the_inputs(tmp_path, restart):
     suite = SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
     assert suite.name == "input-check" and suite.defaults["test"] == "my_run_ic"
     assert "&id" not in out.read_text()  # rows share no dicts, so no YAML anchors
+    assert "\\x" not in out.read_text()  # degree signs written as themselves
     kinds = {f.name: f.kind for f in suite.refresh.forcing}
     assert kinds["my_run_bry_phys"] == "boundary" and kinds["my_run_river"] == "river"
     assert ("my_run_ic" in kinds) == (not restart)  # a restart IC is a plain source
@@ -272,7 +274,7 @@ def test_input_check_finds_the_inputs(tmp_path, restart):
     assert [s["name"] for s in d["sides"]] == ["south", "west"]
     assert d["sides"][0]["transect"] == {"eta_rho": 0}
     assert d["sides"][1]["transect"] == {"xi_rho": 0}
-    assert d["sides"][0]["label"] == "lon 120.0 to 125.0, lat 10.0 to 10.0"
+    assert d["sides"][0]["label"] == "lon 120°E to 125°E, lat 10°N to 10°N"
     assert [s["vars"] for s in d["surface"]] == [["Tair"], ["pco2_air"]]
     co2 = kinds["my_run_surf_bgc_mbl_co2"]
     assert co2 == "surface" and [s["vars"] for s in d["surface_clim"]] == [["iron"]]
@@ -331,3 +333,31 @@ def test_input_check_pages_expand_one_per_open_side(tmp_path):
         )
     assert not any(t.startswith(("North", "East")) for t in titles)
     assert "Surface forcing — surface physics (2011-01 mean)" in titles
+
+
+def test_input_check_starts_at_the_initial_conditions_own_time(tmp_path):
+    # roms-tools pads boundary files a month before the start: the IC's ini_time wins
+    root = inputs(tmp_path, False)
+    folder = root / "tasks" / "first" / "input" / "input_datasets"
+    (folder / "x_boundary-physics_201012.nc").write_bytes(
+        (folder / "x_boundary-physics_201101.nc").read_bytes()
+    )
+    ic = xr.Dataset({"temp": ("s_rho", np.zeros(2))})
+    ic.attrs["ini_time"] = "2011-01-01 00:00:00"
+    ic.to_netcdf(folder / "x_initial_conditions.nc")
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    defaults = yaml.safe_load(out.read_text())["defaults"]
+    assert (defaults["forcing_time"], defaults["ic_month"]) == ("2011-01", 1)
+
+
+def test_input_check_leaves_out_a_side_that_is_mostly_land(tmp_path):
+    root = inputs(tmp_path, False)
+    grid = root / "tasks" / "first" / "input" / "input_datasets" / "x_grid.nc"
+    g = xr.load_dataset(grid)
+    g["mask_rho"][:, 0] = 0.0  # the west edge is all land
+    g.to_netcdf(grid)
+    rc, out = _new(tmp_path, root, template="input-check")
+    assert rc == 0
+    defaults = yaml.safe_load(out.read_text())["defaults"]
+    assert [side["name"] for side in defaults["sides"]] == ["south"]
