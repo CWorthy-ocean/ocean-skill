@@ -609,6 +609,15 @@ def test_living_plankton_pools_are_not_checked_for_steps():
         assert not run_health._LIVING.fullmatch(name), name
 
 
+def test_every_page_fits_a_letter_page_with_its_margins_and_caption():
+    # a taller figure makes the report grow the page past Letter (the CCS inventories
+    # were 15.9 in: twenty panels at 2 in a row)
+    result = stress_run()
+    for draw in ("integrity", "inventory", "plankton"):
+        for _, fig in result.figures(draw):
+            assert fig.get_size_inches()[1] <= run_health._FIG_MAX_H, draw
+
+
 def test_integrity_table_merges_bad_columns_and_cuts_nothing():
     result = stress_run()
     pages = result.figures("integrity")
@@ -622,7 +631,7 @@ def test_integrity_table_merges_bad_columns_and_cuts_nothing():
     assert "≥ 0" in texts and "0 to depth" in texts
     for _, fig in pages:
         assert not _inside(fig)
-        assert fig.get_size_inches()[1] <= 11.0
+        assert fig.get_size_inches()[1] <= run_health._FIG_MAX_H
 
     _, widths, _ = run_health._lay_out(
         [("Variable", "Flags"), ("MARBL_ABIO_PH_SURF", "all NaN"), ("x", "y")],
@@ -668,8 +677,8 @@ def test_every_panel_title_is_one_size_in_readable_words(result):
 
 
 def test_a_zero_cdr_difference_is_a_note_and_segments_are_shaded_unlabeled(result):
-    ((_, fig),) = result.figures("inventory")
-    by = {ax.get_title(): ax for ax in fig.axes}
+    figs = [fig for _, fig in result.figures("inventory")]
+    by = {ax.get_title(): ax for fig in figs for ax in fig.axes}
 
     zero = by["DIC minus ALT_CO2"]  # DIC_ALT_CO2 is a copy of DIC: nothing to plot
     assert [t.get_text() for t in zero.texts] == ["identical to DIC in every restart"]
@@ -678,9 +687,10 @@ def test_a_zero_cdr_difference_is_a_note_and_segments_are_shaded_unlabeled(resul
     assert moving.lines and not moving.texts
 
     # alternating bands, no "segment N" labels anywhere, and the caption says so
-    assert all(
-        not t.get_text().startswith("segment") for ax in fig.axes for t in ax.texts
-    )
-    assert any(ax.patches for ax in fig.axes if ax.get_title())
-    assert run_health.SEGMENT_NOTE in [t.get_text() for t in fig.texts]
+    for fig in figs:
+        assert all(
+            not t.get_text().startswith("segment") for ax in fig.axes for t in ax.texts
+        )
+        assert any(ax.patches for ax in fig.axes if ax.get_title())
+        assert run_health.SEGMENT_NOTE in [t.get_text() for t in fig.texts]
     assert "job" in run_health.SEGMENT_NOTE

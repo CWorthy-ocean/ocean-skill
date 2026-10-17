@@ -224,12 +224,19 @@ _SEVERITY = (
     "repeat",
 )
 
-#: Rows and panels a report page holds before it continues on the next.
-_PANELS_PER_PAGE = 20
+#: Panels a series figure holds before it continues on the next (five rows of three),
+#: and the height of one row (inches): together they keep the figure within
+#: :data:`_FIG_MAX_H`.
+_PANELS_PER_PAGE = 15
+_SERIES_ROW_IN = 1.6
 #: One font size for every panel title of the series figures (pt).
 _PANEL_TITLE_PT = 8.0
 #: A Letter page, in inches; the summary has to fit one.
 _LETTER = (8.5, 11.0)
+#: The tallest figure a report page holds at its natural size (inches): Letter less
+#: the report's top and bottom margins and a two-line caption. Taller figures make
+#: the report grow the page past Letter.
+_FIG_MAX_H = 9.5
 #: Font sizes (pt) of the summary table (never below 8) and the integrity table.
 _SUMMARY_PT = 8.0
 _INTEGRITY_PT = 6.5
@@ -1943,7 +1950,7 @@ class RunHealth:
                 break
             size -= 0.5
         top = _TITLE_IN + (0.3 if self.test_mode else 0.0)
-        budget = _LETTER[1] - top - 0.25
+        budget = _FIG_MAX_H - top - 0.25
         pages, chunk, used = [], [], 0.0
         for row, h in zip(cells[1:], heights[1:], strict=True):
             if chunk and used + h > budget - heights[0]:
@@ -2056,7 +2063,7 @@ class RunHealth:
                 )
             ncols = min(3, len(chunk))
             nrows = -(-len(chunk) // ncols)
-            height = 0.9 + 2.0 * nrows + foot_in
+            height = 0.9 + _SERIES_ROW_IN * nrows + foot_in
             options: dict[str, Any] = {
                 "titles": [p["title"] for p in chunk],
                 "ncols": ncols,

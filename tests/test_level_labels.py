@@ -492,3 +492,11 @@ def test_a_dict_reused_across_subsets_stays_silent_when_some_levels_match(compar
             level_labels={"variable": {"alkalinity": "TA", "not_in_this_subset": "X"}},
         )
     assert not [w for w in caught if "level_labels" in str(w.message)]
+
+
+def test_a_comparison_with_no_vertical_axis_reads_no_depth_not_n_a():
+    from ocean_skill.comparison import NO_VERTICAL_AXIS
+
+    # the mid-run-check Taylor/target key read "▲ n/a" for mixed layer depth
+    assert pretty_level("depth", NO_VERTICAL_AXIS) == "no depth"
+    assert pretty_level("depth", "surface") == "surface"
