@@ -119,7 +119,9 @@ def test_pretty_level_unmatched_keeps_default_text():
 
 def test_pretty_level_depth_band_does_not_choke():
     band = {"min": 0, "max": 5}
-    assert pretty_level("depth", band, {"depth": {"0-5m": "x"}}) == str(band)
+    # a band reads as every other depth label does, so that spelling can rename it
+    assert pretty_level("depth", band) == "0-5 m"
+    assert pretty_level("depth", band, {"depth": {"0-5m": "x"}}) == "x"
 
 
 # ------------------------------------------------------------ static legends

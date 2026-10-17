@@ -29,6 +29,7 @@ entries:
       grid_resolution_deg: 1.0
       grid_resolution_km: 111.195
       institution: NOAA NCEI / GLODAPv2
+      label: GLODAPv2
       lon_convention: 0-360
       nominal_resolution_km: 111
       notes: 'Open-ocean product: marginal seas are largely masked (~8% coverage in

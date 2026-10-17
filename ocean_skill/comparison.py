@@ -16,7 +16,7 @@ import contextvars
 import functools
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, Self
@@ -1092,6 +1092,23 @@ def _hemisphere_range(lo: float, hi: float, pos: str, neg: str) -> str:
     lo_letter = pos if lo >= 0 else neg
     hi_letter = pos if hi >= 0 else neg
     return f"{abs(lo):g}°{lo_letter}–{abs(hi):g}°{hi_letter}"
+
+
+def _source_label_map(names: Iterable[Any]) -> dict[str, str]:
+    """Return ``{source name: readable label}`` for every source drawn in one figure.
+
+    :func:`ocean_skill.catalog.source_label` spells each name for a reader, but two
+    *different* sources can read alike (two entries carrying one ``label``), and a
+    legend or column title that cannot tell them apart is worse than a raw name. Any
+    label shared by more than one source falls back to those sources' own names.
+    """
+    from ocean_skill.catalog import source_label
+
+    labels = {str(n): source_label(n) for n in names}
+    counts: dict[str, int] = {}
+    for label in labels.values():
+        counts[label] = counts.get(label, 0) + 1
+    return {n: (label if counts[label] == 1 else n) for n, label in labels.items()}
 
 
 def _region_label(bbox: Any) -> str:
@@ -9316,6 +9333,8 @@ class Comparison:
         route (:meth:`plot`, :meth:`ComparisonSet.plot`, a movie) says so once, in
         :func:`_undrawable_message`'s words.
         """
+        from ocean_skill.catalog import source_label
+
         self._require_drawable()
         # The depth and time a select= has collapsed to one map, spelled for a title —
         # what a single field_row has no row label to say. Uses the same test-side
@@ -9347,7 +9366,13 @@ class Comparison:
             # this comparison's own source names, for its row's column titles —
             # not necessarily the same pair as other rows in the same set (a
             # compare() fan-out commonly pairs one variable per reference source).
-            "labels": (self.test_name, self.reference_name),
+            #
+            # Spelled for a reader (:func:`ocean_skill.catalog.source_label`): a source
+            # name is configuration, and ``woa23_nitrate_month12`` is no column title.
+            "labels": (
+                source_label(self.test_name),
+                source_label(self.reference_name),
+            ),
         }
         # A scored comparison carries metric maps -- unless it is a place through time
         # or through depth, where there is no map to carry and the series/profile
@@ -9442,7 +9467,9 @@ class Comparison:
         self._require_drawable()
         family = self.family
         if family != "skill_map":
-            kwargs.setdefault("labels", (self.test_name, self.reference_name))
+            readable = _source_label_map((self.test_name, self.reference_name))
+            pair = (readable[str(self.test_name)], readable[str(self.reference_name)])
+            kwargs.setdefault("labels", pair)
         if (
             family not in ("series", "section_row", "profile", "time_depth")
             and "domain" not in kwargs
@@ -10615,10 +10642,19 @@ class ComparisonSet:
 
     def _items(self) -> list[dict[str, Any]]:
         """Spec items for every comparison in the set."""
+        # two sources that read alike keep their own names, across the whole figure
+        readable = _source_label_map(
+            n for c in self.comparisons for n in (c.test_name, c.reference_name)
+        )
         items = []
         for i, c in enumerate(self.comparisons):
             label = self._label_for(i)
-            items.append({**c.as_item(), "label": label, "row_label": label})
+            item = {**c.as_item(), "label": label, "row_label": label}
+            item["labels"] = (
+                readable[str(c.test_name)],
+                readable[str(c.reference_name)],
+            )
+            items.append(item)
         return items
 
     def _metric_items(
@@ -10808,7 +10844,11 @@ class ComparisonSet:
             "profile",
             "time_depth",
         ):
-            kwargs.setdefault("labels", (first.test_name, first.reference_name))
+            readable = _source_label_map(
+                n for c in self.comparisons for n in (c.test_name, c.reference_name)
+            )
+            pair = (readable[str(first.test_name)], readable[str(first.reference_name)])
+            kwargs.setdefault("labels", pair)
         if (
             family not in ("series", "section_row", "profile", "time_depth")
             and "domain" not in kwargs

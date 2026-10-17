@@ -953,8 +953,15 @@ def lonlat_label(lon: float, lat: float) -> str:
 
     Factored out of :func:`_place_of` so the other places that name a position (the
     default title of an :meth:`ocean_skill.extrema.Extremum.series`) read exactly
-    like the panel titles under it rather than drifting into a second format.
+    like the panel titles under it rather than drifting into a second format. The
+    longitude is wrapped to ±180 (``237.2`` reads ``122.8°W``), the way the maps'
+    gridline labels spell it.
     """
+    from ocean_skill.plot._geo_labels import wrap_lon
+
+    # wrapped to ±180 whatever the data is stored in, so a 0-360 model's 237.2 reads as
+    # the 122.8°W its map gridlines call it
+    lon = wrap_lon(lon)
     return (
         f"{abs(lat):.1f}°{'N' if lat >= 0 else 'S'} "
         f"{abs(lon):.1f}°{'E' if lon >= 0 else 'W'}"

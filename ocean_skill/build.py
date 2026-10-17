@@ -72,6 +72,7 @@ __all__ = [
     "add_erddap_source",
     "add_forcing_source",
     "add_initial_conditions",
+    "add_river_source",
     "add_source",
     "add_sources",
     "build_catalog",
@@ -4690,6 +4691,75 @@ def add_forcing_source(
     )
     add_source(cat, name, reader=chain, **{**entry, **metadata})
     return name
+
+
+#: The variables a roms-tools river-forcing file must have to be catalogued as one.
+_RIVER_REQUIRED = ("river_volume", "river_tracer", "river_index", "river_fraction")
+
+
+def add_river_source(
+    cat,
+    name: str,
+    files: str | Path | Sequence[str | Path],
+    grid: str | Path,
+    *,
+    ref: str | Path | None = None,
+    **metadata: Any,
+) -> list[str]:
+    """Add a roms-tools river-forcing file as one entry, for :func:`ocean_skill.rivers`.
+
+    River forcing is not a field on the model grid: ``river_volume`` (discharge, m3/s)
+    is ``(river_time, nriver)``, ``river_tracer`` is ``(river_time, ntracers, nriver)``,
+    and ``river_index``/``river_fraction`` map each river ID onto the grid cells it
+    enters at. A big domain has 100,000+ rivers and the tracer array is tens of GB, so
+    the entry is the file as it is -- an ordinary lazy reader (``files`` may be a list,
+    joined along ``river_time``), no custom reader, no grid merged in -- and the grid
+    file's path is recorded in the entry's ``river_grid`` metadata so
+    :func:`ocean_skill.river_inputs.rivers` can place each river's mouth
+    (``river_index`` cells, weighted by ``river_fraction``) without ever loading the
+    tracer array whole.
+
+    See :func:`add_boundary_sources` for ``ref`` (a kerchunk reference over a long list
+    of files) and ``**metadata``. ``grid`` is the run's roms-tools grid file
+    (``lon_rho``, ``lat_rho``, ...). The file's ``abs_time`` (absolute days since the
+    date in its units) is the time axis to decode, ``river_time`` being relative to a
+    different epoch. Returns the entry names added: ``[name]``.
+    """
+    import xarray as xr
+
+    file_list = [files] if isinstance(files, (str, Path)) else list(files)
+    if not file_list:
+        raise ValueError(f"{name!r}: no river files given.")
+    first = file_list[0]
+    with xr.open_dataset(str(first), decode_times=False) as ds:
+        missing = [v for v in _RIVER_REQUIRED if v not in ds.variables]
+        if missing:
+            raise ValueError(
+                f"{first} is not a roms-tools river-forcing file: it has no "
+                f"{missing} (it has {sorted(map(str, ds.variables))[:12]})."
+            )
+        loadable = tuple(
+            v
+            for v in ("river_time", "abs_time")
+            if v in ds.variables and ds[v].dims == ("river_time",)
+        )
+    with xr.open_dataset(str(grid), decode_times=False) as g:
+        absent = {"lon_rho", "lat_rho"} - set(g.variables)
+    if absent:
+        raise ValueError(
+            f"{grid} is not a roms-tools grid file: it has no {sorted(absent)}."
+        )
+    if ref is not None:
+        ref = _forcing_reference(
+            file_list, ref, concat_dim="river_time", loadable_variables=loadable
+        )
+    reader = _forcing_reader(files, "river_time", ref)
+    entry = {
+        "river_grid": str(Path(grid).expanduser().resolve()),
+        **metadata,
+    }
+    add_source(cat, name, reader=reader, name_map=None, **entry)
+    return [name]
 
 
 #: Variables of a roms-tools initial-conditions file that are the s-coordinate's, not

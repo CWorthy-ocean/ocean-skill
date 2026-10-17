@@ -449,7 +449,14 @@ def _default_level(field, value) -> str:
     if field == "variable":
         return short_name(str(value))
     if field == "depth":
-        return f"{value:g} m" if isinstance(value, int | float) else str(value)
+        if isinstance(value, int | float):
+            return f"{value:g} m"
+        if isinstance(value, dict | list | tuple):
+            # a band or a list of levels, spelled as every other depth label is
+            from ocean_skill.comparison import _depth_label
+
+            return _depth_label(value)
+        return str(value)
     if field == "month":
         from ocean_skill.plot.series import month_label
 
@@ -1270,6 +1277,30 @@ def _resolve_legend_style(legend_style):
     return legend_style
 
 
+def default_marker_by(recs, color_by, marker_by):
+    """Return ``marker_by``, or ``"depth"`` when colour alone hides a point's depth.
+
+    A summary coloured by variable puts a variable's surface and 100 m scores in one
+    colour: two dots a reader cannot tell apart, in a key that never mentions depth.
+    When some colour group holds records at more than one depth, and the caller named no
+    marker field of their own (nor coloured by depth already), the marker shape carries
+    depth, and the key gains a row of shapes -- ``surface``, ``100 m`` -- beside the
+    colours. With no ``color_by`` every point is its own legend entry, named by its own
+    label, so there is nothing to disambiguate and this changes nothing.
+    """
+    if marker_by or not color_by or color_by == "depth":
+        return marker_by
+    depths_by_color: dict[Any, list] = {}
+    for r in recs:
+        if r.get("depth") is not None:
+            depths_by_color.setdefault(_hashable(r.get(color_by)), []).append(
+                r["depth"]
+            )
+    if any(len(_column_levels(depths)) > 1 for depths in depths_by_color.values()):
+        return "depth"
+    return marker_by
+
+
 def _fallback_grid_without_both_channels(legend_style, color_by, marker_by):
     """``"grid"`` needs both channels to have a cross-product to tabulate.
 
@@ -1646,6 +1677,7 @@ def taylor(
     recs = _drop_unplottable(recs, family="taylor", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
+    marker_by = default_marker_by(recs, color_by, marker_by)
     legend_style = _fallback_grid_without_both_channels(legend_style, color_by, marker_by)
     style_field = color_by or marker_by or "label"
     arrows_field = _resolve_arrows(arrows)
@@ -1971,6 +2003,7 @@ def target(
     recs = _drop_unplottable(recs, family="target", normalize=normalize)
     if groups and not color_by and not marker_by:
         color_by = "group"
+    marker_by = default_marker_by(recs, color_by, marker_by)
     labels_mode = _fallback_grid_without_both_channels(labels_mode, color_by, marker_by)
     style_field = color_by or marker_by or "label"
     if not normalize:
@@ -2198,6 +2231,15 @@ def paired(
     marker_by = kwargs.get("marker_by")
     if kwargs.get("groups") and not color_by and not marker_by:
         color_by = "group"
+    default = default_marker_by(
+        _records(comparisons, kwargs.get("groups")), color_by, marker_by
+    )
+    if default != marker_by:
+        # both panels and the shared key below draw the same depth shapes; color_by is
+        # passed explicitly too, since a marker_by of their own would stop the panels
+        # defaulting it to the group
+        marker_by = default
+        kwargs = {**kwargs, "color_by": color_by, "marker_by": marker_by}
     legend_style = _fallback_grid_without_both_channels(legend_style, color_by, marker_by)
     figsize = figsize or _diagram_figsize(PAIRED_FIGSIZE, size=size, zoom=zoom)
     scale = _scale(figsize, ncols=2, font_scale=font_scale, override=scale)

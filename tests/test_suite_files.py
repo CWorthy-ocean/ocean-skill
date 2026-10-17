@@ -67,6 +67,7 @@ def test_suites_directory_is_found():
         "mid-run-check.yaml",
         "final-report.yaml",
         "model-comparison.yaml",
+        "input-check.yaml",
     }
 
 
@@ -106,6 +107,8 @@ def test_shipped_suite_loads_and_expands(path):
         "section",
         "XY",
         "TS",
+        "health",
+        "rivers",
     }
     # A suite of dividers alone would draw nothing at all.
     assert any(p.kind != "section" for p in expanded)

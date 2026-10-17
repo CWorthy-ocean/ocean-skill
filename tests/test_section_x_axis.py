@@ -26,8 +26,8 @@ from ocean_skill.plot.section import (
 from ocean_skill.plot.spec import PlotSpec
 from tests.test_slab_section import VAR, patched_woa  # noqa: F401  (a fixture)
 
-LON_LABEL = "longitude (°E)"
-LAT_LABEL = "latitude (°N)"
+LON_LABEL = "longitude"
+LAT_LABEL = "latitude"
 KM_LABEL = "distance along transect (km)"
 
 
@@ -596,3 +596,59 @@ def test_a_set_of_sections_forwards_section_x(patched_woa):  # noqa: F811
     assert _hv_x_labels(
         osk.plot([f, g], renderer="holoviews", section_x="distance")
     ) == {KM_LABEL}
+
+
+# -- degree ticks are spelled as a map's gridlines are -------------------------------
+
+
+def _static_x_tick_texts(fig) -> list[str]:
+    fig.canvas.draw()
+    (ax,) = [a for a in fig.axes if a.get_label() != "<colorbar>"]
+    return [t.get_text() for t in ax.get_xticklabels() if t.get_text()]
+
+
+def test_a_longitude_axis_ticks_with_hemispheres_in_the_static_renderer():
+    # 143°E..267°E stored 0-360: the east half reads E, the rest W, the dateline bare
+    family, items = _case("section")
+    texts = _static_x_tick_texts(_static(family, items))
+    assert "160°E" in texts and "180°" in texts and "160°W" in texts
+    assert not any(t.lstrip("−-").replace(".", "").isdigit() for t in texts)
+
+
+def test_a_distance_axis_keeps_plain_numbers():
+    family, items = _case("section")
+    texts = _static_x_tick_texts(_static(family, items, section_x="distance"))
+    assert texts and not any("°" in t for t in texts)
+
+
+def test_a_latitude_axis_ticks_with_hemispheres_in_the_static_renderer():
+    n = 13
+    meridional = _path_field(np.full(n, -140.0), np.linspace(-10, 10, n))
+    texts = _static_x_tick_texts(_static("section", [_item(meridional)]))
+    assert "10°N" in texts and "0°" in texts and "10°S" in texts
+
+
+def _hv_x_formatters(obj) -> list:
+    from bokeh.plotting import figure
+
+    panels = hv.render(obj, backend="bokeh").select({"type": figure})
+    return [panel.xaxis[0].formatter for panel in panels]
+
+
+def test_the_interactive_longitude_axis_carries_the_same_spelling():
+    from bokeh.models import CustomJSTickFormatter
+
+    from ocean_skill.plot._geo_labels import lon_tick_js
+
+    family, items = _case("section")
+    (formatter,) = _hv_x_formatters(_holoviews(family, items))
+    assert isinstance(formatter, CustomJSTickFormatter)
+    assert formatter.code.strip() == lon_tick_js.strip()
+
+
+def test_the_interactive_distance_axis_keeps_bokehs_own_ticks():
+    from bokeh.models import CustomJSTickFormatter
+
+    family, items = _case("section")
+    (formatter,) = _hv_x_formatters(_holoviews(family, items, section_x="distance"))
+    assert not isinstance(formatter, CustomJSTickFormatter)

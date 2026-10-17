@@ -1,0 +1,282 @@
+# Input check of a C-Star run: a look at the forcing files the model was given, before
+# (or while) it runs. The grid depth, the initial conditions against WOA23, GLODAPv2 and
+# satellite chlorophyll, the open boundary conditions side by side with the same
+# climatologies, the surface forcing maps and the river inputs, organized into PDF
+# sections with divider pages. It draws only the first task's inputs; no model output
+# is read.
+#
+# Run it:
+#     ocean-skill-run input-check.yaml --list    # check the page list first
+#     ocean-skill-run input-check.yaml --smoke 2 --self-check --strict
+#     ocean-skill-run input-check.yaml
+# Note that --list also runs the refresh: blocks, which catalog the forcing files (the
+# boundary, surface, river and initial-conditions files) and build kerchunk references
+# over them (it draws nothing).
+#
+# Every run refreshes <output_dir>/input-check/ in place (set `timestamped_dir: true` to
+# keep one directory per run) with report.pdf -- page 1 a cover describing the
+# simulation (see run_info: below) -- figures/*.png, metrics/*.csv, a copy of this file,
+# manifest.json and a refs/ folder. See docs/suites.md for the full grammar.
+#
+# Before you run it:
+#   (a) The chlorophyll page reads Copernicus Marine, so log in once first:
+#           copernicusmarine login
+#       WOA23 files are downloaded from NCEI the first time they are read, so that run
+#       needs network access.
+#   (b) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH. Without it the run warns
+#       and leaves the PDF lossless.
+#
+# What you may edit, all under defaults: below:
+#   forcing_time   the month the boundary, surface and river pages draw ("YYYY-MM"; look
+#                  at a later month to check the forcing further into the run) and
+#   forcing_month  its month number, which picks the climatology's calendar month
+#                  (change the two together).
+#   ic_month       the initial conditions' month, which picks the WOA23 month they are
+#                  compared with.
+#
+# Left out: the climatological BGC boundary file (chlorophyll, DOC, ...) has no page, and
+# a sea surface salinity restoring field, which would be compared with WOA23 surface
+# salinity, has no page because these input files have none.
+#
+# This file is the shipped `input-check` suite, the one copy `ocean-skill-suite new`
+# starts from. `ocean-skill-suite new input-check` rewrites the block between the
+# "setup" markers below for your run (names, paths, dates, which boundary sides are open,
+# which surface files exist) and keeps everything else as it is. By hand, edit that
+# block: output_dir, cache_dir, catalog_search_paths, refresh: and the defaults.
+
+# >>> setup: written by ocean-skill-suite new
+name: input-check
+output_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
+pdf_images: jpeg
+catalog_search_paths:
+  - /anvil/projects/x-ees250129/cstar-forge-data/source-data/catalogs
+cache_dir: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics
+
+refresh:
+  catalog: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/catalogs/pacmed-inputs.yaml
+  # The initial conditions of a restart-file start: a plain model source (a roms-tools
+  # initial-conditions file is a `kind: initial_conditions` entry in forcing: instead).
+  sources:
+    - name: pacmed_ic
+      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/output_rst.20101231234500.nc
+      grid: &grid /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/PACMED12km_grid.nc
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_ic.parquet
+      keep: latest-per-file
+      subchunk: {s_rho: 1, s_w: 1, eta_rho: 74}
+  forcing:
+    - name: pacmed_bry_phys
+      kind: boundary
+      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/pac_12km_esper_boundary-physics_??????.nc
+      grid: *grid
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_bry_phys.parquet
+      subchunk: {bry_time: 1}
+      sides: [south, west]
+    - name: pacmed_bry_bgc
+      kind: boundary
+      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/pac_12km_esper_boundary-bgc-esper-alk_dic_no3_o2_po4_sio3_??????.nc
+      grid: *grid
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_bry_bgc.parquet
+      subchunk: {bry_time: 1}
+      sides: [south, west]
+    - name: pacmed_river
+      kind: river
+      files: /anvil/scratch/x-awyatt1/cstar/pacmed_pyesper_2015/tasks/m201101/input/input_datasets/PACMED12km_river.nc
+      grid: *grid
+      ref: /anvil/projects/x-ees250129/x-kthyng/pacmed_pyesper_2015/diagnostics/refs/pacmed_river.parquet
+
+defaults:
+  test: pacmed_ic
+  forcing_time: "2011-01"
+  forcing_month: 1
+  ic_month: 1
+  bry_phys: pacmed_bry_phys
+  bry_bgc: pacmed_bry_bgc
+  river: pacmed_river
+  sides:
+    - {name: south, title: South, label: "lon 120.0 to 260.0, lat 10.0 to 10.2", transect: {eta_rho: 0}}
+    - {name: west, title: West, label: "lon 120.0 to 120.2, lat 10.0 to 60.0", transect: {xi_rho: 0}}
+  surface:
+    - {name: pacmed_surf_phys, label: surface physics, vars: [Tair, qair, rain, swrad, lwrad, uwnd, vwnd]}
+  surface_clim:
+    - {name: pacmed_surf_bgc_clim, label: surface BGC climatology, vars: [iron, dust, nox, nhx]}
+# <<< setup
+  # (the rest of defaults: is the same for every run)
+  # Every page's plot: options start from these (a page's own plot: wins). Robust color
+  # limits clip each panel to its central 80% (difference panels too), so coastal and
+  # river-mouth extremes don't wash out the open ocean.
+  # colorbar_label_clipped: a clipped colorbar's label also gives the true min and max.
+  plot: {robust: true, colorbar_label_clipped: true}
+  depths: [surface, 200]
+  # The boundary sections: upper 1000 m.
+  strip_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
+
+pages:
+  # -- model domain -----------------------------------------------------------------
+  - title: "Model domain"
+    section: ""
+
+  - title: "Bathymetry"
+    field: {variables: [h]}
+    caption: Grid depth h (m).
+    plot: {robust: false}           # the full depth range, trenches included
+
+  # -- initial conditions ---------------------------------------------------------
+  - title: "Initial conditions"
+    section: >-
+      The initial conditions at the surface and at 200 m against the WOA23 monthly
+      climatology of the month they start in (temperature, salinity, nitrate, phosphate,
+      silicate, oxygen), the GLODAPv2.2016b climatology (alkalinity and dissolved
+      inorganic carbon) and the Copernicus gap-free satellite chlorophyll on the same
+      day; then the iron, ammonium and DOC fields, which have no observations here.
+
+  - title: "Initial conditions vs WOA23, temperature and salinity ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference:
+        - woa23_temperature_month{ic_month:02d}
+        - woa23_salinity_month{ic_month:02d}
+      variables: [temperature, salinity]
+      depths: ["{depth}"]
+    caption: Initial conditions at {depth.label} against the WOA23 climatology of month {ic_month}.
+
+  - title: "Initial conditions vs WOA23, nutrients and oxygen ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference:
+        - woa23_nitrate_month{ic_month:02d}
+        - woa23_phosphate_month{ic_month:02d}
+        - woa23_silicate_month{ic_month:02d}
+        - woa23_oxygen_month{ic_month:02d}
+      variables: [nitrate, phosphate, silicate, oxygen]
+      depths: ["{depth}"]
+    caption: Initial conditions at {depth.label} against the WOA23 climatology of month {ic_month}.
+
+  - title: "Initial conditions vs GLODAPv2, alkalinity and carbon ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    compare:
+      reference: [glodap]
+      variables: [alkalinity, dissolved_inorganic_carbon]
+      depths: ["{depth}"]
+    caption: Initial conditions at {depth.label} against the GLODAPv2.2016b mapped climatology.
+
+  # If this skips with 'window matched no data', check that the initial conditions' day
+  # exists in chl_gapfree_my_daily_geo.
+  - title: "Initial conditions vs satellite chlorophyll"
+    compare:
+      reference: chl_gapfree_my_daily_geo
+      variables:
+        - {test: {sum: [spChl, diatChl, diazChl]}, reference: chlorophyll,
+           standard_name: mass_concentration_of_chlorophyll_a_in_sea_water}
+      select: {test: {depth: surface, time: latest}, reference: {}}
+      times: {resample: 1D, reduce: mean}   # one comparison (row) for the start day
+    caption: >-
+      Surface chlorophyll (sum of the three phytoplankton pools) in the initial
+      conditions against the gap-free L4 satellite product on the same day.
+
+  - title: "Initial conditions — iron, ammonium and DOC ({depth.label})"
+    for_each:
+      depth: "{depths}"
+    field:
+      variables: [iron, ammonium, DOC]
+      select: {depth: "{depth}"}
+    caption: Initial conditions at {depth.label}, model only.
+
+  - title: "Initial conditions — metrics"
+    summary: {scope: section, kind: [table]}
+
+  # -- boundary conditions ----------------------------------------------------------
+  - title: "Boundary conditions"
+    section: >-
+      Each open side of the grid, as a section along the boundary (upper 1000 m) in the
+      month defaults.forcing_time, against the WOA23 climatology of that calendar month
+      and the GLODAPv2.2016b climatology. Each side's title gives its location; sides that
+      are land have no boundary forcing and no page.
+
+  - title: "{side.title} boundary — temperature and salinity vs WOA23 ({forcing_time})"
+    for_each:
+      side: "{sides}"
+    compare:
+      test: "{bry_phys}_{side.name}"
+      reference: [woa23_temperature_monthly, woa23_salinity_monthly]
+      variables: [temperature, salinity]
+      select: {transect: "{side.transect}", depth: "{strip_depths}"}
+      times: ["{forcing_time}"]
+      aggregate: {time: mean}
+    caption: "{side.title} boundary, {side.label} (grid longitude and latitude, degrees)."
+
+  - title: "{side.title} boundary — nutrients and oxygen vs WOA23 ({forcing_time})"
+    for_each:
+      side: "{sides}"
+    compare:
+      test: "{bry_bgc}_{side.name}"
+      reference: [woa23_nitrate_monthly, woa23_phosphate_monthly, woa23_silicate_monthly,
+                  woa23_oxygen_monthly]
+      variables: [nitrate, phosphate, silicate, oxygen]
+      select: {transect: "{side.transect}", depth: "{strip_depths}"}
+      times: ["{forcing_time}"]
+      aggregate: {time: mean}
+    caption: "{side.title} boundary, {side.label} (grid longitude and latitude, degrees)."
+
+  - title: "{side.title} boundary — alkalinity and carbon vs GLODAPv2 ({forcing_time})"
+    for_each:
+      side: "{sides}"
+    compare:
+      test: "{bry_bgc}_{side.name}"
+      reference: [glodap]
+      variables: [alkalinity, dissolved_inorganic_carbon]
+      select: {transect: "{side.transect}", depth: "{strip_depths}"}
+      times: ["{forcing_time}"]
+      aggregate: {time: mean}
+    caption: "{side.title} boundary, {side.label} (grid longitude and latitude, degrees)."
+
+  # -- surface forcing ---------------------------------------------------------------
+  - title: "Surface forcing"
+    section: >-
+      Maps of the surface forcing files on the model grid. Files with dated steps are
+      drawn as the mean over the month defaults.forcing_time; climatologies as that
+      calendar month.
+
+  - title: "Surface forcing — {surf.label} ({forcing_time} mean)"
+    for_each:
+      surf: "{surface}"
+    field:
+      source: "{surf.name}"
+      variables: "{surf.vars}"
+      select: {time: "{forcing_time}"}
+      aggregate: {time: mean}
+    caption: Mean over the month {forcing_time}.
+
+  - title: "Surface forcing — {surf.label} (month {forcing_month})"
+    for_each:
+      surf: "{surface_clim}"
+    field:
+      source: "{surf.name}"
+      variables: "{surf.vars}"
+      select: {month: "{forcing_month}"}
+    caption: Climatology of calendar month {forcing_month}.
+
+  # -- river inputs ------------------------------------------------------------------
+  - title: "River inputs"
+    section: >-
+      The river forcing file: where the rivers enter the grid, how their flow and tracer
+      concentrations are distributed, a sample of individual rivers and the largest
+      values, in the month defaults.forcing_time.
+
+  - title: "River inputs — map"
+    rivers: {source: "{river}", time: "{forcing_time}", draw: map}
+    caption: Where the rivers enter the grid.
+
+  - title: "River inputs — histograms"
+    rivers: {source: "{river}", time: "{forcing_time}", draw: histograms}
+    caption: Distribution of flow and tracer values over the rivers.
+
+  - title: "River inputs — sample"
+    rivers: {source: "{river}", time: "{forcing_time}", draw: sample}
+    caption: A sample of individual rivers.
+
+  - title: "River inputs — extremes"
+    rivers: {source: "{river}", time: "{forcing_time}", draw: extremes}
+    caption: The rivers with the largest values.

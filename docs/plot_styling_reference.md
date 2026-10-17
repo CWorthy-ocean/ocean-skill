@@ -1409,6 +1409,12 @@ suite.taylor(color_by="variable", marker_by="test")   # 3 models × 6 variables
 Naming only `marker_by` colours by the *same* groups, so the legend's swatches match
 the points rather than varying with nothing to explain them.
 
+When a `color_by` group holds scores at more than one depth (a variable's surface and
+100 m comparisons coloured by `variable`) and no `marker_by` is given, marker shape
+carries `depth` and the key gains a row of shapes (`surface`, `100 m`) beside the colours
+-- otherwise two dots of one colour could not be told apart. Name a `marker_by` of your
+own to choose a different second channel.
+
 With both set, [`legend_style="grid"`](#legend_style-summary-diagrams-how-points-are-keyed)
 draws their cross-product as an explicit matrix instead of the flat legend's two
 separate blocks.
@@ -2524,8 +2530,9 @@ osk.field("woa23_temperature_annual", "temp",
 ```
 
 - **x is the surviving axis, in degrees.** `{"lon": "mean"}` draws against
-  latitude (°N), and `{"lat": "mean"}` draws against longitude (°E).
-- **The title names the band**, e.g. "mean over 180–200°E".
+  latitude, and `{"lat": "mean"}` draws against longitude (the ticks carry the
+  hemisphere: `125°W`, `40°N`, spelled as a map's gridlines are).
+- **The title names the band**, e.g. "mean over 180°E–160°W".
 - **Curvilinear grids (ROMS):** the cells inside the box are binned along the
   surviving axis at the grid's median spacing, then averaged unweighted. A ROMS
   slab needs a fixed `depth` list.
@@ -2703,8 +2710,8 @@ comparisons instead.
   the bottom — matching every other depth label in this package (`facet_labels`'
   own `abs()`).
 * **x is chosen per path (`section_x="auto"`).** A path that runs mostly east-west
-  (an equatorial line) is drawn against its longitude, labelled `longitude (°E)`;
-  one that runs mostly north-south, against its latitude, `latitude (°N)`; anything
+  (an equatorial line) is drawn against its longitude, labelled `longitude` (ticks `160°E`, `180°`, `160°W`);
+  one that runs mostly north-south, against its latitude, `latitude` (ticks `40°N`); anything
   else — a diagonal, a bend, a path that doubles back — against the distance along
   the path in kilometres (great-circle, from the sliced grid's own lon/lat),
   `distance along transect (km)`.
@@ -3009,7 +3016,7 @@ osk.plot({"Eq": eq, "180-160": b180, "160-120": b160}, shared_limits=True)
   at the left edge (`row_label_kwargs`).
 - **Path notes:** when every row runs along the same path, its note joins the
   suptitle once. Otherwise each row's note goes on its test-panel title
-  (`model (mean over 180–200°E)` statically, `Eq (mean over 180–200°E) — model`
+  (`model (mean over 180°E–160°W)` statically, `Eq (mean over 180°E–160°W) — model`
   interactively).
 - **Colour scales:** each row has its own two colorbars by default.
   `shared_limits=True` shares one scale across rows, and warns if the rows'

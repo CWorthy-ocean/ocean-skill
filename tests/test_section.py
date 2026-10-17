@@ -943,7 +943,7 @@ def test_stacked_section_row_takes_each_rows_x_label_from_its_own_geometry(monke
         values, geometry = real(aligned, x)
         calls["n"] += 1
         if calls["n"] == 2:
-            geometry = dataclasses.replace(geometry, x_label="latitude (°N)")
+            geometry = dataclasses.replace(geometry, x_label="latitude")
         return values, geometry
 
     monkeypatch.setattr(section_module, "prepare_section_row", fake)
@@ -953,7 +953,7 @@ def test_stacked_section_row_takes_each_rows_x_label_from_its_own_geometry(monke
     )
     xlabels = [ax.get_xlabel() for ax in _panels(fig)]
     assert set(xlabels[:3]) == {"distance along transect (km)"}
-    assert set(xlabels[3:]) == {"latitude (°N)"}
+    assert set(xlabels[3:]) == {"latitude"}
 
 
 def _mesh_norms(fig):
@@ -1279,7 +1279,7 @@ def test_stacked_section_takes_each_panels_x_label_from_its_own_geometry(monkeyp
         values, geometry = real(da, x)
         calls["n"] += 1
         if calls["n"] == 2:
-            geometry = dataclasses.replace(geometry, x_label="latitude (°N)")
+            geometry = dataclasses.replace(geometry, x_label="latitude")
         return values, geometry
 
     monkeypatch.setattr(section_module, "prepare_section", fake)
@@ -1289,7 +1289,7 @@ def test_stacked_section_takes_each_panels_x_label_from_its_own_geometry(monkeyp
     )
     assert [ax.get_xlabel() for ax in _panels(fig)] == [
         "distance along transect (km)",
-        "latitude (°N)",
+        "latitude",
     ]
     ax0, ax1 = _panels(fig)
     assert not ax0.get_shared_x_axes().joined(ax0, ax1)
