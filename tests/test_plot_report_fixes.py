@@ -409,18 +409,19 @@ def test_a_section_with_data_everywhere_is_not_trimmed():
     assert geometry.x_trim is None
 
 
-def test_a_column_with_data_in_either_lane_is_kept():
+def test_a_column_with_data_only_in_the_reference_is_cut():
     from ocean_skill.plot.section import prepare_section_row
 
     trio = _trio(**_coast(), trail=30)
-    # the reference alone has data out to column 45: the row's extent follows it
+    # the reference alone has a few surface cells out to column 45 (WOA23 past the CCS
+    # north boundary's land end): the row's extent follows the test lane's water
     ref = trio["reference"].copy()
-    ref[:, 30:45] = 5.0
+    ref[0, 30:45] = 5.0
     trio["reference"] = ref
     trio["difference"] = trio["test"] - ref
     values, geometry = prepare_section_row(trio)
     x = values["test"]["distance"].isel(z=0).values
-    assert geometry.x_trim[1] == pytest.approx(x[44:46].mean())
+    assert geometry.x_trim[1] == pytest.approx(x[29:31].mean())
 
 
 def test_a_hole_in_the_middle_is_a_real_gap_and_stays():

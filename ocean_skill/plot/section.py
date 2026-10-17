@@ -474,9 +474,9 @@ def trimmed_x_range(
 
     A section along a boundary or coast can run through land at one or both ends -- the
     CCS north boundary is mostly land -- and every cell there is NaN in every lane, so
-    the panel is mostly grey. ``lanes`` are the panels' prepared fields (one per panel
-    of the figure: test, reference, difference); a column is empty only when it is NaN
-    in *all* of them, at every depth, so the panels of a row keep one shared extent.
+    the panel is mostly grey. ``lanes`` are the prepared fields that set the extent (a
+    comparison row passes its test lane only, see :func:`prepare_section_row`); a
+    column is empty only when it is NaN in *all* of them, at every depth.
     Only the ends are trimmed -- a gap in the middle is a real gap.
 
     The range is the drawn cell edges: halfway to the neighboring column that is cut,
@@ -559,8 +559,10 @@ def prepare_section_row(
             geometry = lane_geometry
             x = lane_geometry.x_axis
     assert geometry is not None
-    # the three panels keep one extent: only columns empty in all of them are cut
-    geometry.x_trim = trimmed_x_range(list(values.values()), geometry.x_name)
+    # the three panels keep one extent, the test lane's: a column where the model has
+    # no water is cut even if the reference has a few cells there (WOA23's coastal
+    # surface cells past the CCS north boundary's land end), since nothing is compared
+    geometry.x_trim = trimmed_x_range([values["test"]], geometry.x_name)
     return values, geometry
 
 
