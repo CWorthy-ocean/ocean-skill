@@ -159,6 +159,11 @@ _SEQUENTIAL_CMAPS: dict[str, str] = {
     # below. No other standard_name contains "wind".
     "eastward_wind": "cmo.delta",
     "northward_wind": "cmo.delta",
+    # roms-tools surface forcing keeps raw names (see _ANCHORED_CMAPS); its wind
+    # components are signed like the CF ones above, so centred and cmo.delta. Listed
+    # here, not anchored, because a centred variable's map is looked up in this table.
+    "uwnd": "cmo.delta",
+    "vwnd": "cmo.delta",
     "wind_speed": "cmo.speed",
     "sea_ice": "cmo.ice",
     # Every mixed-layer-thickness name: the generic ``ocean_mixed_layer_thickness``
@@ -201,8 +206,24 @@ _RANGES: dict[str, tuple[float | None, float | None, bool]] = {
 #: ``find_variable`` look for ``sea_floor_depth_below_geoid`` in a dataset that only
 #: has ``h``. xcmocean's own ``depths`` type covers the word "bathymetry" but not the
 #: CF ``sea_floor_depth_*`` names, which fall through to the default map.
+#:
+#: The roms-tools surface forcing variables keep their raw names (``Tair``, ``swrad``,
+#: ...: see :func:`ocean_skill.build.add_forcing_source`), short enough that a
+#: substring pattern would catch other names (``rain`` in "drainage"), so they are
+#: anchored too. Each takes the map of its quantity: air temperature thermal, humidity
+#: ice, rain cmocean's rain, radiation solar, dust turbid; nitrogen deposition the
+#: nitrate map and atmospheric CO2 the DIC map, so a reader links a flux to the tracer
+#: it feeds. Signed winds (``uwnd``/``vwnd``) are in :data:`_SEQUENTIAL_CMAPS` and
+#: :data:`_CENTERED` instead.
 _ANCHORED_CMAPS: dict[str, tuple[str, str]] = {
     "bathymetry": (r"^(h|bathymetry|sea_floor_depth(_below_\w+)?)$", "cmo.deep"),
+    "air_temperature_forcing": (r"^tair$", "cmo.thermal"),
+    "specific_humidity_forcing": (r"^qair$", "cmo.ice_r"),
+    "precipitation_forcing": (r"^rain$", "cmo.rain"),
+    "radiation_forcing": (r"^(swrad|lwrad)$", "cmo.solar"),
+    "dust_forcing": (r"^dust$", "cmo.turbid"),
+    "nitrogen_deposition_forcing": (r"^(nox|nhx|nhy)$", "cmo.deep"),
+    "co2_forcing": (r"^(x|p)co2_air(_alt)?$", "cmo.ice_r"),
 }
 
 #: The one source of truth for "zero is meaningful": a variable listed here is a signed
@@ -225,6 +246,8 @@ _CENTERED: dict[str, float] = {
     "upward_sea_water_velocity": 0.0,
     "eastward_wind": 0.0,
     "northward_wind": 0.0,
+    "uwnd": 0.0,  # roms-tools surface forcing winds, raw names
+    "vwnd": 0.0,
     # signed baroclinic pressure flux (energy flows either way); zero is "no flux"
     "x_baroclinic_pressure_flux": 0.0,
     "y_baroclinic_pressure_flux": 0.0,

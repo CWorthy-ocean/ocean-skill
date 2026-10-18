@@ -451,10 +451,11 @@ BLANK_CELL_WEIGHT = 2.0
 #:
 #: So the aspect only decides the cases where it is *unambiguous* -- a 3:1 box gains
 #: little from a bar down its short side, a 1:3 one gains little from a bar under its
-#: narrow bottom -- and everything between keeps its family's default: horizontal for a
-#: single row (bars below, panels get the full cell width), vertical for a stacked grid
-#: (bars beside, height is the scarce dimension). That also leaves the figures these
-#: defaults were calibrated and reviewed against unchanged.
+#: narrow bottom -- and everything between keeps its family's default: vertical for a
+#: single map row as for a stacked grid (bars beside, so a one-row comparison reads like
+#: one row of a grid on the same page), with ``colorbar_kwargs={"orientation":
+#: "horizontal"}`` moving them below. A single section or time-depth row stays
+#: horizontal: its panels are so flat that a bar down their side is a sliver.
 COLORBAR_ASPECT_FORCES_HORIZONTAL = 2.5
 COLORBAR_ASPECT_FORCES_VERTICAL = 0.8
 

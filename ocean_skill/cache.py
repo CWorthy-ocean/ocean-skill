@@ -293,7 +293,12 @@ configure_fsspec_cache()
 #: growing run reads only the new ones. Its key is chosen by that module (it hashes a
 #: content sample of the step, so a rewritten restart misses), not by a ``key_for_*``
 #: function here.
-KINDS = ("prepared", "aligned", "weights", "calculated", "health")
+#:
+#: ``inputs`` holds one variable's per-step statistics table from
+#: :func:`ocean_skill.input_health` (:mod:`ocean_skill.input_integrity`) over an input
+#: file, so a re-run of a suite reads none of a forcing file's data again. Keyed by that
+#: module (a content sample of the variable, so a file rewritten in place misses).
+KINDS = ("prepared", "aligned", "weights", "calculated", "health", "inputs")
 
 #: File extension each :data:`KINDS` entry is stored under -- the two Dataset kinds as
 #: zarr stores (a directory), regridder weights as the plain netCDF file
@@ -306,6 +311,7 @@ _EXTENSIONS = {
     "weights": "nc",
     "calculated": "zarr",
     "health": "zarr",
+    "inputs": "zarr",
 }
 
 
@@ -332,8 +338,9 @@ def scoped(name: str):
     For a run whose inputs differ from what the identity key can see -- a model read
     with only its last few time steps (``ocean-skill-run --smoke``) -- so its results
     can neither be served from the real cache nor poison it. Applies to the prepared,
-    aligned, calculated and health kinds; ``weights`` (content-keyed) and downloaded
-    sources (:func:`obs_dir`) stay shared. The previous location is restored on exit.
+    aligned, calculated, health and inputs kinds; ``weights`` (content-keyed) and
+    downloaded sources (:func:`obs_dir`) stay shared. The previous location is restored
+    on exit.
     """
     global _scoped_root
     saved = _scoped_root

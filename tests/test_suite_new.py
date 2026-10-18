@@ -490,7 +490,8 @@ def test_a_boundary_figure_names_its_side_and_location(tmp_path):
     rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
     assert rc == 0
     _, expanded = _expanded(out)
-    figures = [p for p in expanded if " boundary — " in p.title]
+    # the section figures; the boundary integrity tables are titled by the page alone
+    figures = [p for p in expanded if " boundary — " in p.title and p.kind != "inputs"]
     assert figures
     for p in figures:
         side = p.title.split(" boundary")[0]

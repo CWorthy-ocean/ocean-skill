@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 __all__ = [
     "COMPARE_DRAWS",
     "HEALTH_DRAWS",
+    "INPUT_DRAWS",
     "RIVER_DRAWS",
     "SUMMARY_KINDS",
     "SUMMARY_SCOPES",
@@ -41,6 +42,7 @@ _PAGE_KINDS = (
     "TS",
     "health",
     "rivers",
+    "inputs",
 )
 
 #: The ``draw:`` values a ``compare:`` page accepts: which
@@ -60,8 +62,17 @@ HEALTH_DRAWS = ("summary", "integrity", "inventory", "plankton")
 #: imports it from here.
 RIVER_DRAWS = ("map", "histograms", "sample", "extremes")
 
+#: The ``draw:`` values an ``inputs:`` page accepts, for
+#: :class:`ocean_skill.input_integrity.InputHealth`. The single definition -- the module
+#: imports it from here.
+INPUT_DRAWS = ("integrity",)
+
 #: The diagnostic page kinds and the ``draw:`` values each accepts.
-_DIAGNOSTIC_DRAWS = {"health": HEALTH_DRAWS, "rivers": RIVER_DRAWS}
+_DIAGNOSTIC_DRAWS = {
+    "health": HEALTH_DRAWS,
+    "rivers": RIVER_DRAWS,
+    "inputs": INPUT_DRAWS,
+}
 
 
 #: What a ``summary:`` page's ``kind:`` may name: the overviews
@@ -132,7 +143,7 @@ def check_draw(title: str, draw: str, contours: Any) -> None:
 
 
 def check_diagnostic_draw(title: str, kind: str, draw: Any) -> None:
-    """Raise unless ``draw`` names one of the figures a ``health:``/``rivers:`` page draws.
+    """Raise unless ``draw`` names a figure of a ``health:``/``rivers:``/``inputs:`` page.
 
     The one check of such a page's ``draw:``, called at load time (a value still holding
     a ``{placeholder}`` is left for later) and again after the placeholders are
@@ -320,7 +331,7 @@ class RunInfoConfig(BaseModel):
 class PageConfig(BaseModel):
     """One page of a report: ``field``, ``compare``, ``summary``, ``section``, XY, TS...
 
-    The last two kinds are ``health`` and ``rivers``, below.
+    The last three kinds are ``health``, ``rivers`` and ``inputs``, below.
 
     ``field``/``compare``/``summary`` are the raw keyword dicts a page will pass to
     :func:`ocean_skill.field.field`, :func:`ocean_skill.comparison.compare`, or
@@ -349,6 +360,12 @@ class PageConfig(BaseModel):
     a mapping with ``source`` (default ``defaults.test``), ``time`` and ``draw`` (one of
     :data:`HEALTH_DRAWS`/:data:`RIVER_DRAWS`). They take ``for_each:``, ``plot:`` and
     ``caption:`` but not ``then:`` or ``contours:``.
+
+    ``inputs`` draws the per-variable integrity table of
+    :func:`ocean_skill.input_integrity.input_health` over input files: a mapping with
+    ``sources`` (catalog names, or ``{name, label, vars}`` mappings; nested lists are
+    flattened), ``time``, ``max_steps`` and ``draw`` (:data:`INPUT_DRAWS`). It takes the
+    same page keys as the other two.
 
     ``for_each`` fans this one page into several -- one page per element of the
     Cartesian product of its lists (see :mod:`ocean_skill.workflows.pages`).
@@ -385,6 +402,7 @@ class PageConfig(BaseModel):
     TS: dict[str, Any] | None = None
     health: dict[str, Any] | None = None
     rivers: dict[str, Any] | None = None
+    inputs: dict[str, Any] | None = None
     for_each: dict[str, Any] | None = None
     plot: dict[str, Any] = Field(default_factory=dict)
     then: list[str | dict[str, Any]] | None = None
@@ -406,7 +424,7 @@ class PageConfig(BaseModel):
                 )
             raise ValueError(
                 f"page {self.title!r} must have exactly one of field:/compare:/"
-                f"summary:/section:/XY:/TS:/health:/rivers: -- found "
+                f"summary:/section:/XY:/TS:/health:/rivers:/inputs: -- found "
                 f"{kinds or 'none'}{hint}"
             )
         return self
@@ -415,9 +433,17 @@ class PageConfig(BaseModel):
     def kind(
         self,
     ) -> Literal[
-        "field", "compare", "summary", "section", "XY", "TS", "health", "rivers"
+        "field",
+        "compare",
+        "summary",
+        "section",
+        "XY",
+        "TS",
+        "health",
+        "rivers",
+        "inputs",
     ]:
-        """Which page kind this is (``field``, ``compare``, ... ``rivers``)."""
+        """Which page kind this is (``field``, ``compare``, ... ``inputs``)."""
         for k in _PAGE_KINDS:
             if getattr(self, k) is not None:
                 return k  # type: ignore[return-value]
@@ -497,7 +523,7 @@ class PageConfig(BaseModel):
 
     @model_validator(mode="after")
     def _diagnostic_draw_is_known(self) -> PageConfig:
-        spec = self.health if self.kind == "health" else self.rivers
+        spec = getattr(self, self.kind) if self.kind in _DIAGNOSTIC_DRAWS else None
         if spec is not None and "draw" in spec:
             check_diagnostic_draw(self.title, self.kind, spec["draw"])
         return self

@@ -301,6 +301,9 @@ pages:
       title: "{side.title} boundary — iron, ammonium, DOC and chlorophyll (climatology, {forcing_time})"
       ncols: 2                       # 2x2: four stacked rows overflow a letter page
 
+  - title: "Boundary conditions — metrics"
+    summary: {scope: section, kind: [table]}
+
   # -- surface forcing ---------------------------------------------------------------
   - title: "Surface forcing"
     section: >-
@@ -368,3 +371,47 @@ pages:
   - title: "River inputs — extremes"
     rivers: {source: "{river}", time: "{forcing_time}", draw: extremes}
     caption: The rivers with the largest values.
+
+  # -- input file integrity -----------------------------------------------------------
+  - title: "Input file integrity"
+    section: >-
+      Statistics of every variable in the input files, with no observations involved:
+      the minimum and maximum (and where and when they are), the mean and spread, the
+      share of ocean cells outside a plausible range or negative, NaN and Inf values,
+      and flags for a variable that is zero everywhere, has one value everywhere, is an
+      exact copy of another variable in the same file (a CDR tracer equal to its twin) or
+      repeats the previous time step. Land is left out. Boundary and surface files are
+      scanned over {forcing_time}; climatologies over all twelve months.
+
+  - title: "Initial conditions — integrity"
+    inputs: {sources: [{name: "{test}", label: initial conditions}]}
+    caption: Every variable of the initial conditions, ocean cells only.
+
+  - title: "{side.title} boundary — integrity ({forcing_time})"
+    for_each:
+      side: "{sides}"
+    inputs:
+      sources:
+        - {name: "{bry_phys}_{side.name}", label: "physics"}
+        - {name: "{bry_bgc}_{side.name}", label: "BGC"}
+      time: "{forcing_time}"
+    caption: >-
+      {side.title} boundary ({side.label}), every time step of {forcing_time}. Depth is
+      the cell's depth below the surface.
+
+  - title: "{side.title} boundary — climatology integrity"
+    for_each:
+      side: "{clim_sides}"
+    inputs:
+      sources:
+        - {name: "{bry_bgc_clim}_{side.name}", label: "BGC climatology"}
+    caption: >-
+      {side.title} boundary ({side.label}), the climatological BGC file, all twelve months.
+
+  - title: "Surface forcing — integrity ({forcing_time})"
+    inputs:
+      sources: ["{surface}", "{surface_clim}", "{restoring}"]
+      time: "{forcing_time}"
+    caption: >-
+      Surface forcing files over {forcing_time}; the climatologies (BGC forcing and the
+      salinity restoring field) over all twelve months.

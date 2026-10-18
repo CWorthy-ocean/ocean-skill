@@ -31,6 +31,12 @@ Four views (:data:`RIVER_DRAWS`), each a list of ``(name, matplotlib Figure)``:
     A table of each varying main tracer's three highest river concentrations over *all*
     times, and any below its lower bound (:meth:`RiverInputs.table`).
 
+The map also marks the rivers the other two views single out: a ring and an ``S1``..
+tag on each sample river (:meth:`RiverInputs.tagged_sample`, the same tags as the
+sample page's legend) and a red triangle and an ``E1``.. tag on each river of the
+extremes table's highest rows (:meth:`RiverInputs.extreme_rivers`, the table's ``tag``
+column).
+
 :meth:`RiverInputs.problems` lists what is out of range as JSON-safe records, for a
 suite's summary. Everything is matplotlib, built directly (no ``pyplot`` state).
 
@@ -259,6 +265,86 @@ def _wrap(text: str, width: int = _WRAP) -> str:
 
 def _bound(name: str) -> tuple[float, float]:
     return RIVER_BOUNDS.get(name, _DEFAULT_BOUND)
+
+
+#: Offsets (points from the mark) a map label tries, nearest ring first.
+_LABEL_RADII = (6.0, 13.0, 22.0, 34.0)
+_COMPASS = ((1, 1), (1, -1), (-1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1))
+
+
+def _label_marks(ax, marks) -> list:
+    """Annotate each ``(text, x, y, color)`` mark of ``ax`` so no two labels collide.
+
+    ``x`` and ``y`` are in data coordinates. Marks are labeled in order: each takes the
+    first of eight compass offsets, on the nearest ring of :data:`_LABEL_RADII`, where
+    its label overlaps no earlier label, no mark and leaves the axes by nothing (a
+    label placed beyond the first ring gets a thin leader line). When nothing is free
+    the least crowded spot is used, shifted back inside the axes. Only the marks are
+    ever measured, so the cost does not grow with the number of rivers on the map.
+    """
+    if not marks:
+        return []
+    ax.apply_aspect()
+    fig = ax.figure
+    to_pt = 72.0 / fig.dpi
+    area = ax.get_window_extent()
+    ax0, ay0, ax1, ay1 = (v * to_pt for v in (area.x0, area.y0, area.x1, area.y1))
+    pos = ax.transData.transform([(m[1], m[2]) for m in marks]) * to_pt
+    sym = 5.0  # half the size of a mark's ring or triangle
+    boxes = [(x - sym, y - sym, x + sym, y + sym) for x, y in pos]
+    texts = []
+    for n, (text, _x, _y, color) in enumerate(marks):
+        w, h = 0.62 * _FS * len(text) + 2.0, 1.25 * _FS
+        px, py = pos[n]
+        best = None
+        for radius in _LABEL_RADII:
+            for sx, sy in _COMPASS:
+                dx, dy = radius * sx, radius * sy
+                x0 = px + dx - (0.0 if sx > 0 else w if sx < 0 else w / 2)
+                y0 = py + dy - (0.0 if sy > 0 else h if sy < 0 else h / 2)
+                box = (x0, y0, x0 + w, y0 + h)
+                out = max(ax0 - x0, 0) + max(ay0 - y0, 0)
+                out += max(x0 + w - ax1, 0) + max(y0 + h - ay1, 0)
+                hits = sum(
+                    box[0] < b[2] and b[0] < box[2] and box[1] < b[3] and b[1] < box[3]
+                    for k, b in enumerate(boxes)
+                    if k != n
+                )
+                score = (out > 0, hits, out, radius)
+                if best is None or score < best[0]:
+                    best = (score, dx, dy, sx, sy, box)
+                if hits == 0 and out == 0:
+                    break
+            else:
+                continue
+            break
+        _, dx, dy, sx, sy, box = best
+        shift_x = max(ax0 - box[0], 0) - max(box[2] - ax1, 0)
+        shift_y = max(ay0 - box[1], 0) - max(box[3] - ay1, 0)
+        dx, dy = dx + shift_x, dy + shift_y
+        boxes.append(
+            (box[0] + shift_x, box[1] + shift_y, box[2] + shift_x, box[3] + shift_y)
+        )
+        texts.append(
+            ax.annotate(
+                text,
+                (marks[n][1], marks[n][2]),
+                xytext=(dx, dy),
+                textcoords="offset points",
+                ha="left" if sx > 0 else "right" if sx < 0 else "center",
+                va="bottom" if sy > 0 else "top" if sy < 0 else "center",
+                fontsize=_FS,
+                color=color,
+                zorder=8,
+                bbox={"fc": "white", "ec": "none", "alpha": 0.75, "pad": 0.5},
+                arrowprops=(
+                    {"arrowstyle": "-", "lw": 0.4, "color": color, "shrinkB": 3}
+                    if np.hypot(dx, dy) > _LABEL_RADII[0] * 2
+                    else None
+                ),
+            )
+        )
+    return texts
 
 
 class RiverInputs:
@@ -942,13 +1028,24 @@ class RiverInputs:
                 [f"{format_value(v)} {display('m3/s')}" for v in sizes],
                 title="marker size: time-mean discharge",
                 loc="upper center",
-                bbox_to_anchor=(0.44, (below + legend_h + note_h - 0.3) / height),
+                bbox_to_anchor=(0.28, (below + legend_h + note_h - 0.3) / height),
                 ncol=len(sizes),
                 fontsize=_FS,
                 title_fontsize=_FS,
                 frameon=False,
                 labelspacing=1.0,
                 columnspacing=2.5,
+            )
+        marks = self._mark_rivers(ax, mouth_lon - shift, shift, central)
+        if marks:
+            fig.legend(
+                marks,
+                [m.get_label() for m in marks],
+                loc="upper left",
+                bbox_to_anchor=(0.56, (below + legend_h + note_h - 0.3) / height),
+                fontsize=_FS,
+                frameon=False,
+                labelspacing=0.6,
             )
         fig.text(
             0.08,
@@ -989,6 +1086,94 @@ class RiverInputs:
             left.append(f"{counts['neither']:,} with neither")
         drawn = f"Drawn: {counts['active']:,} rivers with a grid cell and flow."
         return f"{drawn} Not drawn: {'; '.join(left)}." if left else drawn
+
+    def _mark_rivers(self, ax, mouth_x, shift: float, central: float) -> list:
+        """Ring the sample rivers and flag the highest-concentration ones on the map.
+
+        Sample rivers (:meth:`tagged_sample`) get a black ring and the extremes
+        table's rivers (:meth:`extreme_rivers`) a red triangle, each labeled with its
+        tag; a river in both gets one label with both tags. Returns the legend handles
+        (empty when there is nothing to mark).
+        """
+        from matplotlib.lines import Line2D
+
+        sample = self.tagged_sample()
+        extremes = self.extreme_rivers()
+        tags: dict[tuple[float, float], list[str]] = {}
+        if sample:
+            sel = np.array([i for _, i, _ in sample])
+            sx, sy = mouth_x[sel], self.lat[sel]
+            ax.scatter(
+                sx,
+                sy,
+                s=60,
+                facecolors="none",
+                edgecolors="black",
+                linewidths=0.9,
+                transform=ax.projection,
+                zorder=6,
+                gid="sample_rivers",
+            )
+            for (tag, _, _), x, y in zip(sample, sx, sy, strict=True):
+                tags.setdefault((float(x), float(y)), []).append(tag)
+        if extremes:
+            ex = np.array([d["lon"] for d in extremes])
+            ex = (np.mod(ex, 360.0) if central else ex) - shift
+            ey = np.array([d["lat"] for d in extremes])
+            ax.scatter(
+                ex,
+                ey,
+                s=80,
+                marker="^",
+                facecolors="none",
+                edgecolors="#c62828",
+                linewidths=1.0,
+                transform=ax.projection,
+                zorder=6,
+                gid="extreme_rivers",
+            )
+            for d, x, y in zip(extremes, ex, ey, strict=True):
+                tags.setdefault((float(x), float(y)), []).append(d["tag"])
+        marks = [
+            (
+                " ".join(t),
+                x,
+                y,
+                "#c62828" if any(tag.startswith("E") for tag in t) else "black",
+            )
+            for (x, y), t in tags.items()
+        ]
+        _label_marks(ax, marks)
+        handles = []
+        if sample:
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    ls="",
+                    marker="o",
+                    ms=8,
+                    markerfacecolor="none",
+                    markeredgecolor="black",
+                    label=f"{sample[0][0]}-{sample[-1][0]}: sample rivers (sample "
+                    "page)",
+                )
+            )
+        if extremes:
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    ls="",
+                    marker="^",
+                    ms=8,
+                    markerfacecolor="none",
+                    markeredgecolor="#c62828",
+                    label=f"{extremes[0]['tag']}-{extremes[-1]['tag']}: highest "
+                    "concentrations (extremes page)",
+                )
+            )
+        return handles
 
     def _draw_histograms(self) -> list:
         from matplotlib.ticker import LogFormatterMathtext, LogLocator, NullFormatter
@@ -1168,11 +1353,48 @@ class RiverInputs:
         order = {"small": 0, "medium": 1, "large": 2, "largest": 3}
         return sorted(taken, key=lambda t: (order[t[1]], float(q[t[0]])))
 
+    def tagged_sample(self) -> list[tuple[str, int, str]]:
+        """Return the sample as ``(tag, index, class)``, tagged ``S1``..``S12``.
+
+        The tags name each river on the sample page's legend and on the map.
+        """
+        return [
+            (f"S{n}", i, label)
+            for n, (i, label) in enumerate(self.sample_rivers(), start=1)
+        ]
+
+    def extreme_rivers(self, df=None) -> list[dict[str, Any]]:
+        """Return the extremes table's ``highest`` rivers, tagged ``E1``, ``E2``...
+
+        One record (``tag``, ``river_id``, ``river``, ``lon``, ``lat``) per distinct
+        river, tagged in order of first appearance in :meth:`table`: a river that
+        holds the top values of several tracers is one river with one tag, and the
+        table's rows refer to it. ``df`` is :meth:`table`'s result when the caller
+        already has it.
+        """
+        df = self.table() if df is None else df
+        out: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for r in df[df["kind"] == "highest"].itertuples():
+            if r.river_id not in seen:
+                seen.add(r.river_id)
+                out.append(
+                    {
+                        "tag": f"E{len(out) + 1}",
+                        "river_id": int(r.river_id),
+                        "river": str(r.river),
+                        "lon": float(r.lon),
+                        "lat": float(r.lat),
+                    }
+                )
+        return out
+
     def _draw_sample(self) -> list:
         import matplotlib.dates as mdates
         from matplotlib import colormaps
 
-        chosen = self.sample_rivers()
+        tagged = self.tagged_sample()
+        chosen = [(i, label) for _, i, label in tagged]
         idx = [i for i, _ in chosen]
         sel = np.asarray(idx)
         order = np.argsort(sel)
@@ -1230,14 +1452,16 @@ class RiverInputs:
             (n, self._unit(self.tracers.index(n)), series[n], False) for n in names
         ]
         for ax, (title, unit, data, logy) in zip(axes, panels, strict=True):
-            for j, (i, label) in enumerate(chosen):
+            for j, ((i, label), (tag, _, _)) in enumerate(
+                zip(chosen, tagged, strict=True)
+            ):
                 ax.plot(
                     x,
                     data[:, j],
                     color=colors[j % len(colors)],
                     ls=styles[label],
                     lw=0.9,
-                    label=f"{self.names[i]} ({label})",
+                    label=f"{tag} {self.names[i]} ({label})",
                 )
             if logy and np.any(data > 0):
                 ax.set_yscale("log")
@@ -1285,11 +1509,13 @@ class RiverInputs:
             "#",
             "value",
             "river",
+            "tag",
             "lon",
             "lat",
             "date",
             f"Q ({display('m3/s')})",
         ]
+        tag_of = {d["river_id"]: d["tag"] for d in self.extreme_rivers(df)}
         records = []  # (tracer, label, cells after the label)
         for r in df.itertuples():
             unit = display(r.unit)
@@ -1301,6 +1527,7 @@ class RiverInputs:
                         str(r.rank) if r.kind == "highest" else f"low {r.rank}",
                         format_value(r.value),
                         str(r.river)[:28],
+                        tag_of[r.river_id] if r.kind == "highest" else "",
                         format_lon(r.lon),
                         format_lat(r.lat),
                         str(r.date),
@@ -1319,8 +1546,8 @@ class RiverInputs:
                 rows.append([label if key != seen else "", *cells])
                 groups.append(key[0])
                 seen = key
-            note = (
-                "low N: the lowest values, below the tracer's lower bound "
+            note = ("tag: the river's marker on the map. " if tag_of else "") + (
+                "low N: the lowest values, below the tracer's lower bound"
                 if has_low and n == len(pages)
                 else ""
             )
@@ -1338,7 +1565,7 @@ class RiverInputs:
             tab = ax.table(
                 cellText=rows,
                 colLabels=heads,
-                colWidths=[0.19, 0.06, 0.09, 0.24, 0.1, 0.09, 0.11, 0.1],
+                colWidths=[0.17, 0.06, 0.09, 0.22, 0.05, 0.1, 0.09, 0.11, 0.09],
                 loc="upper center",
                 cellLoc="left",
             )

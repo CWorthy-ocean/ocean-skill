@@ -109,6 +109,7 @@ def test_shipped_suite_loads_and_expands(path):
         "TS",
         "health",
         "rivers",
+        "inputs",
     }
     # A suite of dividers alone would draw nothing at all.
     assert any(p.kind != "section" for p in expanded)

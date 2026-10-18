@@ -303,8 +303,10 @@ def test_the_sequential_map_is_diverging_iff_the_variable_is_centred():
         centred = resolve_name(key) in _CENTERED
         assert diverging == centred, key
         assert (center_for(key) is not None) == centred, key
-    # every table entry is a real vocabulary variable
-    assert {resolve_name(k) for k in keys} >= set(_CENTERED)
+    # every table entry is a real vocabulary variable, except the roms-tools forcing
+    # winds, which keep their raw names on purpose (rotated to the grid, no CF name)
+    raw_forcing = {"uwnd", "vwnd"}
+    assert {resolve_name(k) for k in keys} >= set(_CENTERED) - raw_forcing
 
 
 @pytest.mark.parametrize("name", VELOCITY_COMPONENTS)
