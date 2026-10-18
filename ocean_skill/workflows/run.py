@@ -1460,10 +1460,10 @@ def run_suite(
         pooled_records: list[dict[str, Any]] = []
         # where the records since the last ``section:`` divider begin
         section_start = 0
-        # what ``health:``/``rivers:`` pages share: the diagnostic objects, computed by
-        # the first page that needs each, and the job-segment start dates, read from the
-        # workplan only when a health page builds (a failure there is that page's, not
-        # the report's)
+        # what ``health:``/``rivers:``/``inputs:`` pages share: the diagnostic objects,
+        # computed by the first page that needs each, and the job-segment start dates,
+        # read from the workplan only when a health page builds (a failure there is that
+        # page's, not the report's)
         run_context: dict[str, Any] = {
             "joins": lambda: cover.segment_starts(suite, path),
             "objects": {},
@@ -1525,7 +1525,7 @@ def run_suite(
                             ),
                             **(
                                 {"run_context": run_context}
-                                if page.kind in ("health", "rivers")
+                                if page.kind in ("health", "rivers", "inputs")
                                 else {}
                             ),
                         )

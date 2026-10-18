@@ -176,8 +176,9 @@ defaults:                             # merged into every page; a page's own key
 
 pages:
   - title: "..."          # required; may contain {placeholder}s (see below)
-    field: {...}          # exactly one of field: / compare: / summary: / section: / XY: / TS: / health: / rivers:
+    field: {...}          # exactly one of field: / compare: / summary: / section: / XY: / TS: / health: / rivers: / inputs:
     health: {draw: summary}   # run-health diagnostics (see below); rivers: is the river-input equivalent
+    inputs: {sources: [...], time: "2011-01"}   # per-variable integrity of input files (see below)
     section: "..."         # a text-only divider page in report.pdf (see below): no for_each:/then:/plot:
     XY: {members: {...}, x: ..., y: ...}   # one variable against another (see below); TS: is XY: with x/y fixed
     for_each: {...}        # optional: fan this one page into several (see below)
@@ -291,7 +292,7 @@ does not suit without a warning.
 is the shorthand for the page's own title -- useful where the figure's default title
 (a depth range, a month, the transect's end points) does not say which boundary side or
 which input the page is about. It works on `field:`, `compare:`, `XY:` and `TS:` pages;
-`health:`, `rivers:` and `summary:` pages draw their own titles (a summary table's is the
+`health:`, `rivers:`, `inputs:` and `summary:` pages draw their own titles (a summary table's is the
 page title).
 
 `defaults.test` must be a single source name, not a list: `time: latest`, `month: run`,
@@ -699,6 +700,52 @@ found. `draw: integrity` and `draw: extremes` also write their table to
 `metrics/<suite name>_<page title slug>.csv`, and the problems found go in the page's
 `results` in `manifest.json`; neither adds to the final `summary:` page. A page with nothing
 to draw (no plankton variables in the run) is skipped with that reason.
+
+### `inputs:` -- integrity of the input files
+
+```yaml
+- title: "Initial conditions -- integrity"
+  inputs: {sources: ["{test}"]}
+- title: "{side.title} boundary -- integrity"
+  for_each: {side: "{sides}"}
+  inputs: {sources: ["{bry_phys}_{side.name}", "{bry_bgc}_{side.name}"], time: "{forcing_time}"}
+- title: "Surface forcing -- integrity"
+  inputs: {sources: ["{surface}", "{surface_clim}"], time: "{forcing_time}", max_steps: 200}
+```
+
+`osk.input_health(sources, time=...)` over the files a run is *given* (initial conditions,
+open boundaries, surface forcing, restoring, CO2): for every data variable of every source,
+the minimum and maximum (value, where -- longitude, latitude, depth or s-level -- and when),
+the mean and standard deviation, the percentage of ocean cells outside a plausible range or
+negative at the worst step, the NaN/Inf count, and flags: `all NaN`, `all zero`, `constant`
+(one value at every ocean cell and step), `copy of X` (identical to another variable of the
+file, such as `DIC_ALT_CO2` equal to `DIC`) and `same as previous step`. Nothing is compared
+with observations; this is the input-side counterpart of `health:`. Statistics are over ocean
+cells only (`mask_rho`; a boundary entry uses its own edge row or column), because roms-tools
+files hold values over land; a source without a mask is counted whole and the figure says so.
+The bounds are `osk.input_integrity.bounds(variable)`: temperature, salinity, velocities and
+pH as for `health:`, the forcing variables (`Tair`, `qair`, `rain`, `swrad`, `lwrad`,
+`uwnd`/`vwnd`, `dust`, `iron`, `nox`, `nhy`/`nhx`, `xco2`/`pco2_air`, `sss`) from a table, any
+other variable at least zero; a boundary file's side suffix (`temp_south`) is ignored.
+
+- **`sources:`** -- required: a list of catalog names, or mappings `{name, label, vars}`
+  (`label` names the source on the figure, default its name; `vars` restricts the variables
+  scanned, and a name the file lacks is an error). A placeholder that expands to a list (a
+  `surface:` default of `{name, label, vars}` mappings) is flattened into the list.
+- **`time:`** -- the window to scan, as written: a period (`"2011-01"`, a day, a year),
+  `latest`, or `{min, max}`; none scans every step. A climatology (a `month` axis) is
+  always scanned whole, and the figure's step column reads `month 1` to `month 12`.
+- **`max_steps:`** -- thin the window to at most this many evenly spread steps (first and
+  last kept); the table says how many were scanned. A month of hourly forcing on a large
+  grid is tens of GB, scanned in bounded memory but not quickly. Under `--smoke N` every
+  source is thinned to at most `2N` steps and the figures say test mode.
+- **`draw:`** -- `integrity` (the only one, and the default).
+
+Each variable's per-step statistics are kept in the `inputs` cache, so a re-run reads none of
+the data again; a file rewritten in place is noticed from a content sample. `for_each:` and
+`caption:` work as on any figure page; `then:` and `contours:` are schema errors. The table
+is also written to `metrics/<suite name>_<page title slug>.csv` and the problems found go in
+the page's `results` in `manifest.json`.
 
 ### `section:` -- a divider page
 

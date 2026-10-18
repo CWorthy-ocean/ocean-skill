@@ -43,6 +43,11 @@ A ``health:``/``rivers:`` page draws the figures of a run-diagnostic object
 :func:`expand` fills in its ``source`` and pins its time window like a ``field:``
 page's; :func:`build` computes the object once per (source, time window) and hands
 every later page with the same key the same one (see :func:`_diagnostic_object`).
+
+An ``inputs:`` page draws the integrity table of :func:`ocean_skill.input_health` over
+one or more input-file sources (``sources:``, a list of catalog names or ``{name, label,
+vars}`` mappings; placeholders expand to nested lists, which :func:`expand` flattens).
+Its ``time`` is passed as written: a forcing file's time axis is not the run's.
 """
 
 from __future__ import annotations
@@ -954,6 +959,7 @@ class ExpandedPage:
 
     title: str
     #: "field" | "compare" | "summary" | "section" | "XY" | "TS" | "health" | "rivers"
+    #: | "inputs"
     kind: str
     kwargs: dict[str, Any]
     plot: dict[str, Any]
@@ -1345,15 +1351,52 @@ def _expand_xy_page(
     }, problem
 
 
-# -- health: / rivers: pages -----------------------------------------------------------
+# -- health: / rivers: / inputs: pages -------------------------------------------------
 #
 # ``health: {source, time, draw}`` and ``rivers: {source, time, draw}``: the run
 # diagnostics of :mod:`ocean_skill.run_health` and :mod:`ocean_skill.river_inputs`. One
 # page is one ``draw`` (one figure group) of an object that several pages share, so
 # the expensive read happens once per (source, window) however many pages draw from it.
+# ``inputs: {sources, time, max_steps, draw}`` is the same for
+# :mod:`ocean_skill.input_integrity`, over a list of input-file sources.
 
 #: The keys of a ``health:``/``rivers:`` mapping.
 _DIAGNOSTIC_KEYS = ("source", "time", "draw")
+
+#: The keys of an ``inputs:`` mapping.
+_INPUTS_KEYS = ("sources", "time", "max_steps", "draw")
+
+
+def _expand_inputs_page(
+    page: Any, namespace: dict[str, Any], *, title: str
+) -> dict[str, Any]:
+    """Resolve one ``inputs:`` page into its kwargs.
+
+    ``sources`` is filled in and flattened to a plain list of ``{name, label?, vars?}``
+    mappings (:func:`ocean_skill.input_integrity.normalize_sources`); ``draw`` defaults
+    to the first of :data:`ocean_skill.config.INPUT_DRAWS`. ``time`` and ``max_steps``
+    are passed as written.
+    """
+    from ocean_skill.config import INPUT_DRAWS
+    from ocean_skill.input_integrity import normalize_sources
+
+    raw = _template_value(dict(page.inputs), namespace, title=title)
+    unknown = sorted(set(raw) - set(_INPUTS_KEYS))
+    if unknown:
+        raise ValueError(
+            f"page {title!r}: inputs: has no key(s) {unknown} -- it takes "
+            f"{list(_INPUTS_KEYS)}"
+        )
+    if "sources" not in raw:
+        raise ValueError(f"page {title!r}: inputs: needs sources: (catalog names)")
+    kwargs = copy.deepcopy(raw)
+    try:
+        kwargs["sources"] = normalize_sources(kwargs["sources"])
+    except ValueError as exc:
+        raise ValueError(f"page {title!r}: {exc}") from exc
+    kwargs.setdefault("draw", INPUT_DRAWS[0])
+    check_diagnostic_draw(title, "inputs", kwargs["draw"])
+    return kwargs
 
 
 def _expand_diagnostic_page(
@@ -1723,6 +1766,7 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
             page_source = test_source
         elif page.kind in ("health", "rivers"):
             page_source = (getattr(page, page.kind) or {}).get("source", test_source)
+        # an inputs: page names its own sources and has no run to take months from
 
         test_index = None
         index_error: Exception | None = None
@@ -1970,6 +2014,17 @@ def expand(suite: Any, *, thin_dates: bool = False) -> list[ExpandedPage]:
                         plot=plot,
                         cache=page.kind == "health" and suite.cache and cacheable,
                         problem=problem,
+                    )
+                )
+
+            elif page.kind == "inputs":
+                out.append(
+                    ExpandedPage(
+                        title=title,
+                        kind="inputs",
+                        kwargs=_expand_inputs_page(page, namespace, title=title),
+                        plot=plot,
+                        cache=suite.cache,
                     )
                 )
 
@@ -2491,7 +2546,7 @@ def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
 
 
 def _diagnostic_object(page: ExpandedPage, run_context: dict[str, Any] | None):
-    """Return the run-diagnostic object a ``health:``/``rivers:`` page draws from.
+    """Return the diagnostic object a ``health:``/``rivers:``/``inputs:`` page uses.
 
     Computed on the first page that needs it and shared by every later page with the
     same kind, source, time window and cache flag -- the object holds the expensive
@@ -2510,13 +2565,22 @@ def _diagnostic_object(page: ExpandedPage, run_context: dict[str, Any] | None):
     kwargs = page.kwargs
     key = (
         page.kind,
-        kwargs["source"],
-        json.dumps(kwargs.get("time"), sort_keys=True, default=str),
+        json.dumps(kwargs.get("sources", kwargs.get("source")), default=str),
+        json.dumps([kwargs.get("time"), kwargs.get("max_steps")], default=str),
         page.cache,
     )
     if key not in objects:
         try:
-            if page.kind == "health":
+            if page.kind == "inputs":
+                from ocean_skill.input_integrity import input_health
+
+                objects[key] = input_health(
+                    kwargs["sources"],
+                    time=kwargs.get("time"),
+                    max_steps=kwargs.get("max_steps"),
+                    cache=page.cache,
+                )
+            elif page.kind == "health":
                 from ocean_skill.run_health import health
 
                 joins = ctx.get("joins")
@@ -2541,7 +2605,7 @@ def _diagnostic_object(page: ExpandedPage, run_context: dict[str, Any] | None):
 
 
 def _build_diagnostic(page: ExpandedPage, run_context: dict[str, Any] | None):
-    """Draw a ``health:``/``rivers:`` page; see :func:`_diagnostic_object`.
+    """Draw a ``health:``/``rivers:``/``inputs:`` page; see :func:`_diagnostic_object`.
 
     The page's ``plot:`` is not used: the diagnostic figures take no options.
     """
@@ -2551,7 +2615,8 @@ def _build_diagnostic(page: ExpandedPage, run_context: dict[str, Any] | None):
     if not results:
         raise PageSkipped(
             f"{page.kind}: draw: {draw} has nothing to draw for "
-            f"{page.kwargs['source']!r} (the run has no such variables or data)"
+            f"{page.kwargs.get('source', page.kwargs.get('sources'))!r} (it has no "
+            "such variables or data)"
         )
     if draw in ("integrity", "extremes"):
         table = obj.table()
@@ -2605,9 +2670,10 @@ def build(
     ``manifest.json`` too) -- the one place in this chain that is inherently
     data-dependent and so cannot have been resolved by :func:`expand`.
 
-    A ``health``/``rivers`` page draws one figure group of a diagnostic object that
-    ``run_context`` shares between pages (see :func:`_diagnostic_object`); it records
-    the object's problems on :attr:`ExpandedPage.results` and, for the tables it
+    A ``health``/``rivers``/``inputs`` page draws one figure group of a diagnostic
+    object that ``run_context`` shares between pages (see
+    :func:`_diagnostic_object`); it records the object's problems on
+    :attr:`ExpandedPage.results` and, for the tables it
     draws, :attr:`ExpandedPage.summary_table`, but no metric records, so the final
     ``summary:`` page stays about the comparisons. One with nothing to draw raises
     :class:`PageSkipped`.
@@ -2786,7 +2852,7 @@ def build(
                 results.append((suffix, fig))
         return results
 
-    if page.kind in ("health", "rivers"):
+    if page.kind in ("health", "rivers", "inputs"):
         return _build_diagnostic(page, run_context)
 
     # summary

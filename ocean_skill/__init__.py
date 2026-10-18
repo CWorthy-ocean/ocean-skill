@@ -38,6 +38,8 @@ The public API is intentionally small:
     osk.health("his").figures("integrity")           # run diagnostics: blow-ups, drift,
                                                      # restarts (.table(), .problems())
     osk.rivers("river_forcing").figures("map")       # river-forcing inputs: where, size
+    osk.input_health(["surface", "bry_south"]).table()  # every input file's variables:
+                                                     # range, bounds, NaN, copies
     osk.TS({"ROMS": roms, "WOA23": woa}).plot()      # T against S per source;
                                                      # osk.XY: any two variables
     osk.summary([set_a, set_b, one_comparison])      # comparisons you already have,
@@ -83,6 +85,7 @@ from ocean_skill.comparison import table as _table
 from ocean_skill.detide import detide
 from ocean_skill.extrema import Extrema, Extremum
 from ocean_skill.field import Cross, Field, FieldSet, field
+from ocean_skill.input_integrity import input_health
 from ocean_skill.pick import pick_path
 from ocean_skill.plot.map_locations import map_locations
 from ocean_skill.plot.map_metrics import map_metrics
@@ -152,6 +155,7 @@ __all__ = [
     "find",
     "find_catalogs",
     "health",
+    "input_health",
     "map_locations",
     "map_metrics",
     "match_report",

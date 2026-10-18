@@ -318,8 +318,10 @@ DEFAULT_FRAME_LABEL_KWARGS: dict[str, Any] = {
 DEFAULT_LINE_KWARGS: dict[str, Any] = {"linewidth": 1.2}
 DEFAULT_LEGEND_KWARGS: dict[str, Any] = {"frameon": False}
 
-#: field_row draws one row per figure (page-width, horizontal bars below); field_grid
-#: stacks several rows (vertical bars beside them) — same keys, different orientation.
+#: field_row draws one row per figure (page-width) and field_grid stacks several; both
+#: put vertical bars beside the panels by default, so a one-row comparison reads like
+#: one row of a grid. The ROW dict is what ``colorbar_kwargs={"orientation":
+#: "horizontal"}`` (or a very wide map) gets: bars below.
 #: ``shrink`` is 1.0 in both because :func:`_align_colorbars` re-fits each bar to the
 #: panels it belongs to after the layout settles; a shrink below 1 now means "this
 #: fraction of the panels' own extent", not of the grid cell they sit in.
@@ -3155,7 +3157,7 @@ def field_row(
     aspect = _map_aspect([{"aligned": aligned}], reference_name)
     horizontal = colorbar_is_horizontal(
         aspect,
-        default_horizontal=True,  # one row: bars below, panels get the full cell width
+        default_horizontal=False,  # one row reads like a row of a grid: bars beside
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
     explicit_size = figsize is not None
@@ -7496,7 +7498,7 @@ def time_depth_row(
     canvas = resolve_canvas(size, zoom)
     horizontal = colorbar_is_horizontal(
         SECTION_ASPECT,
-        default_horizontal=True,  # one row: bars below, panels get the full cell width
+        default_horizontal=True,  # flat panels: a side bar is a sliver
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
     figsize = figsize or auto_figsize(
@@ -8341,7 +8343,7 @@ def section_row(
     canvas = resolve_canvas(size, zoom)
     horizontal = colorbar_is_horizontal(
         SECTION_ASPECT,
-        default_horizontal=True,  # one row: bars below, panels get the full cell width
+        default_horizontal=True,  # flat panels: a side bar is a sliver
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
     figsize = figsize or auto_figsize(
@@ -9575,7 +9577,7 @@ def field_movie(
     aspect = _map_aspect(frames, reference_name)
     horizontal = colorbar_is_horizontal(
         aspect,
-        default_horizontal=True,
+        default_horizontal=False,
         requested=(colorbar_kwargs or {}).get("orientation"),
     )
     explicit_size = figsize is not None

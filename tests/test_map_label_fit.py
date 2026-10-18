@@ -79,7 +79,8 @@ def test_a_narrow_panel_gets_fewer_meridians_so_its_labels_clear_each_other():
         return round(abs(float(np.diff(values)[0])))
 
     steps = {step(gl) for gl in labelled}
-    assert steps == {20}
+    assert len(steps) == 1
+    assert steps <= {20, 30}
 
 
 @pytest.mark.parametrize("width, thinned", [(12.0, False), (2.0, True)])

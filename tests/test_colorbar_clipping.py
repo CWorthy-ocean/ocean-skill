@@ -272,26 +272,38 @@ def test_the_scale_bar_answers_for_test_and_reference_together():
     assert "max 900" in _cbar_texts(fig)
 
 
-def test_an_arrowed_bar_still_spans_the_panels_it_describes():
+@pytest.mark.parametrize("orientation", ["horizontal", "vertical"])
+def test_an_arrowed_bar_still_spans_the_panels_it_describes(orientation):
     """Matplotlib's extend locator re-imposes the bar's aspect on every draw.
 
     Left alone that undoes ``_align_colorbars`` and leaves the bar a fraction of the
-    width of the two panels it belongs to; the arrow tips, not the body, must reach
-    the panels' edges.
+    extent of the two panels it belongs to; the arrow tips, not the body, must reach
+    the panels' edges. A bar below the panels is measured along x, one beside them
+    along y.
     """
     fig = render(
-        PlotSpec(family="field_row", items=[_row_item()], options={}), robust=True
+        PlotSpec(
+            family="field_row",
+            items=[_row_item()],
+            options={"colorbar_kwargs": {"orientation": orientation}},
+        ),
+        robust=True,
     )
     fig.canvas.draw()
     bars = [ax for ax in fig.axes if getattr(ax, "_osk_cbar_parents", None)]
     assert len(bars) == 2
     for cax in bars:
         boxes = [p.get_position() for p in cax._osk_cbar_parents]
-        span = max(b.x1 for b in boxes) - min(b.x0 for b in boxes)
         body = cax.get_position()
+        if orientation == "horizontal":
+            span = max(b.x1 for b in boxes) - min(b.x0 for b in boxes)
+            length = body.width
+        else:
+            span = max(b.y1 for b in boxes) - min(b.y0 for b in boxes)
+            length = body.height
         # the body is the span less room for two arrows of 5% each (a fifth at most)
-        assert body.width >= 0.8 * span
-        assert body.width <= span + 1e-6
+        assert length >= 0.8 * span
+        assert length <= span + 1e-6
 
 
 # --- static: a movie answers for every frame ------------------------------------------

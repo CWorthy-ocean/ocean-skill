@@ -457,7 +457,7 @@ def test_the_map_title_is_one_short_line_and_the_counts_are_a_note_below(inputs)
     # the colorbar says m\u00b3/s at a readable size; marker sizes have a legend
     labels = [ax.get_ylabel() for ax in fig.axes]
     assert "time-mean discharge (m\u00b3/s)" in labels
-    (legend,) = fig.legends
+    legend = next(lg for lg in fig.legends if lg.get_title().get_text())
     assert len(legend.get_texts()) == 3
     assert all(t.get_text().endswith("m\u00b3/s") for t in legend.get_texts())
 
@@ -502,26 +502,27 @@ def test_the_extremes_table_fits_two_pages_with_one_cell_for_tracer_and_unit(inp
     (ax,) = fig.axes
     (table,) = ax.tables
     cells = {k: c.get_text().get_text() for k, c in table.get_celld().items()}
-    heads = [cells[0, c] for c in range(8)]
+    heads = [cells[0, c] for c in range(9)]
     assert heads == [
         "tracer",
         "#",
         "value",
         "river",
+        "tag",
         "lon",
         "lat",
         "date",
         "Q (m\u00b3/s)",
     ]
-    body = [[cells[r, c] for c in range(8)] for r in range(1, 1 + len(cells) // 8 - 1)]
+    body = [[cells[r, c] for c in range(9)] for r in range(1, 1 + len(cells) // 9 - 1)]
     tracers = [row[0] for row in body if row[0]]
     assert "DOC (mmol/m\u00b3)" in tracers and "temp (\u00b0C)" in tracers
     assert not any(t.startswith(("zooC", "Lig")) for t in tracers)  # constant tracers
     doc = next(row for row in body if row[0] == "DOC (mmol/m\u00b3)")
     assert doc[1:3] == ["1", "25000"]
     # positions read as degrees with a hemisphere, never 0-360 numbers
-    assert all(row[4].endswith(("\u00b0E", "\u00b0W", "\u00b0")) for row in body)
-    assert all(row[5].endswith(("\u00b0N", "\u00b0S", "\u00b0")) for row in body)
+    assert all(row[5].endswith(("\u00b0E", "\u00b0W", "\u00b0")) for row in body)
+    assert all(row[6].endswith(("\u00b0N", "\u00b0S", "\u00b0")) for row in body)
     assert any(row[1] == "low 1" for row in body)  # the planted negative NO3
 
 
@@ -557,3 +558,139 @@ def test_the_tracer_array_is_only_ever_read_in_slabs(river_source, monkeypatch):
     seen.clear()
     small.problems()
     assert seen and max(s[0] for s in seen) == 3
+
+
+def _marker_positions(ax, gid):
+    """Return the map's markers of one kind as ``(lon, lat)`` rows, longitude 0-360."""
+    (coll,) = [c for c in ax.collections if c.get_gid() == gid]
+    xy = np.asarray(coll.get_offsets())
+    return np.column_stack([np.mod(xy[:, 0] + 180.0, 360.0), xy[:, 1]])
+
+
+def _near(found, lon, lat):
+    """Return True when some row of ``found`` is the position ``(lon, lat)``."""
+    lon = np.mod(np.asarray(lon, dtype=float), 360.0)
+    gap = np.abs(found[:, 0][:, None] - lon[None, :]) + np.abs(
+        found[:, 1][:, None] - np.asarray(lat)[None, :]
+    )
+    return bool((gap.min(axis=0) < 1e-6).all())
+
+
+def test_the_map_marks_every_sample_river_and_every_extreme_river(inputs):
+    ((_, fig),) = inputs.figures("map")
+    ax = next(a for a in fig.axes if a.collections and a.texts)
+    sample = inputs.tagged_sample()
+    assert [t for t, _, _ in sample] == [f"S{n}" for n in range(1, 13)]
+    idx = [i for _, i, _ in sample]
+    assert _near(
+        _marker_positions(ax, "sample_rivers"), inputs.lon[idx], inputs.lat[idx]
+    )
+    assert len(_marker_positions(ax, "sample_rivers")) == 12
+    extremes = inputs.extreme_rivers()
+    df = inputs.table()
+    highest = df[df["kind"] == "highest"]
+    # a river holding several tracers' top values is one marker, one tag
+    assert len(extremes) == highest["river_id"].nunique() < len(highest)
+    assert [d["tag"] for d in extremes] == [
+        f"E{n}" for n in range(1, len(extremes) + 1)
+    ]
+    found = _marker_positions(ax, "extreme_rivers")
+    assert len(found) == len(extremes)
+    assert _near(found, [d["lon"] for d in extremes], [d["lat"] for d in extremes])
+    # the planted DOC outlier is among them
+    assert NAMES[499] in {d["river"] for d in extremes}
+
+
+def test_map_tags_match_the_sample_legend_and_the_extremes_table(inputs):
+    ((_, map_fig),) = inputs.figures("map")
+    ax = next(a for a in map_fig.axes if a.collections and a.texts)
+    on_map = {tag for t in ax.texts for tag in t.get_text().split()}
+    ((_, sample_fig),) = inputs.figures("sample")
+    (legend,) = sample_fig.legends
+    legend_labels = [t.get_text() for t in legend.get_texts()]
+    sample = inputs.tagged_sample()
+    for (tag, i, label), text in zip(sample, legend_labels, strict=True):
+        assert text == f"{tag} {NAMES[i]} ({label})"
+        assert tag in on_map
+    figs = inputs.figures("extremes")
+    rows = []
+    for _, fig in figs:
+        (table,) = fig.axes[0].tables
+        cells = {k: c.get_text().get_text() for k, c in table.get_celld().items()}
+        rows += [
+            (cells[r, 3], cells[r, 4], cells[r, 1]) for r in range(1, len(cells) // 9)
+        ]
+    extremes = {d["river"]: d["tag"] for d in inputs.extreme_rivers()}
+    tagged = {(river, tag) for river, tag, rank in rows if tag}
+    assert tagged == set(extremes.items())
+    assert set(extremes.values()) <= on_map
+    # the lowest-value row (a below-bound river) carries no tag
+    assert [tag for _, tag, rank in rows if rank.startswith("low")] == [""]
+    # one legend entry per marker kind explains them
+    texts = [t.get_text() for lg in map_fig.legends for t in lg.get_texts()]
+    assert any(t.startswith("S1-S12:") for t in texts)
+    assert any(t.startswith("E1-E") for t in texts)
+
+
+def test_a_river_in_both_lists_gets_one_label_with_both_tags(inputs, monkeypatch):
+    first = inputs.tagged_sample()[0][1]
+    real = inputs.extreme_rivers
+
+    def both():
+        out = real()
+        out[0] = {
+            **out[0],
+            "lon": float(inputs.lon[first]),
+            "lat": float(inputs.lat[first]),
+        }
+        return out
+
+    monkeypatch.setattr(inputs, "extreme_rivers", both)
+    ((_, fig),) = inputs.figures("map")
+    ax = next(a for a in fig.axes if a.collections and a.texts)
+    assert "S1 E1" in {t.get_text() for t in ax.texts}
+
+
+def test_map_labels_stay_inside_the_axes_and_apart(inputs):
+    ((_, fig),) = inputs.figures("map")
+    fig.canvas.draw()
+    ax = next(a for a in fig.axes if a.collections and a.texts)
+    box = ax.get_window_extent()
+    texts = [t for t in ax.texts if t.get_text()]
+    assert len(texts) >= 12
+    extents = [t.get_window_extent() for t in texts]
+    for t, ext in zip(texts, extents, strict=True):
+        assert ext.x0 >= box.x0 - 1 and ext.x1 <= box.x1 + 1, t.get_text()
+        assert ext.y0 >= box.y0 - 1 and ext.y1 <= box.y1 + 1, t.get_text()
+    clashes = sum(
+        a.overlaps(b) for n, a in enumerate(extents) for b in extents[n + 1 :]
+    )
+    assert clashes <= 2  # the synthetic mouths are a dense grid
+
+
+def test_labels_are_placed_around_marks_at_the_axes_corners():
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(4, 3))
+    try:
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        # marks in every corner and one pile of five at the same spot
+        marks = [
+            (f"S{n}", x, y, "k")
+            for n, (x, y) in enumerate(
+                [(0, 0), (10, 0), (0, 10), (10, 10)] + [(5, 5)] * 5, start=1
+            )
+        ]
+        texts = river_inputs._label_marks(ax, marks)
+        fig.canvas.draw()
+        box = ax.get_window_extent()
+        extents = [t.get_window_extent() for t in texts]
+        for ext in extents:
+            assert ext.x0 >= box.x0 - 1 and ext.x1 <= box.x1 + 1
+            assert ext.y0 >= box.y0 - 1 and ext.y1 <= box.y1 + 1
+        for n, a in enumerate(extents):
+            assert not any(a.overlaps(b) for b in extents[n + 1 :])
+    finally:
+        plt.close(fig)
+    assert river_inputs._label_marks(ax, []) == []

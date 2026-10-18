@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from ocean_skill import build
-from ocean_skill.config import HEALTH_DRAWS, RIVER_DRAWS, SuiteConfig
+from ocean_skill.config import HEALTH_DRAWS, INPUT_DRAWS, RIVER_DRAWS, SuiteConfig
 from ocean_skill.workflows import cover
 from ocean_skill.workflows import pages as P
 
@@ -111,10 +111,14 @@ def test_module_constants_equal_the_configs():
     pytest.importorskip("ocean_skill.run_health")
     pytest.importorskip("ocean_skill.river_inputs")
     # the fakes shadow the modules only inside the ``fakes`` fixture
-    from ocean_skill import river_inputs, run_health
+    from ocean_skill import input_integrity, river_inputs, run_health
 
     assert run_health.HEALTH_DRAWS == HEALTH_DRAWS
     assert river_inputs.RIVER_DRAWS == RIVER_DRAWS
+    assert input_integrity.INPUT_DRAWS == INPUT_DRAWS
+    # every draw the config accepts is one the object has a method for
+    for draw in INPUT_DRAWS:
+        assert hasattr(input_integrity.InputHealth, f"_draw_{draw}")
 
 
 # -- expand --------------------------------------------------------------------------
@@ -257,6 +261,119 @@ def test_a_failed_computation_is_remembered_and_raised_for_each_page(fakes):
         with pytest.raises(RuntimeError, match="unreadable"):
             P.build(page, run_context=ctx)
     assert n == [1]
+
+
+# -- inputs: pages -------------------------------------------------------------------
+
+
+def _inputs_suite(pages):
+    return SuiteConfig.model_validate(
+        {
+            "name": "t",
+            "defaults": {
+                "test": "run",
+                "forcing_time": "2011-01",
+                "bry_phys": "bry",
+                "sides": [{"name": "south"}, {"name": "west"}],
+                "surface": [{"name": "surf", "label": "surface", "vars": ["Tair"]}],
+            },
+            "pages": pages,
+        }
+    )
+
+
+def test_an_inputs_page_expands_placeholders_and_flattens_the_sources():
+    pages = P.expand(
+        _inputs_suite(
+            [
+                {
+                    "title": "Inputs {side.name}",
+                    "for_each": {"side": "{sides}"},
+                    "inputs": {
+                        "sources": ["{surface}", "{bry_phys}_{side.name}"],
+                        "time": "{forcing_time}",
+                    },
+                },
+                {"title": "one", "inputs": {"sources": "run", "max_steps": 5}},
+            ]
+        )
+    )
+    south, west, one = pages
+    assert [p.title for p in pages] == ["Inputs south", "Inputs west", "one"]
+    assert south.kind == "inputs" and south.problem is None and south.cache is True
+    assert south.kwargs == {
+        "sources": [
+            {"name": "surf", "label": "surface", "vars": ["Tair"]},
+            {"name": "bry_south"},
+        ],
+        "time": "2011-01",  # as written: a forcing file's axis is not the run's
+        "draw": "integrity",
+    }
+    assert west.kwargs["sources"][1] == {"name": "bry_west"}
+    assert one.kwargs == {
+        "sources": [{"name": "run"}],
+        "max_steps": 5,
+        "draw": "integrity",
+    }
+    assert all(isinstance(p.as_dict()["kwargs"], dict) for p in pages)
+
+
+def test_an_inputs_page_is_checked_when_loaded_and_when_expanded():
+    with pytest.raises(ValueError, match="not a known figure"):
+        _inputs_suite([{"title": "x", "inputs": {"sources": "a", "draw": "summary"}}])
+    with pytest.raises(ValueError, match="then:"):
+        _inputs_suite(
+            [{"title": "x", "inputs": {"sources": "a"}, "then": ["extremum"]}]
+        )
+    with pytest.raises(ValueError, match="exactly one of"):
+        _inputs_suite([{"title": "x", "inputs": {}, "health": {}}])
+    with pytest.raises(ValueError, match="needs sources"):
+        P.expand(_inputs_suite([{"title": "x", "inputs": {}}]))
+    with pytest.raises(ValueError, match="no key"):
+        bad = {"sources": "a", "source": "a"}
+        P.expand(_inputs_suite([{"title": "x", "inputs": bad}]))
+    with pytest.raises(ValueError, match=r"page 'x'.*needs a 'name'"):
+        nameless = {"sources": [{"label": "a"}]}
+        P.expand(_inputs_suite([{"title": "x", "inputs": nameless}]))
+
+
+def test_an_inputs_page_builds_one_shared_object_and_records_table_and_problems(
+    monkeypatch,
+):
+    from ocean_skill import input_integrity
+
+    calls = []
+
+    def fake(sources, *, time=None, max_steps=None, cache=True):
+        calls.append(
+            {"sources": sources, "time": time, "max_steps": max_steps, "cache": cache}
+        )
+        return FakeObject("inputs")
+
+    monkeypatch.setattr(input_integrity, "input_health", fake)
+    a, b, c = P.expand(
+        _inputs_suite(
+            [
+                {"title": "a", "inputs": {"sources": ["s1", "s2"], "time": "2011-01"}},
+                {"title": "b", "inputs": {"sources": ["s1", "s2"], "time": "2011-01"}},
+                {"title": "c", "inputs": {"sources": "s1"}},
+            ]
+        )
+    )
+    ctx = {"joins": None, "objects": {}}
+    figures = P.build(a, run_context=ctx)
+    P.build(b, run_context=ctx)
+    P.build(c, run_context=ctx)
+    assert len(figures) == 2 and len(calls) == 2  # a and b share; c is another key
+    assert calls[0] == {
+        "sources": [{"name": "s1"}, {"name": "s2"}],
+        "time": "2011-01",
+        "max_steps": None,
+        "cache": True,
+    }
+    assert list(a.summary_table["x"]) == [1, 2]
+    assert a.results == [{"kind": "fake", "label": "inputs"}]
+    assert a.metrics_records == []
 
 
 # -- segment_starts ------------------------------------------------------------------
