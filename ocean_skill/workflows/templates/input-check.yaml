@@ -1,8 +1,9 @@
 # Input check of a C-Star run: a look at the forcing files the model was given, before
-# (or while) it runs. The grid depth, the initial conditions against WOA23, GLODAPv2 and
-# satellite chlorophyll, the open boundary conditions side by side with the same
-# climatologies, the surface forcing maps, the salinity restoring field against WOA23
-# and the river inputs, organized into PDF sections with divider pages. It draws only
+# (or while) it runs. The grid depth, the initial conditions against WOA23 (maps, and
+# sections along two transects), GLODAPv2 and satellite chlorophyll, the open boundary
+# conditions side by side with the same climatologies, the surface forcing maps, the
+# salinity restoring field against WOA23 and the river inputs, organized into PDF
+# sections with divider pages. It draws only
 # the first task's inputs; no model output is read.
 #
 # Run it:
@@ -33,6 +34,9 @@
 #                  (change the two together).
 #   ic_month       the initial conditions' month, which picks the WOA23 month they are
 #                  compared with.
+#   transects      the lines of the initial-conditions sections and the bathymetry map
+#                  (in the setup block; ocean-skill-suite new picks two through the
+#                  middle of the domain).
 #
 # Two kinds of page appear only when the inputs have the file, and are left out cleanly
 # when they do not:
@@ -131,6 +135,12 @@ defaults:
     - {name: pacmed_surf_phys, label: surface physics, vars: [Tair, qair, rain, swrad, lwrad, uwnd, vwnd]}
   surface_clim:
     - {name: pacmed_surf_bgc_clim, label: surface BGC climatology, vars: [iron, dust, nox, nhx]}
+  # The two sections of the transect pages, also drawn on the bathymetry map: each a
+  # fixed lat between two lons or a fixed lon between two lats (the grid's own
+  # longitude convention). Edit, add or remove lines freely.
+  transects:
+    Equator (143E-93W): {transect: {lat: 0, lon: {min: 143.0, max: 267.0}}}
+    160W (30S-30N): {transect: {lon: 200.0, lat: {min: -30.0, max: 30.0}}}
 # <<< setup
   # (the rest of defaults: is the same for every run)
   # Every page's plot: options start from these (a page's own plot: wins). Robust color
@@ -139,7 +149,7 @@ defaults:
   # colorbar_label_clipped: a clipped colorbar's label also gives the true min and max.
   plot: {robust: true, colorbar_label_clipped: true}
   depths: [surface, 200]
-  # The boundary sections: upper 1000 m.
+  # The boundary and transect sections: upper 1000 m.
   strip_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
 
 pages:
@@ -149,8 +159,11 @@ pages:
 
   - title: "Bathymetry"
     field: {variables: [h]}
-    caption: Grid depth h (m).
-    plot: {robust: false}           # the full depth range, trenches included
+    caption: Grid depth h (m). Lines mark the transects of the section pages.
+    plot:
+      robust: false                 # the full depth range, trenches included
+      locations: "{transects}"
+      legend: annotate
 
   # -- initial conditions ---------------------------------------------------------
   - title: "Initial conditions"
@@ -159,7 +172,9 @@ pages:
       climatology of the month they start in (temperature, salinity, nitrate, phosphate,
       silicate, oxygen), the GLODAPv2.2016b climatology (alkalinity and dissolved
       inorganic carbon) and the Copernicus gap-free satellite chlorophyll on the same
-      day; then the iron, ammonium and DOC fields, which have no observations here.
+      day; temperature, salinity, nitrate and oxygen in the upper 1000 m along the
+      transects drawn on the bathymetry map, against WOA23; then the iron, ammonium and
+      DOC fields, which have no observations here.
 
   - title: "Initial conditions vs WOA23, temperature and salinity ({depth.label})"
     for_each:
@@ -216,8 +231,24 @@ pages:
       select: {depth: "{depth}"}
     caption: Initial conditions at {depth.label}, model only.
 
+  - title: "Initial conditions — {variable} sections vs WOA23"
+    for_each:
+      variable: [temperature, salinity, nitrate, oxygen]
+    compare:
+      reference: ["woa23_{variable}_month{ic_month:02d}"]
+      variables: ["{variable}"]
+      select: {depth: "{strip_depths}"}
+      aggregate: {time: mean}   # the one IC time and WOA's placeholder time
+      selects: "{transects}"
+    contours: true
+    plot: {contour_levels: 6}
+    caption: >-
+      {variable} in the initial conditions, 5-1000 m, along each transect drawn on the
+      bathymetry map, against the WOA23 climatology of month {ic_month}, with contours
+      of the plotted field itself.
+
   - title: "Initial conditions — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- boundary conditions ----------------------------------------------------------
   - title: "Boundary conditions"
@@ -302,7 +333,7 @@ pages:
       ncols: 2                       # 2x2: four stacked rows overflow a letter page
 
   - title: "Boundary conditions — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- surface forcing ---------------------------------------------------------------
   - title: "Surface forcing"

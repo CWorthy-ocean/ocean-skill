@@ -173,7 +173,7 @@ pages:
       reduced the same way, and the difference (model minus WOA23).
 
   - title: "Tracers vs WOA23 — metrics"
-    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 6: mixed layer depth ----------------------------------------------------------
   - title: "Fig. 6 — Mixed layer depth"
@@ -212,7 +212,7 @@ pages:
       Standard deviation (ddof 1) across the twelve monthly mean mixed layer depths (m).
 
   - title: "Mixed layer depth — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 7: T-S diagrams -------------------------------------------------------------------
   - title: "Fig. 7 — Water masses"
@@ -312,7 +312,7 @@ pages:
       the run; WOA23 annual climatology; contours of the plotted field itself.
 
   - title: "Temperature and salinity sections — metrics"
-    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 9: sea surface height -----------------------------------------------------------
   - title: "Fig. 9 — Sea surface height"
@@ -340,7 +340,7 @@ pages:
       tides; expect a constant datum offset against DUACS in the mean.
 
   - title: "Sea surface height — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 10: zonal currents ----------------------------------------------------------------
   - title: "Fig. 10 — Zonal currents"
@@ -386,7 +386,7 @@ pages:
       contour_levels: [0]
 
   - title: "Zonal velocity — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 17: iron (model only) ----------------------------------------------------------------
   - title: "Fig. 17 — Iron"
@@ -450,7 +450,7 @@ pages:
       (the model's on the model panel, WOA's on the WOA panel).
 
   - title: "Nutrient and oxygen sections — metrics"
-    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 20: chlorophyll -------------------------------------------------------------------------
   - title: "Fig. 20 — Surface chlorophyll"
@@ -492,7 +492,7 @@ pages:
   # product fills.
 
   - title: "Chlorophyll — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Fig. 21a: oxygen minimum ----------------------------------------------------------------------
   - title: "Fig. 21 — Oxygen minimum zone"
@@ -535,7 +535,7 @@ pages:
       snapshot and then averaged over the run.
 
   - title: "Oxygen minimum zone — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- Figs. 22, 23: carbon vs GLODAP ------------------------------------------------------------------
   - title: "Figs. 22, 23 — Carbon vs GLODAPv2"
@@ -557,7 +557,7 @@ pages:
       surface and 200 m.
 
   - title: "Carbon vs GLODAPv2 — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # The raw MARBL name: MARBL_PH_3D is not mapped to the `ph` nickname here.
   - title: "Model pH (no observations)"
@@ -570,4 +570,9 @@ pages:
 
   # -- Fig. 26: summary ---------------------------------------------------------------------------------
   - title: "Fig. 26 — Summary"
+    section: >-
+      Every comparison of the report on one Taylor and one target diagram; the tables
+      are at the end of each section.
+
+  - title: "Summary — all comparisons"
     summary: {kind: both, color_by: variable}   # every comparison of the report; the tables are per section

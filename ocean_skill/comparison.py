@@ -1198,6 +1198,76 @@ def aggregate_for(spec: Any, role: str) -> dict[str, Any] | None:
     return spec[role] if is_pair_spec(spec) else spec
 
 
+def names_transect(select: Any) -> bool:
+    """Whether a select (plain or pair-spec) names a ``transect`` on any lane."""
+    if is_pair_spec(select):
+        return any("transect" in (select[role] or {}) for role in ("test", "reference"))
+    return isinstance(select, dict) and "transect" in select
+
+
+def transect_pair_problem(select: Any) -> str | None:
+    """Why a pair-spec ``select`` naming a transect cannot be a section, else ``None``.
+
+    A pair-spec that names no transect, and any plain select, is not this function's
+    business (``None``). One that does is a section only when it asks a *single* path
+    question of both lanes: both sides name the same transect (compared after
+    :func:`ocean_skill.transect.as_transect` normalizes it) and the same vertical
+    entries (``depth``, both absent counting as equal), so the test lane is cut along
+    that path and the reference sampled at the test lane's own snapped points, each
+    lane's other keys (a test-only time window, say) applying to that lane alone.
+    A transect on one side only, two different paths, or two different depth lists
+    would be two independently-sampled paths with no along-path axis to align on --
+    refused, with the message returned here. ``{"from": "reference"}`` is refused
+    too: it takes its path from an ordered cast list, not from either lane's select.
+    """
+    if not is_pair_spec(select) or not names_transect(select):
+        return None
+    from ocean_skill.transect import as_transect
+
+    sides = {role: select[role] or {} for role in ("test", "reference")}
+    same = (
+        "the test and reference sides of a pair-spec select must name the same "
+        "transect and the same depths (two independently-sampled paths share no "
+        "along-path axis to align on, which is a follow-up, not yet built); the "
+        "reference is then sampled at the test lane's own snapped points, and any "
+        "other key (a time window, say) can still differ per side"
+    )
+    if not all("transect" in side for side in sides.values()):
+        return (
+            f"select={{'test': ..., 'reference': ...}} names a transect on one "
+            f"side only -- {same}."
+        )
+    parsed = {role: as_transect(side["transect"]) for role, side in sides.items()}
+    if parsed["test"] != parsed["reference"]:
+        return (
+            f"select={{'test': ..., 'reference': ...}} names different "
+            f"transects on the two sides -- {same}."
+        )
+    verticals = {
+        role: {k: side[k] for k in _VERTICAL_KEYS if k in side}
+        for role, side in sides.items()
+    }
+    try:
+        agree = bool(verticals["test"] == verticals["reference"])
+    except ValueError:  # array-valued entries compare elementwise
+        agree = False
+    if not agree:
+        return (
+            f"select={{'test': ..., 'reference': ...}} names the same transect "
+            f"but different depths on the two sides "
+            f"(test={verticals['test']!r}, reference={verticals['reference']!r}) "
+            f"-- {same}."
+        )
+    if parsed["test"]["kind"] == "from_reference":
+        return (
+            "select={'test': ..., 'reference': ...} with transect={'from': "
+            "'reference'} is not built -- that path comes from an ordered cast "
+            "list, not from either side of a pair-spec. Give one shared "
+            "select={'transect': {'from': 'reference'}, ...} instead."
+        )
+    return None
+
+
 def qc_for(spec: Any, role: str) -> Any:
     """Return the qc override one lane (``"test"``/``"reference"``) should use.
 
@@ -5496,25 +5566,15 @@ class Comparison:
         if slab_axes != (None, None):
             self._validate_slab_request(*slab_axes)
             return
-        has_transect = (
-            (
-                "transect" in (self.select.get("test") or {})
-                or "transect" in (self.select.get("reference") or {})
-            )
-            if is_pair_spec(self.select)
-            else "transect" in self.select
-        )
-        if not has_transect:
+        if not names_transect(self.select):
             return
-        if is_pair_spec(self.select):
-            raise ValueError(
-                "select={'test': ..., 'reference': ...} names a transect on "
-                "one (or both) sides -- two independently-sampled paths share "
-                "no along-path axis to align on, so matching them is a "
-                "follow-up, not yet built. Give one shared "
-                "select={'transect': ...} instead; the reference is then "
-                "sampled at the test lane's own snapped points automatically."
-            )
+        problem = transect_pair_problem(self.select)
+        if problem is not None:
+            raise ValueError(problem)
+        # A pair-spec reaching here names one shared path and depth list on both
+        # sides (see transect_pair_problem), so either side's transect/depth reads
+        # for both; the test side stands in for the section's own select.
+        section_select = select_for(self.select, "test")
         if self.over is not None:
             raise ValueError(
                 "over= scores a pair cell by cell along one further axis, but "
@@ -5523,7 +5583,9 @@ class Comparison:
                 "cell is a follow-up, not yet built. Drop over= for a "
                 "section comparison."
             )
-        if "sigma0" in self.select:
+        if any(
+            "sigma0" in select_for(self.select, role) for role in ("test", "reference")
+        ):
             raise ValueError(
                 "select={'transect': ..., 'sigma0': ...} asks for an "
                 "isopycnal section -- matching one against a reference is a "
@@ -5533,7 +5595,7 @@ class Comparison:
 
         from ocean_skill.transect import as_transect
 
-        parsed_transect = as_transect(self.select["transect"])  # fails fast on a
+        parsed_transect = as_transect(section_select["transect"])  # fails fast on a
         # malformed spec too
         is_from_reference = parsed_transect["kind"] == "from_reference"
         if is_from_reference and not self._section_casts:
@@ -5553,14 +5615,16 @@ class Comparison:
             )
         if not is_from_reference and self._section_casts:
             raise ValueError(
-                f"select={{'transect': {self.select['transect']!r}}} names a "
+                f"select={{'transect': {section_select['transect']!r}}} names a "
                 "path of its own, but this Comparison also carries an ordered "
                 "cast list -- section_casts= only applies to "
                 "select={'transect': {'from': 'reference'}}, where the casts "
                 "*are* the path."
             )
 
-        depth = next((self.select[k] for k in _VERTICAL_KEYS if k in self.select), None)
+        depth = next(
+            (section_select[k] for k in _VERTICAL_KEYS if k in section_select), None
+        )
         if not _is_fixed_depth_list(depth):
             raise ValueError(
                 f"select={{'transect': ..., 'depth': {depth!r}}}: a section "
@@ -5734,11 +5798,10 @@ class Comparison:
     def _transect_route(self) -> dict[str, Any] | None:
         """The normalized transect spec a shared select names, if routing.
 
-        ``None`` for a pair-spec select (a transect on either side names two
-        independently-sampled paths -- refused outright by this class's own
-        constructor validation rather than routed, since they share no
-        along-path axis to align on) or when the select names no transect at
-        all.
+        For a pair-spec select, the one transect both sides name (the same on both
+        -- see :func:`transect_pair_problem`, checked again here so a select that
+        skipped construction's validation raises rather than silently not routing);
+        a select that names no transect at all gives ``None``.
 
         Used by :meth:`align` to prepare the reference lane at the test lane's
         own snapped points (see :func:`ocean_skill.align.path_of` and
@@ -5746,11 +5809,15 @@ class Comparison:
         to mark a routed comparison's cache entry so it can never collide with
         one from before this route existed.
         """
-        if is_pair_spec(self.select) or "transect" not in self.select:
+        if not names_transect(self.select):
             return None
+        problem = transect_pair_problem(self.select)
+        if problem is not None:
+            raise ValueError(problem)
+        lanes = [select_for(self.select, role) for role in ("test", "reference")]
         from ocean_skill.transect import as_transect
 
-        return as_transect(self.select["transect"])
+        return as_transect(lanes[0]["transect"])
 
     def _slab_axes(self) -> tuple[str | None, str | None]:
         """``(test_axis, reference_axis)``: the horizontal axis each lane's slab leaves.
@@ -14666,10 +14733,17 @@ def compare(
     ``select`` here, as ``select={"transect": ..., "depth": [50, 200, ...]}``, not
     in ``depths=``: a section's two lanes share no native vertical axis, so there
     is no default to guess, and asking for one is refused with that spelling. A
-    pair-spec ``select`` naming a transect on either side is refused too — two
-    independently-sampled paths share no along-path axis to align on, which is a
-    follow-up, not yet built — and so is ``over=`` alongside a transect, a section
-    already standing on two axes with no third one to score.
+    pair-spec ``select`` may name the transect too, provided *both* sides name the
+    same one (after normalization) with the same ``depth`` list: that is still one
+    path, so the test lane is cut along it and the reference sampled at the test
+    lane's snapped points, each side's other keys applying to that side alone —
+    ``select={"test": {"transect": T, "depth": D, "time": {...}}, "reference":
+    {"transect": T, "depth": D}}`` windows a model against a climatology that has no
+    usable time axis. A transect on one side only, two different transects, or two
+    different depth lists are refused — independently-sampled paths share no
+    along-path axis to align on, a follow-up not yet built — and so is ``over=``
+    alongside a transect, a section already standing on two axes with no third one
+    to score.
 
     A box **averaged along one horizontal axis** is a vertical section too, a
     *slab*: ``select={"lon": {"min": 180, "max": 200}, "lat": {"min": -30, "max":
@@ -14841,6 +14915,12 @@ def compare(
     # both sides must agree on any vertical key present in both -- see
     # :func:`_fan_vertical_entries`.
     depths_was_explicit = depths is not None
+    # A pair-spec naming a transect is judged as one question first: two different
+    # depth lists on its sides are then refused as the section's, not as the
+    # vertical fan's disagreement below.
+    pair_problem = transect_pair_problem(select)
+    if pair_problem is not None:
+        raise ValueError(pair_problem)
     explicit_vertical_select = _fan_vertical_entries(select, _VERTICAL_KEYS)
     sigma_request = _fan_vertical_entries(select, _ISOPYCNAL_KEYS).get("sigma0")
     if depths_was_explicit and sigma_request is not None:
@@ -14850,14 +14930,7 @@ def compare(
             "surfaces, not both."
         )
 
-    has_transect = (
-        (
-            "transect" in (select.get("test") or {})
-            or "transect" in (select.get("reference") or {})
-        )
-        if is_pair_spec(select)
-        else "transect" in select
-    )
+    has_transect = names_transect(select)
 
     # A CTD transect entry is compared as ONE transect -- its casts stacked into one
     # section, each at its own time and place -- unless the request needs them apart
@@ -14908,14 +14981,6 @@ def compare(
     # here, and it is cheap: the same check Comparison.__init__ runs on
     # construction, just early enough to name the compare()-level spelling.
     if has_transect:
-        if is_pair_spec(select):
-            raise ValueError(
-                "select={'test': ..., 'reference': ...} names a transect on "
-                "one (or both) sides -- two independently-sampled paths share "
-                "no along-path axis to align on, so matching them is a "
-                "follow-up, not yet built. Give one shared "
-                "select={'transect': ...} instead."
-            )
         if depths_was_explicit:
             raise ValueError(
                 "compare() got both depths= and select={'transect': ...} -- a "
@@ -14996,7 +15061,10 @@ def compare(
     if has_transect:
         from ocean_skill.transect import as_transect
 
-        is_from_reference = as_transect(select["transect"])["kind"] == "from_reference"
+        is_from_reference = (
+            as_transect(select_for(select, "test")["transect"])["kind"]
+            == "from_reference"
+        )
         if is_from_reference and len(refs) < 2:
             raise ValueError(
                 "select={'transect': {'from': 'reference'}} needs an ordered "

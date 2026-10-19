@@ -65,12 +65,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from ocean_skill.comparison import (
     _depth_label,
+    _merged_select,
     _time_label,
     aggregate_for,
     is_pair_spec,
+    names_transect,
     qc_for,
     select_for,
     selects_entry_parts,
+    transect_pair_problem,
     variable_for,
 )
 from ocean_skill.config import (
@@ -1522,15 +1525,39 @@ def _lane_of(select: Any, role: str) -> dict[str, Any]:
     return dict(select_for(select, role) or {})
 
 
-def _names_transect(select: Any) -> bool:
-    """Whether a select (plain or pair-spec) names a ``transect`` on any lane."""
-    return any("transect" in _lane_of(select, role) for role in ("test", "reference"))
-
-
 def _has_time_key(lane: dict[str, Any]) -> bool:
     from ocean_skill.sources import _TIME_KEYS
 
     return any(k in lane for k in _TIME_KEYS)
+
+
+def _check_selects_transects(
+    title: str, select: Any, selects: dict[str, Any]
+) -> None:
+    """Refuse a ``selects:`` entry naming a transect that compare() would refuse.
+
+    Each entry is merged over the page's select the way compare() merges it
+    (:func:`_merged_select`; a missing select stands for an empty pair-spec, the run
+    window being a time key only) and the result handed to
+    :func:`transect_pair_problem`, so the page fails at expand time with compare()'s
+    own reason -- e.g. the page's pair-spec carries a ``depth`` on one lane only.
+    """
+    base = {role: _lane_of(select, role) for role in ("test", "reference")}
+    for label, entry in selects.items():
+        raw, _ = selects_entry_parts(entry)
+        if not names_transect(raw):
+            continue
+        entry_select = (
+            {role: _lane_of(raw, role) for role in ("test", "reference")}
+            if is_pair_spec(raw)
+            else _lane_of(raw, "test")
+        )
+        problem = transect_pair_problem(_merged_select(base, entry_select))
+        if problem is not None:
+            raise ValueError(
+                f"page {title!r}: compare: selects: names a transect ({label!r}), "
+                f"which compare() refuses here: {problem}"
+            )
 
 
 def _resolve_compare_kwargs(
@@ -1564,21 +1591,19 @@ def _resolve_compare_kwargs(
             f"page {title!r}: compare: selects: must be a mapping of label -> select, "
             f"got {type(selects).__name__} ({selects!r})"
         )
-    # The run window of a page with no flat select is a pair-spec (test lane only: the
-    # reference may be a climatology with a time axis of its own), and compare()
-    # refuses a transect inside a pair-spec.
-    if (
-        selects
-        and (select is None or paired)
-        and any(_names_transect(selects_entry_parts(e)[0]) for e in selects.values())
-    ):
+    if selects is not None and not selects:
         raise ValueError(
-            f"page {title!r}: compare: selects: names a transect, which compare() "
-            "refuses inside a {test, reference} pair-spec select -- and the "
-            "run window a page without a flat select: gets is one. Give the page "
-            "a flat select: (e.g. select: {depth: [0, 50, 100]}), used for both "
-            "lanes as written; it then gets no run window"
+            f"page {title!r}: compare: selects: is empty -- if it is a {{placeholder}} "
+            "(the templates' {transects}), fill in that entry under defaults:"
         )
+    # The run window of a page with no flat select is a pair-spec (test lane only: the
+    # reference may be a climatology with a time axis of its own). compare() takes a
+    # transect inside a pair-spec only when both sides name the same transect and
+    # depths, which a plain labelled entry merged over the page's select does -- so
+    # only the merges compare() would still refuse are refused here, whatever the
+    # page's own select (a pair-spec entry over a flat select can be refused too).
+    if selects:
+        _check_selects_transects(title, select, selects)
     try:
         index = get_index(source)
     except _SourceUnreadable as exc:

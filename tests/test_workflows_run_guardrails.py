@@ -9,6 +9,7 @@ title filter, the strict warning watch, the problems summary and the all-NaN gua
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -255,9 +256,21 @@ def test_smoke_defaults_to_two_steps_on_the_command_line(tmp_path, monkeypatch):
     main([str(tmp_path / "s.yaml"), "--smoke"])
     assert got["smoke"] == 2
     main([str(tmp_path / "s.yaml"), "--smoke", "5", "--only", "a*", "--strict"])
-    assert got["smoke"] == 5 and got["only"] == "a*" and got["strict"] is True
+    assert got["smoke"] == 5 and got["only"] == ["a*"] and got["strict"] is True
     main([str(tmp_path / "s.yaml"), "--self-check"])
-    assert got["smoke"] is None and got["self_check"] is True
+    assert got["smoke"] is None and got["self_check"] is True and got["only"] is None
+
+
+def test_only_is_repeatable_on_the_command_line(tmp_path, monkeypatch):
+    got = {}
+
+    def fake_run(path, **kwargs):
+        got.update(kwargs)
+        return _run.SuiteResult()
+
+    monkeypatch.setattr(_run, "run_suite", fake_run)
+    main([str(tmp_path / "s.yaml"), "--only", "River inputs", "--only", "Nitrate*"])
+    assert got["only"] == ["River inputs", "Nitrate*"]
 
 
 # -- a fake comparison ------------------------------------------------------------
@@ -504,7 +517,7 @@ def test_only_draws_matching_pages_case_insensitively(tmp_path, stub_model):  # 
     path = _write_suite(tmp_path, _three_pages(tmp_path))
     result = run_suite(path, only="*SALINITY*")
 
-    assert result.report_dir.name == "quick_check-only"
+    assert result.report_dir.name == "quick_check-only-salinity-" + _sha6("*salinity*")
     drawn = [(p.kind, p.title, p.status) for p in result.pages]
     # the divider over the match is kept (and written), the other one is dropped
     assert drawn == [
@@ -527,6 +540,101 @@ def test_only_applies_to_list(tmp_path, stub_model, capsys):  # noqa: F811
     assert [p.title for p in result.pages] == ["Biogeochemistry", "Nitrate map"]
     out = capsys.readouterr().out
     assert "Nitrate map" in out and "Temperature map" not in out
+
+
+def _titles(result):
+    return [p.title for p in result.pages]
+
+
+@pytest.mark.usefixtures("stub_model")
+def test_only_a_section_glob_keeps_the_whole_section(tmp_path):
+    path = _write_suite(tmp_path, _three_pages(tmp_path))
+    result = run_suite(path, only="physics")
+
+    assert _titles(result) == ["Physics", "Temperature map", "Salinity map"]
+    assert result.report_dir.name == "quick_check-only-physics"
+    assert len(result.figures) == 2
+
+
+@pytest.mark.usefixtures("stub_model")
+def test_only_takes_several_globs_across_sections(tmp_path):
+    path = _write_suite(tmp_path, _three_pages(tmp_path))
+    result = run_suite(path, only=["Biogeo*", "salinity map"])
+
+    assert _titles(result) == [
+        "Physics",
+        "Salinity map",
+        "Biogeochemistry",
+        "Nitrate map",
+    ]
+    assert result.report_dir.name == (
+        "quick_check-only-biogeo-salinity-map-" + _sha6("biogeo*\nsalinity map")
+    )
+    # --list shows the same selection
+    listed = run_suite(path, only=["Biogeo*", "salinity map"], list_only=True)
+    assert _titles(listed) == _titles(result)
+
+
+@pytest.mark.usefixtures("stub_model")
+def test_only_names_the_glob_that_matches_nothing_and_lists_the_sections(tmp_path):
+    path = _write_suite(tmp_path, _three_pages(tmp_path))
+    with pytest.raises(ValueError, match="'nope\\*'") as err:
+        run_suite(path, only=["physics", "nope*"])
+    message = str(err.value)
+    assert "'Physics'" in message and "'Biogeochemistry'" in message
+    assert "Nitrate map" in message
+    assert message.index("'Physics'") < message.index("Nitrate map")
+
+
+def _sha6(text: str) -> str:
+    return hashlib.sha1(text.encode()).hexdigest()[:6]
+
+
+def test_only_tag_slugs_the_globs():
+    # plain titles keep a readable folder name, and case does not matter
+    assert _run._only_tag(["River inputs"]) == "-only-river-inputs"
+    assert _run._only_tag(["river INPUTS"]) == "-only-river-inputs"
+    assert _run._only_tag(["Boundary*", " River inputs"]) == (
+        "-only-boundary-river-inputs-" + _sha6("boundary*\n river inputs")
+    )
+    # a glob with no letters or digits would leave an empty slug: hash instead
+    assert _run._only_tag(["*"]) == "-only-" + _sha6("*")
+
+
+def test_only_tag_never_gives_two_selections_one_folder():
+    """A second selection would otherwise clear the first one's report."""
+    tags = [
+        _run._only_tag(g)
+        for g in (
+            ["River inputs"],
+            ["river*inputs"],
+            ["River-inputs"],
+            ["river?inputs"],
+            ["River", "inputs"],
+        )
+    ]
+    assert len(set(tags)) == len(tags)
+
+
+def test_only_tag_cuts_a_long_slug_and_keeps_it_unique():
+    long_a = ["a very long section title that goes on and on", "x"]
+    long_b = ["a very long section title that goes on and on", "y"]
+    tag_a, tag_b = _run._only_tag(long_a), _run._only_tag(long_b)
+    digest = _sha6("\n".join(long_a))
+    assert tag_a == "-only-a-very-long-section-title-that-go-" + digest
+    assert tag_a != tag_b
+    assert len(tag_a) - len("-only-") <= 40
+
+
+@pytest.mark.usefixtures("stub_model")
+def test_only_parts_do_not_overwrite_each_other_or_the_full_report(tmp_path):
+    path = _write_suite(tmp_path, _three_pages(tmp_path))
+    full = run_suite(path)
+    a = run_suite(path, only="Physics")
+    b = run_suite(path, only="Biogeochemistry")
+    assert len({full.report_dir, a.report_dir, b.report_dir}) == 3
+    assert (full.report_dir / "report.pdf").exists()
+    assert len(full.figures) == 3
 
 
 # -- --strict ------------------------------------------------------------

@@ -37,9 +37,10 @@ Guardrails against finding a bug only after hours of compute (see "Guardrails" i
 grid cell, with each page's date list cut to its first and last entry and figures drawn
 at a lower dpi (own output directory and results cache),
 ``self_check`` redraws every ``compare:`` page against itself and flags any difference,
-``only=GLOB`` draws just the matching pages, and ``strict`` counts a layout warning as
-a problem. Whatever goes wrong -- a skipped or failed page, a self-check mismatch, a
-strict warning -- is collected in :attr:`SuiteResult.problems`, listed at the end of the
+``only=GLOB`` draws just the matching pages or whole ``section:`` parts (each in its own
+report folder), and ``strict`` counts a layout warning as a problem. Whatever goes wrong
+-- a skipped or failed page, a self-check mismatch, a strict warning -- is collected in
+:attr:`SuiteResult.problems`, listed at the end of the
 run with its time and peak memory, and makes :attr:`SuiteResult.exit_code` nonzero.
 
 Optionally the suite can refresh a model's kerchunk reference before running, which
@@ -633,34 +634,84 @@ class _PeakMemory:
             self.peak_mb = max(self.peak_mb, now)
 
 
-def _select_pages(expanded: list[Any], glob: str) -> list[Any]:
-    """Keep the figure pages whose title matches ``glob`` (case-insensitive fnmatch).
+def _only_globs(only: str | list[str] | None) -> list[str]:
+    """Return ``only`` as a list of globs: ``[]`` for ``None``, ``[only]`` for a str."""
+    if only is None:
+        return []
+    return [only] if isinstance(only, str) else list(only)
 
-    A ``section:`` divider stays only when a matching page follows it before the next
-    divider, so the report has no heading over nothing.
+
+def _only_tag(globs: list[str]) -> str:
+    """Return the report-folder tag of an ``only`` run: ``-only-<slug of the globs>``.
+
+    The globs are joined with ``-``, lowercased, and every run of characters other than
+    letters and digits becomes one ``-``: ``"River inputs"`` -> ``-only-river-inputs``.
+    Only one glob of plain words (letters and digits, single spaces) is spelled out
+    alone; anything else -- several globs, a wildcard or other punctuation, a slug
+    past 40 characters (cut to 33) -- also gets the first six hex characters of the
+    sha1 of the lowercased globs, and so does a glob with no letters or digits at all
+    (its slug would be empty). Two different selections then never share a folder,
+    where the second run would clear the first one's report; case aside, since
+    matching ignores it and the selection is the same.
     """
-    pattern = glob.lower()
-    keep = [
-        p.kind != "section" and fnmatch.fnmatchcase(p.title.lower(), pattern)
-        for p in expanded
-    ]
-    if not any(keep):
-        titles = [p.title for p in expanded if p.kind != "section"]
-        raise ValueError(
-            f"--only {glob!r} matches no page; the pages are: "
-            + "; ".join(repr(t) for t in titles[:12])
-            + (" ..." if len(titles) > 12 else "")
-        )
+    import hashlib
+
+    joined = "-".join(g.lower() for g in globs)
+    # hashed one glob per line, so ["a-b"] and ["a", "b"] differ
+    digest = hashlib.sha1("\n".join(g.lower() for g in globs).encode()).hexdigest()[:6]
+    slug = re.sub(r"[^a-z0-9]+", "-", joined).strip("-")
+    lossless = len(globs) == 1 and re.fullmatch(r"[a-z0-9]+( [a-z0-9]+)*", joined)
+    if len(slug) > 40:
+        slug, lossless = slug[:33].rstrip("-"), False
+    if not slug:
+        return f"-only-{digest}"
+    return f"-only-{slug}" if lossless else f"-only-{slug}-{digest}"
+
+
+def _select_pages(expanded: list[Any], globs: str | list[str]) -> list[Any]:
+    """Keep the parts of the suite that ``globs`` name (case-insensitive fnmatch).
+
+    A glob matching a ``section:`` divider's title keeps that whole section: the divider
+    and every page after it up to the next divider. A glob matching a figure page's
+    title keeps that page, and the divider over it stays only because of it, so the
+    report has no heading over nothing. A page is kept if any glob keeps it, and a glob
+    that matches nothing is an error.
+    """
+    given = _only_globs(globs)
+    patterns = [g.lower() for g in given]
+    matched: set[int] = set()
     selected: list[Any] = []
     pending = None
-    for page, kept in zip(expanded, keep, strict=True):
+    in_kept_section = False
+    for page in expanded:
+        got = {
+            i
+            for i, g in enumerate(patterns)
+            if fnmatch.fnmatchcase(page.title.lower(), g)
+        }
+        matched |= got
         if page.kind == "section":
-            pending = page
-        elif kept:
+            in_kept_section = bool(got)
+            pending = None if got else page
+            if got:
+                selected.append(page)
+        elif in_kept_section or got:
             if pending is not None:
                 selected.append(pending)
                 pending = None
             selected.append(page)
+    unmatched = [g for i, g in enumerate(given) if i not in matched]
+    if unmatched:
+        sections = [p.title for p in expanded if p.kind == "section"]
+        titles = [p.title for p in expanded if p.kind != "section"]
+        raise ValueError(
+            f"--only {unmatched[0]!r} matches no section or page; the sections are: "
+            + "; ".join(repr(t) for t in sections[:12])
+            + (" ..." if len(sections) > 12 else "")
+            + "; the pages are: "
+            + "; ".join(repr(t) for t in titles[:12])
+            + (" ..." if len(titles) > 12 else "")
+        )
     return selected
 
 
@@ -905,7 +956,7 @@ def _code_identity() -> str | None:
     return "|".join(parts)
 
 
-def _smoke_expand(suite: Any, only: str | None) -> list[Any] | None:
+def _smoke_expand(suite: Any, only: list[str]) -> list[Any] | None:
     """Expand the suite once, as test mode will, *before* the truncation is set.
 
     Month windows and other placeholders then resolve against the whole run (expansion
@@ -930,10 +981,10 @@ def _smoke_expand(suite: Any, only: str | None) -> list[Any] | None:
             stacklevel=2,
         )
         return None
-    return _select_pages(expanded, only) if only is not None else expanded
+    return _select_pages(expanded, only) if only else expanded
 
 
-def _smoke_pins(suite: Any, only: str | None) -> Any:
+def _smoke_pins(suite: Any, only: list[str]) -> Any:
     """Return the time steps the suite's pages name, for ``--smoke`` to keep.
 
     Taken from the thinned throwaway expansion of :func:`_smoke_expand`; a suite that
@@ -1119,7 +1170,7 @@ def run_suite(
     smoke: int | None = None,
     smoke_stride: int = SMOKE_STRIDE,
     self_check: bool = False,
-    only: str | None = None,
+    only: str | list[str] | None = None,
     strict: bool = False,
 ) -> SuiteResult:
     """Load, expand, and draw a suite YAML; return a :class:`SuiteResult`.
@@ -1170,8 +1221,15 @@ def run_suite(
         or correlation shortfall between those identical lanes is a problem. Report in
         ``<name>-selfcheck/``.
     ``only``
-        Draw only the pages whose title matches this case-insensitive glob. Report in
-        ``<name>-only/``.
+        Draw only one part of the suite: a glob (or a list of globs) matched
+        case-insensitively against the titles. A glob that matches a ``section:``
+        divider keeps that whole section (the divider and every page up to the next
+        divider); one that matches a figure page keeps that page. A page is kept if any
+        glob keeps it, and a glob that matches nothing is an error. Each selection
+        reports in its own ``<name>-only-<slug of the globs>/`` (``--only "River
+        inputs"`` -> ``<name>-only-river-inputs/``), so rerunning one part never
+        overwrites another's. The results cache is the full run's own: a part reads
+        what a full run stored and fills it for the full run.
     ``strict``
         A layout warning raised while drawing a page (:data:`_STRICT_PATTERNS`) is a
         problem; the page still draws.
@@ -1193,6 +1251,7 @@ def run_suite(
     if smoke is not None and smoke_stride < 1:
         raise ValueError(f"smoke: stride must be at least 1, got {smoke_stride}")
 
+    only_globs = _only_globs(only)
     # Only the options that are set. A run that is not the whole suite as written must
     # not replace the real report, so these also name its directory (``mode_tag``).
     modes: dict[str, Any] = {
@@ -1200,7 +1259,7 @@ def run_suite(
         for k, v in (
             ("smoke", smoke),
             ("self_check", True if self_check else None),
-            ("only", only),
+            ("only", only_globs or None),
             ("strict", True if strict else None),
         )
         if v is not None
@@ -1210,7 +1269,7 @@ def run_suite(
         for key, tag in (
             ("smoke", "-smoke"),
             ("self_check", "-selfcheck"),
-            ("only", "-only"),
+            ("only", _only_tag(only_globs)),
         )
         if key in modes
     )
@@ -1282,7 +1341,7 @@ def run_suite(
             anchor = test if isinstance(test, str) else smoke_sources[0]
             # plus the steps the pages name, once their date lists are thinned
             # (collected before the cut, see _smoke_expand)
-            throwaway = _smoke_expand(suite, only)
+            throwaway = _smoke_expand(suite, only_globs)
             pins = (
                 _sources.TimePins()
                 if throwaway is None
@@ -1338,8 +1397,8 @@ def run_suite(
                 )
 
         expanded = _pages.expand(suite, thin_dates=smoke is not None)
-        if only is not None:
-            expanded = _select_pages(expanded, only)
+        if only_globs:
+            expanded = _select_pages(expanded, only_globs)
         if self_check:
             expanded, self_checked = _self_check_pages(expanded)
         else:
@@ -1660,7 +1719,7 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
     ``ocean-skill-run suite.yaml [--list] [--no-refresh] [--smoke [N]]
-    [--smoke-stride K] [--self-check] [--only GLOB] [--strict]``. Put ``--smoke``'s
+    [--smoke-stride K] [--self-check] [--only GLOB]... [--strict]``. Put ``--smoke``'s
     count right after it (``--smoke 3``, or ``--smoke=3``), and the suite path before
     it, or the path is taken as the count.
     """
@@ -1713,7 +1772,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--only",
         metavar="GLOB",
-        help="draw only the pages whose title matches this case-insensitive glob",
+        action="append",
+        help="draw only one part: a section title (that whole section) or a page "
+        "title, as a case-insensitive glob; repeat it for several parts; report in "
+        "<name>-only-<glob>/",
     )
     parser.add_argument(
         "--strict",
