@@ -80,8 +80,10 @@ restarted in pieces (they become a list of globs under `files:`). Other options:
 (where this suite's own catalog goes; default `<output-dir>/catalogs`),
 `--shared-catalogs DIR` (the observation catalogs; default the Anvil directory) and
 `--force` (replace an existing `-o` file; default `./mid-run-check.yaml`). The command
-reads only file names and the grid's `eta_rho` length and changes nothing but the YAML it
-writes. A missing required flag, or another template name, is an error.
+reads file names, the grid's `eta_rho` length and (to place the two default
+`transects:` section lines over the ocean) its `lon_rho`, `lat_rho` and `mask_rho`, and
+changes nothing but the YAML it writes. A missing required flag, or another template
+name, is an error.
 
 **What is discovered**, from the layout C-Star writes (`<run>/tasks/<task>/{input/
 input_datasets,output,work}`):
@@ -1070,7 +1072,7 @@ overwrites an earlier report; use it if two runs of the same suite might overlap
 ```
 
 A run that is not the whole suite as written -- `--smoke`, `--self-check` or `--only` (see
-Guardrails under CLI) -- writes to `<name>-smoke/`, `<name>-selfcheck/`, `<name>-only/` (or
+Guardrails under CLI) -- writes to `<name>-smoke/`, `<name>-selfcheck/`, `<name>-only-<slug>/` (or
 their combination, e.g. `<name>-smoke-selfcheck/`) instead, and leaves `latest.txt`/`latest`
 alone, so it can never replace the real report.
 
@@ -1215,7 +1217,7 @@ so a suite whose only data pages skipped is `1` however many dividers it has.
 
 ```
 ocean-skill-run SUITE.yaml [--list] [--no-refresh] [--smoke [N]] [--smoke-stride K]
-                [--self-check] [--only GLOB] [--strict]
+                [--self-check] [--only GLOB]... [--strict]
 ```
 
 `--list` validates the suite, resolves `latest`/`month: run`/`for_each`, and prints the
@@ -1320,12 +1322,31 @@ Pages are titled `[self-check] <title>`, are never cached, and are drawn into
 `XY:` and `summary:` pages run as written. A compare page with several `test` sources
 cannot be paired with itself and is drawn as written (the log says so).
 
-**`--only GLOB`** draws only the pages whose title matches the case-insensitive glob
+**`--only GLOB`** draws only the parts whose title matches the case-insensitive glob
 (`fnmatch`: `*`, `?`, `[...]`), matched against the title as written (not the
-`[self-check]` one). A `section:` divider is kept only if a matching page follows it. The
-report goes to `<output_dir>/<name>-only/`, so a quick look at one page never replaces
-the full report. A `summary:` page needs its compare pages: select them too, or it is
-skipped. A glob that matches nothing is an error that lists the page titles.
+`[self-check]` one). A glob that matches a `section:` divider keeps that whole section
+(the divider and every page up to the next divider); one that matches a figure page keeps
+just that page, with the divider over it (a divider is otherwise kept only if a kept page
+follows it). Repeat the flag to draw several parts: a page is kept if any glob keeps it.
+A `summary:` page needs its compare pages: select them too, or it is skipped. A glob that
+matches nothing is an error that lists the section titles, then the page titles.
+
+*Running one part.* To redo just the rivers of the input check:
+
+```
+ocean-skill-run input-check.yaml --only "River inputs"
+ocean-skill-run input-check.yaml --only "River inputs" --only "Surface forcing"
+```
+
+Each selection gets its own report folder, `<output_dir>/<name>-only-<slug>/` -- here
+`input-check-only-river-inputs/` -- where the slug is the globs joined with `-`,
+lowercased, with every run of other characters turned into `-` (a slug past 40
+characters is cut to 33 and given six hex characters of a hash of the globs, so it stays
+unique). Rerunning rivers therefore never overwrites a boundary-only run, nor the full
+report. The results cache is not scoped: a part reads and fills the same cache as the
+full run, so a part run after a full run is mostly cache hits, and the next full run
+reuses what the part drew. `--list --only ...` shows what a selection keeps; the section
+dividers are the `[section]` lines of `--list`.
 
 **`--strict`** turns layout warnings into problems: any warning raised while drawing a
 page that says the figure came out cramped -- "the maps are only ...in wide", "panels on

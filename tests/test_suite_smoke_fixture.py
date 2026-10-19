@@ -346,3 +346,19 @@ def test_the_guarded_run_finds_no_problems(localized, name):
         "KNOWN_PROBLEMS entries that no longer occur (remove them):\n"
         + "\n".join(f"  {k.title!r} [{k.kind}]" for k in stale)
     )
+
+
+def test_an_empty_transects_block_fails_before_anything_draws(localized):
+    """``ocean-skill-suite new`` writes ``transects: {}`` when the grid gives no lines.
+
+    The run stops at expansion, in seconds, naming the entry to fill in -- not hours
+    later, and not by quietly drawing something else.
+    """
+    import yaml
+
+    path = localized("mid-run-check")
+    suite = yaml.safe_load(path.read_text())
+    suite["defaults"]["transects"] = {}
+    path.write_text(yaml.safe_dump(suite, sort_keys=False))
+    with pytest.raises(ValueError, match=r"selects: is empty.*\{transects\}"):
+        run_suite(path, list_only=True)

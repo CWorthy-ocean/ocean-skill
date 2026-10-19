@@ -4,7 +4,9 @@
 # series over the whole run so far, the alkalinity extremes and their time series, the
 # latest restart at the surface and 200 m (model only), and the latest month's
 # observation comparisons (satellite chlorophyll, Holte & Talley mixed layer depth, WOA23
-# nutrients, GLODAPv2 carbon), organized into PDF sections with divider pages.
+# nutrients, WOA23 sections along two transects, GLODAPv2 carbon), organized into PDF
+# sections with divider pages. Each section ends with a metrics table and Taylor and
+# target diagrams.
 #
 # Run it:
 #     ocean-skill-run mid-run-check.yaml --list    # check the page list first
@@ -78,6 +80,12 @@ defaults:
   # run as it grows. Add `max: "2012-06-30"` or move `min:` to narrow it. It is a
   # placeholder (time: "{period}") used by those pages so it is edited in one place.
   period: {min: "2011-01-01"}
+  # The two sections of the transect pages, also drawn on the bathymetry map: each a
+  # fixed lat between two lons or a fixed lon between two lats (the grid's own
+  # longitude convention). Edit, add or remove lines freely.
+  transects:
+    Equator (143E-93W): {transect: {lat: 0, lon: {min: 143.0, max: 267.0}}}
+    160W (30S-30N): {transect: {lon: 200.0, lat: {min: -30.0, max: 30.0}}}
 # <<< setup
   # (the rest of defaults: is the same for every run)
   # The page texts say "the run so far": reword them if you narrow `period:` above.
@@ -89,6 +97,8 @@ defaults:
   depths: [surface, 100]
   # Depths of the latest-snapshot pages, one page each.
   snapshot_depths: [surface, 200]
+  # Depths of the transect sections: upper 1000 m.
+  section_depths: [5, 10, 25, 50, 100, 150, 200, 300, 400, 500, 750, 1000]
 
 pages:
   # -- model domain -----------------------------------------------------------------
@@ -97,8 +107,11 @@ pages:
 
   - title: "Bathymetry"
     field: {variables: [h]}
-    caption: Grid depth h (m).
-    plot: {robust: false}           # the full depth range, trenches included
+    caption: Grid depth h (m). Lines mark the transects of the section pages.
+    plot:
+      robust: false                 # the full depth range, trenches included
+      locations: "{transects}"
+      legend: annotate
 
   # -- run health -------------------------------------------------------------------
   - title: "Run health"
@@ -247,7 +260,7 @@ pages:
       the restarts of the latest month, against that calendar month of Holte & Talley.
 
   - title: "Chlorophyll and mixed layer depth — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- nutrients vs WOA23 -----------------------------------------------------------
   - title: "Nutrients vs WOA23"
@@ -276,7 +289,38 @@ pages:
       that calendar month, at {depth.label}.
 
   - title: "Nutrients vs WOA23 — metrics"
-    summary: {scope: section, kind: [table, target], color_by: variable, legend_style: legend}
+    summary: {scope: section, kind: [table, both], color_by: variable}
+
+  # -- sections vs WOA23 ------------------------------------------------------------
+  - title: "Sections vs WOA23"
+    section: >-
+      Temperature, salinity, nitrate and oxygen in the upper 1000 m along the transects
+      drawn on the bathymetry map: the model's mean over the latest month against the
+      WOA23 monthly climatology for that calendar month. One figure per variable, one
+      row per transect. They show where the water column has drifted below the depths
+      of the maps.
+
+  - title: "{variable} sections vs WOA23 — {month.name} {month.year}"
+    for_each:
+      month: {run: {last: 1}}   # latest month only
+      variable: [temperature, salinity, nitrate, oxygen]
+    compare:
+      reference: ["woa23_{variable}_month{month.mm}"]
+      variables: ["{variable}"]
+      select:
+        test: {depth: "{section_depths}", time: "{month.window}"}
+        reference: {depth: "{section_depths}"}
+      aggregate: {time: mean}
+      selects: "{transects}"
+    contours: true
+    plot: {contour_levels: 6}
+    caption: >-
+      {variable}, 5-1000 m, along each transect: model mean over the restarts of the
+      latest month against the WOA23 climatology for that calendar month, with
+      contours of the plotted field itself.
+
+  - title: "Sections vs WOA23 — metrics"
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
   # -- carbon vs GLODAPv2 -----------------------------------------------------------
   - title: "Carbon vs GLODAPv2"
@@ -300,9 +344,14 @@ pages:
       climatology, at {depth.label}.
 
   - title: "Carbon vs GLODAPv2 — metrics"
-    summary: {scope: section, kind: [table]}
+    summary: {scope: section, kind: [table, both], color_by: variable}
 
+  # -- summary --------------------------------------------------------------------
   - title: "Summary"
+    section: >-
+      Every observation comparison of the report on one Taylor and one target diagram.
+
+  - title: "Summary — all comparisons"
     summary: {kind: both, color_by: variable}   # every comparison of the report
 
   # T-S diagrams and the zonal-velocity sections are in the final-report suite: they are slow

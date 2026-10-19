@@ -1233,22 +1233,52 @@ def _selects_page(select=None, **selects):
     return {"title": "x", "compare": compare}
 
 
-def test_selects_with_a_transect_and_no_flat_select_is_refused_at_expand():
+def test_selects_with_a_transect_and_no_flat_select_keeps_the_run_window_on_test():
+    # compare() merges the plain entry over the window pair-spec, which puts the
+    # same transect on both lanes -- so the page is no longer refused for it.
+    (page,) = _expand(_selects_page())
+    assert page.kwargs["select"] == {
+        "test": {"time": {"min": INDEX[0].isoformat(), "max": INDEX[-1].isoformat()}},
+        "reference": {},
+    }
+
+
+def test_selects_with_a_transect_and_a_test_only_depth_is_refused_at_expand():
+    page = _selects_page(select={"test": {"depth": [0, 50]}, "reference": {}})
     with pytest.raises(
-        ValueError, match=r"page 'x': compare: selects: names a transect"
+        ValueError, match=r"page 'x': compare: selects: names a transect.*same depths"
     ):
-        _expand(_selects_page())
+        _expand(page)
 
 
-def test_selects_with_a_transect_beside_a_pair_spec_select_is_refused():
-    with pytest.raises(ValueError, match="names a transect"):
-        _expand(_selects_page(select={"test": {"depth": [0, 50]}, "reference": {}}))
+def test_selects_with_a_transect_beside_a_pair_spec_select_sharing_depths_is_kept():
+    select = {"test": {"depth": [0, 50]}, "reference": {"depth": [0, 50]}}
+    (page,) = _expand(_selects_page(select=select))
+    assert page.kwargs["select"]["reference"] == {"depth": [0, 50]}
+    assert page.kwargs["selects"] == {"Equator": {"transect": {"lat": 0}}}
 
 
 def test_selects_with_a_transect_and_a_flat_select_is_left_as_written():
     (page,) = _expand(_selects_page(select={"depth": [0, 50]}))
     assert page.kwargs["select"] == {"depth": [0, 50]}  # no window, still flat
     assert page.kwargs["selects"] == {"Equator": {"transect": {"lat": 0}}}
+
+
+def test_a_one_sided_transect_entry_over_a_flat_select_is_refused_at_expand():
+    # the flat page select used to skip the check, leaving it to compare() mid-run
+    page = _selects_page(
+        select={"depth": [0, 50]},
+        Equator={"test": {"transect": {"lat": 0}}, "reference": {}},
+    )
+    with pytest.raises(ValueError, match=r"selects: names a transect.*one side only"):
+        _expand(page)
+
+
+def test_an_empty_selects_is_refused_at_expand():
+    page = _selects_page()
+    page["compare"]["selects"] = {}
+    with pytest.raises(ValueError, match=r"selects: is empty"):
+        _expand(page)
 
 
 def test_selects_without_a_transect_still_get_the_run_window():
@@ -1316,9 +1346,10 @@ def test_self_check_collapses_each_select_entry_to_its_test_side():
 # look inside it.
 
 
-def test_a_transect_inside_an_entry_with_its_own_aggregate_is_still_refused():
+def test_a_transect_inside_an_entry_with_its_own_aggregate_is_still_checked():
     page = _selects_page(
-        Equator={"select": {"transect": {"lat": 0}}, "aggregate": {"time": "mean"}}
+        select={"test": {"depth": [0, 50]}, "reference": {}},
+        Equator={"select": {"transect": {"lat": 0}}, "aggregate": {"time": "mean"}},
     )
     with pytest.raises(ValueError, match="names a transect"):
         _expand(page)

@@ -9,6 +9,7 @@ generated file must keep its pages and everything after the setup block.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -512,3 +513,192 @@ def test_the_labels_flow_into_the_config_and_loads(tmp_path):
         name="b", kind="river", files="/x.nc", grid="/g.nc", label="river forcing"
     )
     assert frc.label == "river forcing"
+
+
+# --- the default transect lines, from the grid's own ocean cells -------------------
+
+
+def _write_grid(path: Path, lon, lat, mask) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dims = ("eta_rho", "xi_rho")
+    xr.Dataset(
+        {"lon_rho": (dims, lon), "lat_rho": (dims, lat), "mask_rho": (dims, mask)}
+    ).to_netcdf(path)
+    return path
+
+
+def _regular(tmp_path, lons, lats, mask=None) -> Path:
+    lon, lat = np.meshgrid(lons, lats)
+    return _write_grid(
+        tmp_path / "g_grid.nc",
+        lon,
+        lat,
+        np.ones(lon.shape) if mask is None else mask(lon, lat),
+    )
+
+
+def _lines(found: dict) -> list[dict]:
+    zonal, merid = (e["transect"] for e in found.values())
+    return [zonal, merid]
+
+
+def test_pacmed_like_grid_gets_the_equator_and_a_central_meridian(tmp_path):
+    # 0..360 longitudes (77E-316E), across the dateline, reaching both sides of 0
+    grid = _regular(tmp_path, np.arange(77.0, 316.01, 1.0), np.arange(-40, 60.1, 0.5))
+    found = new.default_transects(grid)
+    zonal, merid = _lines(found)
+    assert zonal == {"lat": 0, "lon": {"min": 77.0, "max": 316.0}}
+    assert merid["lat"] == {"min": -40.0, "max": 60.0}
+    assert merid["lon"] == 197.0  # median of 77..316, rounded
+    assert list(found) == ["Equator (77E-44W)", "163W (40S-60N)"]
+
+
+def test_zonal_line_uses_the_median_latitude_away_from_the_equator(tmp_path):
+    grid = _regular(
+        tmp_path, np.arange(-130.0, -119.9, 0.5), np.arange(30.0, 40.1, 0.5)
+    )
+    found = new.default_transects(grid)
+    assert next(iter(found)) == "35N (130W-120W)"
+    assert _lines(found)[0] == {"lat": 35, "lon": {"min": -130.0, "max": -120.0}}
+    # a domain only just touching the equator does not get the equator line
+    grid = _regular(tmp_path, np.arange(10.0, 20.1, 1.0), np.arange(-1.0, 20.1, 0.5))
+    assert _lines(new.default_transects(grid))[0]["lat"] == 10
+    south = _regular(tmp_path, np.arange(10.0, 20.1, 1.0), np.arange(-30.0, -10.1, 0.5))
+    assert next(iter(new.default_transects(south))) == "20S (10E-20E)"
+
+
+def _tilted(tmp_path, degrees: float, name: str = "rot_grid.nc"):
+    """Return a 2 km grid, 150 x 200, turned ``degrees`` on the ground; east is land."""
+    i, j = np.meshgrid(np.arange(200), np.arange(150))
+    s, th = 0.02, np.radians(degrees)  # degrees of latitude per cell
+    stretch = 1 / np.cos(np.radians(32))  # a degree of longitude is shorter at 32N
+    lon = -125.0 + stretch * s * (i * np.cos(th) - j * np.sin(th))
+    lat = 30.0 + s * (i * np.sin(th) + j * np.cos(th))
+    mask = (i < 150).astype(float)  # the last 50 columns are land
+    return _write_grid(tmp_path / name, lon, lat, mask), lon, lat, mask
+
+
+def test_rotated_grid_gets_lines_along_its_row_and_column(tmp_path):
+    from ocean_skill.transect import as_transect
+
+    grid, lon, lat, mask = _tilted(tmp_path, 30)
+    found, rotation = new._default_transects(grid)
+    assert 25 < rotation < 35
+    (row_label, row), (col_label, col) = found.items()
+    assert row_label.startswith("Middle grid row (")
+    assert col_label.startswith("Middle grid column (")
+    assert all(as_transect(e["transect"])["kind"] == "waypoints" for e in (row, col))
+
+    def cell(pt):  # the grid cell an endpoint (rounded to 0.01) came from
+        d = np.hypot(lon - pt[0], lat - pt[1])
+        return np.unravel_index(np.argmin(d), d.shape)
+
+    (w, e), (s_, n) = row["transect"]["waypoints"], col["transect"]["waypoints"]
+    assert w[0] < e[0] and s_[1] < n[1]  # west to east, south to north
+    (j0, i0), (j1, i1) = cell(w), cell(e)
+    assert j0 == j1 == 75 and (i0, i1) == (0, 149)  # the middle row, coast at 149
+    assert all(mask[j, i] for j, i in (cell(w), cell(e), cell(s_), cell(n)))
+    (j2, i2), (j3, i3) = cell(s_), cell(n)
+    assert i2 == i3 == 100 and (j2, j3) == (0, 149)  # the middle column
+    ends = " to ".join(f"{new._lat_label(y)} {new._lon_label(x)}" for x, y in (w, e))
+    assert row_label == f"Middle grid row ({ends})"
+
+
+def test_rotated_grid_block_says_so(tmp_path):
+    grid, *_ = _tilted(tmp_path, 30)
+    lines = new._transect_lines(grid, lambda text: text)
+    assert any(
+        re.search(r"The grid is rotated (29|30|31) degrees, so the lines follow", x)
+        for x in lines
+    )
+    entries = yaml.safe_load("a:\n" + "\n".join(lines))["a"]["transects"]
+    assert len(entries) == 2
+    assert all("waypoints" in e["transect"] for e in entries.values())
+
+
+def test_a_slightly_rotated_grid_keeps_lat_lon_lines(tmp_path):
+    grid, lon, _, mask = _tilted(tmp_path, 5)
+    found, rotation = new._default_transects(grid)
+    assert 4 < rotation < 6
+    zonal, merid = _lines(found)
+    assert "lat" in zonal and "lon" in merid
+    assert "waypoints" not in zonal
+    assert zonal["lon"]["max"] < lon[mask == 0].max() - 0.3  # still stops at the coast
+    lines = new._transect_lines(grid, lambda text: text)
+    assert not any("rotated" in x for x in lines)
+
+
+def test_the_grids_angle_variable_is_used_when_it_has_one(tmp_path):
+    grid, lon, _, _ = _tilted(tmp_path, 0)
+    with xr.open_dataset(grid) as ds:
+        ds = ds.assign(angle=(("eta_rho", "xi_rho"), np.full(lon.shape, np.pi / 4)))
+        ds.load().to_netcdf(tmp_path / "angled_grid.nc")
+    found, rotation = new._default_transects(tmp_path / "angled_grid.nc")
+    assert rotation == pytest.approx(45.0) and "Middle grid row (" in next(iter(found))
+
+
+def test_antimeridian_grid_in_180_convention_is_shifted_to_0_360(tmp_path):
+    lons = np.r_[np.arange(160.0, 180.0, 1.0), np.arange(-180.0, -139.9, 1.0)]
+    grid = _regular(tmp_path, lons, np.arange(-20, 20.1, 0.5))
+    found = new.default_transects(grid)
+    zonal, merid = _lines(found)
+    assert zonal["lat"] == 0
+    assert zonal["lon"] == {"min": 160.0, "max": 220.0}
+    assert merid["lon"] == 190.0 and merid["lat"] == {"min": -20.0, "max": 20.0}
+    assert list(found) == ["Equator (160E-140W)", "170W (20S-20N)"]
+
+
+def test_greenwich_crossing_0_360_grid_is_shifted_to_180_convention(tmp_path):
+    lons = np.r_[np.arange(340.0, 360.0, 1.0), np.arange(0.0, 20.1, 1.0)]
+    grid = _regular(tmp_path, lons, np.arange(-10, 10.1, 0.5))
+    zonal, merid = _lines(new.default_transects(grid))
+    assert zonal["lon"] == {"min": -20.0, "max": 20.0} and merid["lon"] == 0.0
+
+
+def test_a_grid_with_no_ocean_has_no_default_lines(tmp_path):
+    grid = _regular(
+        tmp_path, np.arange(0.0, 5.0), np.arange(0.0, 5.0), lambda lon, lat: lon * 0
+    )
+    with pytest.raises(ValueError, match="no ocean"):
+        new.default_transects(grid)
+
+
+def _setup_block(text: str) -> str:
+    return text.split("# >>> setup")[1].split("# <<< setup")[0]
+
+
+@pytest.mark.parametrize("template", ["mid-run-check", "input-check"])
+def test_the_setup_block_carries_the_default_transects(tmp_path, template):
+    from ocean_skill.transect import as_transect
+
+    root = (
+        pacmed(tmp_path)
+        if template == "mid-run-check"
+        else inputs(tmp_path, restart=True)
+    )
+    rc, out = _new(tmp_path, root, template=template)
+    assert rc == 0
+    assert "  transects:\n" in _setup_block(out.read_text())
+    transects = yaml.safe_load(out.read_text())["defaults"]["transects"]
+    assert len(transects) == 2 and "section lines" not in out.read_text()
+    for label, entry in transects.items():
+        assert as_transect(entry["transect"])["kind"] in ("lat_line", "lon_line")
+        assert label[0].isalnum() and "(" in label
+    # the fake grid: lon 120-125, lat 10-20 (eta_rho rows of 1346 or 962)
+    zonal, merid = (e["transect"] for e in transects.values())
+    assert zonal["lat"] == 15 and zonal["lon"] == {"min": 120.0, "max": 125.0}
+    assert merid["lon"] == 123.0  # median 122.5 rounds half up
+    assert merid["lat"] == {"min": 10.0, "max": 20.0}
+
+
+def test_an_unreadable_grid_leaves_the_block_to_fill_in(tmp_path, capsys):
+    root = pacmed(tmp_path)
+    for grid in root.glob("tasks/*/input/input_datasets/a_grid.nc"):
+        xr.Dataset({"h": (("eta_rho", "xi_rho"), np.zeros((962, 3)))}).to_netcdf(grid)
+    rc, out = _new(tmp_path, root)
+    assert rc == 0
+    text = out.read_text()
+    assert "transects: {}  # TODO check: no section lines" in text
+    assert "    # Equator (143E-93W): {transect:" in text
+    assert yaml.safe_load(text)["defaults"]["transects"] == {}
+    assert "marked '# TODO check'" in capsys.readouterr().out

@@ -8,6 +8,10 @@ the folder named by ``--inputs``) and rewrites the block between the template's
 kept byte for byte: the block is spliced in as text, since loading and dumping the YAML
 would drop the comments. ``final-report`` and ``model-comparison`` are copied and
 edited by hand; guesses are written as ``# TODO check`` comments.
+
+Besides file names and the grid's ``eta_rho`` length, the grid's ``lon_rho``,
+``lat_rho`` and ``mask_rho`` are read once, to place the two default section lines
+(``defaults.transects``) over the ocean; nothing else is read from the data.
 """
 
 from __future__ import annotations
@@ -157,6 +161,209 @@ def _surface_label(part: str) -> str:
     words = ["climatology" if w == "clim" else w for w in words]
     words = ["BGC" if w == "bgc" else w for w in words]
     return " ".join(["surface", *words])
+
+
+def _whole(x: float) -> int:
+    """Round half up to a whole number."""
+    import math
+
+    return math.floor(x + 0.5)
+
+
+def _outward(lo: float, hi: float) -> tuple[float, float]:
+    """Widen ``lo``..``hi`` outward to 0.1 degree (rounded first: float noise)."""
+    import math
+
+    return (
+        math.floor(round(lo * 10, 6)) / 10,
+        math.ceil(round(hi * 10, 6)) / 10,
+    )
+
+
+def _lon_label(lon: float) -> str:
+    """Spell a longitude in whole degrees, east or west: ``143E``, ``93W``, ``0E``."""
+    deg = _whole((lon + 180) % 360 - 180)
+    deg = 180 if deg == -180 else deg
+    return f"{abs(deg)}{'W' if deg < 0 else 'E'}"
+
+
+def _lat_label(lat: float) -> str:
+    """Spell a latitude in whole degrees: ``34N``, ``12S``, ``0N``."""
+    deg = _whole(lat)
+    return f"{abs(deg)}{'S' if deg < 0 else 'N'}"
+
+
+def default_transects(grid: Path) -> dict[str, dict]:
+    """Return the two default section lines of ``grid``, ``{label: {"transect": ...}}``.
+
+    Reads ``lon_rho``, ``lat_rho`` and ``mask_rho`` only. A zonal line (latitude 0 when
+    the ocean reaches at least 2 degrees to each side of it, else the median ocean
+    latitude to the whole degree) and a meridional one (the median ocean longitude to
+    the whole degree), each running over the ocean cells that lie on it, widened to
+    0.1 degree. "On the line" means the cell center is within the half-width the cell
+    has across the line: half the sum of the cell's latitude (longitude) change along
+    both grid axes. That is half the spacing on a regular grid and wider on a tilted
+    one (the California Current domain is rotated ~30 degrees, where a latitude line
+    crosses cells row after row), so the band keeps no gaps.
+
+    Longitudes keep the grid's convention unless the grid wraps (a jump of more than
+    180 degrees between neighbors: a -180..180 grid crossing the dateline, or a
+    0..360 one crossing Greenwich), where they switch to the other so that the line's
+    ``min`` is below its ``max``. Raises ``ValueError`` (or ``KeyError``/``OSError``
+    for an unreadable grid) when there is nothing to draw.
+
+    A grid rotated more than :data:`MAX_ROTATION` degrees (the median over ocean cells
+    of the xi direction's angle from east: the grid's ``angle`` if it has one, else
+    from ``lon_rho``/``lat_rho``) gets lines along its own axes instead, since a
+    zonal line would cross its coast obliquely: two ``waypoints`` transects, along
+    the middle row and the middle column from their first to their last ocean cell.
+    """
+    return _default_transects(grid)[0]
+
+
+#: A grid whose rows are rotated more than this many degrees from east gets lines that
+#: follow its rows and columns (see :func:`default_transects`).
+MAX_ROTATION = 10.0
+
+
+def _default_transects(grid: Path) -> tuple[dict[str, dict], float]:
+    """Return :func:`default_transects` and the grid's rotation in degrees."""
+    import numpy as np
+    import xarray as xr
+
+    with xr.open_dataset(grid) as ds:
+        lon, lat, mask = (
+            np.asarray(ds[v].values, dtype=float)
+            for v in ("lon_rho", "lat_rho", "mask_rho")
+        )
+        angle = np.asarray(ds["angle"].values, float) if "angle" in ds else None
+    if lon.ndim != 2 or min(lon.shape) < 2:
+        raise ValueError(f"lon_rho of {lon.shape} is not a 2-D grid")
+    jumps = [np.nanmax(np.abs(np.diff(lon, axis=a))) for a in (0, 1)]
+    if max(jumps) > 180:  # the seam is inside the domain: pick the other convention
+        lon = lon % 360 if np.nanmin(lon) < 0 else (lon + 180) % 360 - 180
+    ocean = (mask > 0) & np.isfinite(lon) & np.isfinite(lat)
+    if not ocean.any():
+        raise ValueError("the grid has no ocean cells (mask_rho is all 0)")
+
+    # the xi direction's angle from east, in degrees (ROMS stores ``angle`` in radians)
+    if angle is not None and angle.shape == lon.shape:
+        theta = np.degrees(angle)
+    else:
+        dlon, dlat = np.gradient(lon, axis=1), np.gradient(lat, axis=1)
+        theta = np.degrees(np.arctan2(dlat, dlon * np.cos(np.radians(lat))))
+    theta = (theta + 180) % 360 - 180
+    rotation = float(np.nanmedian(theta[ocean]))
+    if abs(rotation) > MAX_ROTATION:
+        return _grid_lines(lon, lat, ocean), rotation
+
+    def half_width(field: np.ndarray) -> np.ndarray:
+        return 0.5 * sum(np.abs(np.gradient(field, axis=a)) for a in (0, 1))
+
+    wet_lat = lat[ocean]
+    if wet_lat.min() <= -2 and wet_lat.max() >= 2:
+        lat0 = 0
+    else:
+        lat0 = _whole(float(np.median(wet_lat)))
+    lon0 = _whole(float(np.median(lon[ocean])))
+
+    on_lat = ocean & (np.abs(lat - lat0) <= half_width(lat))
+    on_lon = ocean & (np.abs(lon - lon0) <= half_width(lon))
+    # the median line can fall between ocean patches: then span all the ocean
+    lons = lon[on_lat] if on_lat.any() else lon[ocean]
+    lats = lat[on_lon] if on_lon.any() else lat[ocean]
+    (x0, x1), (y0, y1) = (
+        _outward(lons.min(), lons.max()),
+        _outward(lats.min(), lats.max()),
+    )
+    zonal = "Equator" if lat0 == 0 else _lat_label(lat0)
+    return {
+        f"{zonal} ({_lon_label(x0)}-{_lon_label(x1)})": {
+            "transect": {"lat": lat0, "lon": {"min": x0, "max": x1}}
+        },
+        f"{_lon_label(lon0)} ({_lat_label(y0)}-{_lat_label(y1)})": {
+            "transect": {"lon": float(lon0), "lat": {"min": y0, "max": y1}}
+        },
+    }, rotation
+
+
+def _grid_lines(lon, lat, ocean) -> dict[str, dict]:
+    """Return waypoint lines along the middle row and column of a rotated grid.
+
+    Each runs from the first to the last ocean cell of the row (``eta_rho``) or column
+    (``xi_rho``) nearest the middle that has any, its endpoints the cells' lon/lat to
+    0.01 degree, ordered west to east for the row and south to north for the column.
+    """
+    import numpy as np
+
+    def middle(wet: np.ndarray) -> int:
+        have = np.flatnonzero(wet.any(axis=1))
+        return int(have[np.argmin(np.abs(have - len(wet) // 2))])
+
+    def ends(cells: np.ndarray, x: np.ndarray, y: np.ndarray, by) -> list[list[float]]:
+        idx = np.flatnonzero(cells)
+        pts = [
+            [round(float(x[i]), 2), round(float(y[i]), 2)] for i in (idx[0], idx[-1])
+        ]
+        return sorted(pts, key=by)
+
+    j = middle(ocean)
+    i = middle(ocean.T)
+    row = ends(ocean[j], lon[j], lat[j], lambda p: p[0])
+    column = ends(ocean[:, i], lon[:, i], lat[:, i], lambda p: p[1])
+    out = {}
+    for what, pts in (("row", row), ("column", column)):
+        a, b = (f"{_lat_label(y)} {_lon_label(x)}" for x, y in pts)
+        out[f"Middle grid {what} ({a} to {b})"] = {"transect": {"waypoints": pts}}
+    return out
+
+
+def _transect_lines(grid: Path, check) -> list[str]:
+    """Return the ``transects:`` lines (a block under ``defaults:``) for ``grid``.
+
+    An unreadable grid or one with no ocean is not an error: the block is left empty
+    with a ``# TODO check`` and a commented example to fill in.
+    """
+    lines = [
+        "  # The two sections of the transect pages, also drawn on the bathymetry map:",
+        "  # each a fixed lat between two lons or a fixed lon between two lats (the",
+        "  # grid's own longitude convention). Edit, add or remove lines freely.",
+    ]
+
+    def flow(entry: dict) -> str:
+        def num(v: float) -> str:
+            return "0" if v == 0 else f"{float(v):.1f}"
+
+        def part(key: str, v) -> str:
+            if key == "waypoints":
+                pairs = ", ".join(f"[{x:.2f}, {y:.2f}]" for x, y in v)
+                return f"{key}: [{pairs}]"
+            if isinstance(v, dict):
+                return f"{key}: {{min: {num(v['min'])}, max: {num(v['max'])}}}"
+            return f"{key}: {num(v)}"
+
+        spec = ", ".join(part(k, v) for k, v in entry["transect"].items())
+        return f"{{transect: {{{spec}}}}}"
+
+    try:
+        found, rotation = _default_transects(grid)
+    except (OSError, KeyError, ValueError) as exc:
+        example = {"transect": {"lat": 0, "lon": {"min": 143.0, "max": 267.0}}}
+        return [
+            *lines,
+            f"  transects: {{}}  {check(f'no section lines from {grid.name}: {exc}')}",
+            f"    # Equator (143E-93W): {flow(example)}",
+        ]
+    if abs(rotation) > MAX_ROTATION:
+        lines.append(
+            f"  # The grid is rotated {abs(_whole(rotation))} degrees, so the lines "
+            "follow its rows and columns."
+        )
+    lines.append("  transects:")
+    for label, entry in found.items():
+        key = label if yaml.safe_load(label) == label else json.dumps(label)
+        lines.append(f"    {key}: {flow(entry)}")
+    return lines
 
 
 def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
@@ -356,7 +563,10 @@ def _input_check(args, roots, name, output_dir, catalog, check, warn) -> list[st
         return textwrap.indent(text.rstrip(), "  ")
 
     refresh = {"catalog": catalog, "sources": sources, "forcing": forcing}
-    return ["", "refresh:", dump(refresh), "", "defaults:", dump(defaults)]
+    return [
+        *["", "refresh:", dump(refresh), "", "defaults:", dump(defaults)],
+        *_transect_lines(grid, check),
+    ]
 
 
 def _mid_run(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
@@ -399,6 +609,7 @@ def _mid_run(args, roots, name, output_dir, catalog, check, warn) -> list[str]:
         period
         if first
         else f"{period}  {check('restart dates not read from file names')}",
+        *_transect_lines(grid, check),
     ]
 
 
