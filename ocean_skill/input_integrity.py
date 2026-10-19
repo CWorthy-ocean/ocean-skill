@@ -45,9 +45,10 @@ import hashlib
 import json
 import math
 import re
+import textwrap
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -89,6 +90,10 @@ _MAX_WORKERS = 6
 
 #: The edge (cells) of the window a cache key samples at each end of a field.
 _SAMPLE_EDGE = 64
+
+#: Characters per line of a table title's source list: about what a bold 11 pt line
+#: holds across the page.
+_TITLE_WRAP = 70
 
 #: Bumped when the statistics a scan records, or how they are computed, change, so a
 #: cached variable from before is not served as one from after. Part of every key.
@@ -179,6 +184,12 @@ _COLUMNS = (
 #: Sample size cap of :meth:`InputHealth.figures`' notes: steps verified for a copy.
 _COPY_CHECKS = 3
 
+#: A step whose only out-of-bounds values are below the lower bound by at most this
+#: share of the variable's largest magnitude is rounding, not a problem: interpolated
+#: night-time shortwave at -4e-5 W/m2 (largest 1180) or rain at -4e-6 cm/d flagged most
+#: of the domain "bad" at their worst step. Such steps are not counted as bad.
+_ROUNDOFF = 1e-6
+
 
 # --------------------------------------------------------------------------------------
 # Bounds
@@ -248,6 +259,9 @@ class _Source:
     lat: np.ndarray | None
     depth: tuple | None  # (h, sigma_r, Cs_r, hc, Vtransform, s_dim), or None
     thinned: bool = False
+    #: Each variable cut to the scanned steps, ``{std: (array, start)}``; see
+    #: :func:`_array`.
+    cut: dict[str, tuple[Any, int]] = field(default_factory=dict)
 
     def ocean(self, kind: str, shape: tuple[int, int]) -> np.ndarray:
         """Return the ocean mask on a variable's own points (u/v: both sides wet)."""
@@ -479,22 +493,45 @@ def _plan(src: _Source, v: _Var, positions: list[int]) -> list[tuple]:
     return blocks
 
 
+def _array(src: _Source, v: _Var) -> tuple[Any, int]:
+    """Return ``v`` as ``(array, start)``: ``(time, [levels], eta, xi)``, scan only.
+
+    ``start`` is the position of the array's first step. Cut once per variable, and its
+    dask graph optimized then: on a long record (five years of hourly forcing, a chunk
+    per step, 87,660 tasks) every block's compute otherwise culled the whole graph,
+    about 1.8 s however small the block -- most of a month's scan. Not thread-safe:
+    called before a variable's blocks are handed to threads.
+    """
+    if v.std not in src.cut:
+        da = src.ds[v.std]
+        order = [d for d in (src.tdim, *v.lead, v.ydim, v.xdim) if d is not None]
+        da = da.transpose(*order)
+        start = 0
+        if src.tdim is not None:
+            start = min(src.positions)
+            da = da.isel({src.tdim: slice(start, max(src.positions) + 1)})
+        data = da.data
+        if hasattr(data, "dask"):
+            import dask
+
+            (data,) = dask.optimize(data)
+        src.cut[v.std] = (data, start)
+    return src.cut[v.std]
+
+
 def _read(src: _Source, v: _Var, step: slice | None, levels: slice | None):
     """Read a block of ``v`` as numpy, ``(time, [levels], eta, xi)``.
 
     One small compute on the calling thread.
     """
-    da = src.ds[v.std]
-    order = [d for d in (src.tdim, *v.lead, v.ydim, v.xdim) if d is not None]
-    da = da.transpose(*order)
-    select = {}
-    if step is not None:
-        select[src.tdim] = step
+    data, start = _array(src, v)
+    index: list[Any] = []
+    if src.tdim is not None:
+        index.append(slice(step.start - start, step.stop - start))
     if levels is not None:
-        select[v.lead[0]] = levels
-    if select:
-        da = da.isel(select)
-    data = da.data
+        index.append(levels)
+    if index:
+        data = data[tuple(index)]
     if hasattr(data, "compute"):
         data = data.compute(scheduler="sync")
     x = np.asarray(data)
@@ -570,6 +607,7 @@ def _scan_variable(src: _Source, v: _Var) -> pd.DataFrame:
     """Return the per-step statistics of ``v`` over the scanned steps, a row each."""
     plan = _plan(src, v, src.positions)
     jobs = [(step, lev) for step, levels in plan for lev in levels]
+    _array(src, v)  # cut once, before the threads share it
     # a store chunked a whole variable at a time (a netCDF-3 file) holds that chunk
     # while a block is read: fewer threads then, so that they still hold about
     # _BLOCK_BYTES each between them
@@ -702,20 +740,17 @@ def _sample_hash(src: _Source, v: _Var) -> str:
     """
     import dask
 
-    da = src.ds[v.std]
+    data, start = _array(src, v)
     pos = src.positions
     edge = slice(0, _SAMPLE_EDGE), slice(-_SAMPLE_EDGE, None)
     pieces = []
     for p in sorted({pos[0], pos[len(pos) // 2], pos[-1]}):
         for lev in sorted({0, -1}) if v.lead else (None,):
             for window in edge:
-                select: dict[str, Any] = {v.ydim: window, v.xdim: window}
-                if src.tdim is not None:
-                    select[src.tdim] = p
+                index: list[Any] = [] if src.tdim is None else [p - start]
                 if v.lead:
-                    select[v.lead[0]] = lev
-                    select.update(dict.fromkeys(v.lead[1:], 0))
-                pieces.append(da.isel(select).data)
+                    index += [lev, *[0] * (len(v.lead) - 1)]
+                pieces.append(data[(*index, window, window)])
     h = hashlib.sha256()
     for piece in dask.compute(*pieces, scheduler="sync"):
         h.update(np.ascontiguousarray(piece))
@@ -726,14 +761,18 @@ def _file_stamp(src: _Source) -> list:
     """Return the size and modification time of the file the source was opened from.
 
     Empty where the Dataset does not say (a reference, a list of files): the content
-    sample then stands alone.
+    sample then stands alone. Only a regular file counts: a source read through
+    references reports ``"/"``, and the root directory's size and time differ between
+    the nodes of a cluster, so every job missed the previous job's entries.
     """
     import os
 
     path = src.ds.encoding.get("source")
+    if not isinstance(path, str) or not os.path.isfile(path):
+        return []
     try:
         stat = os.stat(path)
-    except (TypeError, OSError):
+    except OSError:
         return []
     return [stat.st_size, stat.st_mtime_ns]
 
@@ -983,6 +1022,7 @@ class InputHealth:
                 return t or (f"month {int(r['month'])}" if r["month"] else "")
 
             first, last = g.iloc[0], g.iloc[-1]
+            g, roundoff = self._without_roundoff(g, variable)
             neg, bad = g.loc[g["pct_neg"].idxmax()], g.loc[g["pct_bad"].idxmax()]
             n_fin = int(g["n_fin"].sum())
             mean = float(g["total"].sum()) / n_fin if n_fin else np.nan
@@ -1037,9 +1077,38 @@ class InputHealth:
             row["is_constant"] = bool(lo == hi and lo != 0 and not np.isnan(lo))
             row["n_repeats"] = int(self._repeats(g).sum())
             row["copy_of"] = str(g["copy_of"].iloc[0])
+            row["roundoff_steps"] = roundoff
             row["flags"] = self._flags(g, row)
             rows.append(row)
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _without_roundoff(g: pd.DataFrame, variable: str) -> tuple[pd.DataFrame, int]:
+        """Return ``g`` with rounding-only steps' bad counts cleared, and how many.
+
+        A step is rounding-only when nothing is above the upper bound and its minimum
+        is below the lower bound by no more than :data:`_ROUNDOFF` of the variable's
+        largest magnitude over the scan. Its share bad (and, for a bound of 0, its share
+        negative) is then 0; the minimum itself is still reported.
+        """
+        low, high = bounds(variable)
+        extremes = g[["min", "max"]].to_numpy(dtype=float)
+        if not np.isfinite(extremes).any():
+            return g, 0
+        tol = _ROUNDOFF * float(np.nanmax(np.abs(extremes)))
+        noise = (
+            (g["pct_bad"] > 0)
+            & (g["min"] < low)
+            & (g["min"] >= low - tol)
+            & ~(g["max"] > high)
+        )
+        if not noise.any():
+            return g, 0
+        g = g.copy()
+        g.loc[noise, "pct_bad"] = 0.0
+        if low == 0:
+            g.loc[noise, "pct_neg"] = 0.0
+        return g, int(noise.sum())
 
     @staticmethod
     def _repeats(g: pd.DataFrame) -> pd.Series:
@@ -1072,6 +1141,12 @@ class InputHealth:
             flags.append(f"copy of {row['copy_of']}")
         if row["n_repeats"]:
             flags.append(f"same as previous step x{row['n_repeats']}")
+        if row["roundoff_steps"]:
+            k = row["roundoff_steps"]
+            flags.append(
+                "rounding below bound not counted"
+                + ("" if k == n else f" ({k}/{n} steps)")
+            )
         return "; ".join(flags)
 
     # ---- problems ----------------------------------------------------------------
@@ -1206,7 +1281,11 @@ class InputHealth:
             name = self.sources[0]["name"]
             named = labels[0] if labels[0] == name else f"{labels[0]} ({name})"
             return f"Input integrity: {named}\n{span}"
-        return f"Input integrity: {len(labels)} sources\n" + ", ".join(labels)
+        # wrapped: four long source labels on one bold line ran past the page's width,
+        # and the report then scaled the whole table down to fit it
+        return f"Input integrity: {len(labels)} sources\n" + textwrap.fill(
+            ", ".join(labels), _TITLE_WRAP
+        )
 
     def _notes(self) -> list[str]:
         notes = [
@@ -1214,6 +1293,10 @@ class InputHealth:
             "is the share of ocean cells outside it at the worst step.",
             "Minimum and maximum: value, longitude and latitude, depth (or s-level), "
             "date. NaN/Inf: ocean cells at the worst step.",
+            (
+                "Values below a bound by under a millionth of the variable's largest "
+                "magnitude are rounding and not counted as bad."
+            ),
         ]
         bare = [s["label"] for s in self.sources if s["no_mask"]]
         if bare:

@@ -2502,6 +2502,31 @@ def _spell_field(name: str, value: Any) -> str:
     return str(value)
 
 
+def _name_differences(names: dict[int, str]) -> dict[int, str]:
+    """Return each source name cut to the ``_``-separated words the others don't share.
+
+    ``pacmed_bry_phys_south`` and ``pacmed_bry_phys_west`` become ``south`` and
+    ``west``: the words every name starts and ends with are dropped. A name left with
+    nothing (one is the others' prefix) is kept whole.
+    """
+    words = {i: n.split("_") for i, n in names.items()}
+    lists = list(words.values())
+    head = 0
+    while all(len(w) > head for w in lists) and len({w[head] for w in lists}) == 1:
+        head += 1
+    tail = 0
+    while (
+        all(len(w) > head + tail for w in lists)
+        and len({w[-1 - tail] for w in lists}) == 1
+    ):
+        tail += 1
+    out = {}
+    for i, w in words.items():
+        core = w[head : len(w) - tail]
+        out[i] = " ".join(core) if core else names[i]
+    return out
+
+
 def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
     """Return one label per pooled record, unique across the pool.
 
@@ -2526,12 +2551,22 @@ def _distinct_labels(records: list[dict[str, Any]]) -> list[str]:
             for f in _DISTINGUISHING_FIELDS
             if len({str(records[i].get(f)) for i in idx}) > 1
         ]
-        for i in idx:
-            parts = [
-                _spell_field(f, records[i][f])
-                for f in differ
+        spelled = {
+            f: {
+                i: _spell_field(f, records[i][f])
+                for i in idx
                 if records[i].get(f) is not None
-            ]
+            }
+            for f in differ
+        }
+        for f in ("test", "reference"):
+            # sources that share a catalog label (one boundary file's south and west
+            # sides, both "boundary file") are named by what tells their names apart
+            names = {i: str(records[i][f]) for i in spelled.get(f, {})}
+            if len(set(spelled.get(f, {}).values())) < len(set(names.values())):
+                spelled[f] = _name_differences(names)
+        for i in idx:
+            parts = [spelled[f][i] for f in differ if i in spelled[f]]
             # the variable reads first ("temperature surface mean"), the rest after
             named = "variable" in differ and records[i].get("variable") is not None
             lead = parts.pop(0) + " " if named else ""

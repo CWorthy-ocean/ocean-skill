@@ -584,6 +584,20 @@ def test_each_variable_is_cached_and_a_rewritten_file_misses(inputs, monkeypatch
         path.write_bytes(saved)
 
 
+def test_a_source_path_that_is_not_a_file_leaves_the_key(inputs, monkeypatch, tmp_path):
+    """A Dataset read through references says its source is ``"/"``.
+
+    The root directory's stamp differs between cluster nodes, so it must not reach the
+    key: every job on another node would miss.
+    """
+    src = input_integrity._open_source({"name": "surf"}, None, None)
+    assert input_integrity._file_stamp(src)  # a plain netCDF file: stamped
+    monkeypatch.setitem(src.ds.encoding, "source", str(tmp_path))
+    assert input_integrity._file_stamp(src) == []
+    monkeypatch.setitem(src.ds.encoding, "source", "/")
+    assert input_integrity._file_stamp(src) == []
+
+
 def test_a_cache_lookup_reads_only_small_windows_and_threads_are_capped(
     inputs, monkeypatch
 ):
@@ -663,3 +677,56 @@ def test_test_mode_is_said_on_the_figure_and_thins_the_steps(inputs):
     ((_, fig),) = result.figures("integrity")
     assert any("Test mode" in t.get_text() for t in fig.texts)
     assert osk.input_health is input_health
+
+
+# ----------------------------------------------------------------------------- speed
+
+
+def test_each_variable_is_cut_to_the_scanned_steps_once(inputs, monkeypatch):
+    """A block's compute must not cull the whole record's graph (1.8 s a block)."""
+    import dask
+
+    src = input_integrity._open_source({"name": "surf"}, "latest", None)
+    v = src.variables["Tair"]
+    calls = []
+    real = dask.optimize
+    monkeypatch.setattr(
+        dask, "optimize", lambda *a, **k: calls.append(1) or real(*a, **k)
+    )
+    data, start = input_integrity._array(src, v)
+    assert start == src.positions[0] and data.shape[0] == 1
+    p = src.positions[0]
+    block = input_integrity._read(src, v, slice(p, p + 1), None)
+    input_integrity._read(src, v, slice(p, p + 1), None)
+    assert len(calls) == 1  # cut once, however many blocks are read
+    expected = src.ds[v.std].isel({src.tdim: [p]}).transpose(src.tdim, ...).values
+    np.testing.assert_array_equal(block, expected)
+
+
+# ----------------------------------------------------------------------- rounding
+
+
+def test_rounding_just_below_a_bound_is_not_counted():
+    g = pd.DataFrame(
+        {
+            "min": [-4e-5, 10.0, -50.0],
+            "max": [1180.0, 900.0, 1000.0],
+            "pct_bad": [87.0, 0.0, 3.0],
+            "pct_neg": [87.0, 0.0, 3.0],
+        }
+    )
+    out, k = InputHealth._without_roundoff(g, "swrad")
+    assert k == 1
+    assert out["pct_bad"].tolist() == [0.0, 0.0, 3.0]  # -50 W/m2 is a real fault
+    assert out["pct_neg"].tolist() == [0.0, 0.0, 3.0]
+    assert g["pct_bad"].iloc[0] == 87.0  # the steps passed in are left alone
+    # a step that is also above the upper bound keeps its count: it is not only rounding
+    too_high = g.assign(max=[2000.0, 900.0, 1000.0])
+    assert InputHealth._without_roundoff(too_high, "swrad")[1] == 0
+
+
+def test_a_rounding_step_is_flagged_and_a_planted_negative_still_counts(inputs):
+    table = input_health("surf").table().set_index("variable")
+    # the fixture's rain cell at -1e-3 is ten times the field's largest value: a fault
+    assert table.loc["rain", "worst_pct_bad"] > 0
+    assert "rounding" not in table.loc["rain", "flags"]
