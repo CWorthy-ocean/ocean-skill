@@ -272,6 +272,17 @@ _LABEL_RADII = (6.0, 13.0, 22.0, 34.0)
 _COMPASS = ((1, 1), (1, -1), (-1, 1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1))
 
 
+def _map_lon(lon, central: float):
+    """Return ``lon`` in the convention of a map centred on ``central`` (0 or 180).
+
+    The marks have to be in the axes' own range, not only the scatter: cartopy wraps a
+    scatter's points, but the label placer measures raw data coordinates, and a 0-360
+    longitude on a map centred on 0 put every CCS label past the axes' edge.
+    """
+    lon = np.asarray(lon, dtype=float)
+    return np.mod(lon, 360.0) if central else (lon + 180.0) % 360.0 - 180.0
+
+
 def _label_marks(ax, marks) -> list:
     """Annotate each ``(text, x, y, color)`` mark of ``ax`` so no two labels collide.
 
@@ -965,9 +976,7 @@ class RiverInputs:
         ]
         ring_lon = np.concatenate([e[0] for e in edge])
         ring_lat = np.concatenate([e[1] for e in edge])
-        ring_lon = (
-            np.mod(ring_lon, 360.0) if central else (ring_lon + 180.0) % 360.0 - 180.0
-        )
+        ring_lon = _map_lon(ring_lon, central)
         ax.plot(
             ring_lon - shift,
             ring_lat,
@@ -977,7 +986,7 @@ class RiverInputs:
             transform=proj,
             zorder=4,
         )
-        mouth_lon = np.mod(self.lon, 360.0) if central else self.lon
+        mouth_lon = _map_lon(self.lon, central)
         good = cls["mask_active"]
         order = np.flatnonzero(good)[np.argsort(q[good], kind="stable")]  # large on top
         if order.size:
@@ -1118,7 +1127,7 @@ class RiverInputs:
                 tags.setdefault((float(x), float(y)), []).append(tag)
         if extremes:
             ex = np.array([d["lon"] for d in extremes])
-            ex = (np.mod(ex, 360.0) if central else ex) - shift
+            ex = _map_lon(ex, central) - shift
             ey = np.array([d["lat"] for d in extremes])
             ax.scatter(
                 ex,

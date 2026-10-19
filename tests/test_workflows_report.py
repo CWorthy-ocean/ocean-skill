@@ -285,6 +285,21 @@ def test_a_figure_too_tall_to_fit_under_its_divider_leaves_it_a_page_of_its_own(
     assert _pagecount_by_bytes(tmp_path / "report.pdf") == 2
 
 
+def test_a_text_table_is_never_shrunk_under_its_divider(tmp_path):
+    """A table that fits only shrunk goes on the page after its divider's, full size."""
+    from ocean_skill.plot.typography import TABLE_FIGURE
+
+    fig = _full_bleed_figure((5.0, 9.8))
+    fig.set_label(TABLE_FIGURE)
+    with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
+        log = _log_pdf_writes(report)
+        report.section(1, "Part one", _LONG_NOTES)
+        report.emit(fig, "table")
+
+    assert log == ["divider:Part one", "figure"]
+    assert _pagecount_by_bytes(tmp_path / "report.pdf") == 2
+
+
 def test_a_section_is_pdf_only_and_never_shifts_the_png_numbering(tmp_path):
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.section(1, "Part one", "Notes")

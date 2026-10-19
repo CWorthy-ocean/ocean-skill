@@ -372,6 +372,25 @@ def test_a_depth_band_and_a_time_window_are_spelled_not_printed_as_dicts():
     assert not any("{" in label for label in labels)
 
 
+def test_sources_sharing_a_catalog_label_are_named_by_what_differs(monkeypatch):
+    """Two sides of one boundary file, both "boundary file", read south and west."""
+    from ocean_skill import catalog
+
+    monkeypatch.setattr(catalog, "source_label", lambda name: "boundary file")
+    records = [
+        {
+            "label": "temperature · boundary file",
+            "test": f"pacmed_bry_phys_{side}",
+            "reference": "woa23_temperature_month01",
+        }
+        for side in ("south", "west")
+    ]
+    assert P._distinct_labels(records) == [
+        "temperature · boundary file · south",
+        "temperature · boundary file · west",
+    ]
+
+
 def test_records_alike_in_every_field_are_numbered():
     records = [{"variable": "mld"}, {"variable": "mld"}]
     assert P._distinct_labels(records) == [

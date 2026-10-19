@@ -72,7 +72,13 @@ from typing import Any
 
 import matplotlib
 
-from ocean_skill.plot.typography import PAGE_H, PAGE_W, STEP, reference_scale
+from ocean_skill.plot.typography import (
+    PAGE_H,
+    PAGE_W,
+    STEP,
+    TABLE_FIGURE,
+    reference_scale,
+)
 
 __all__ = [
     "JPEG_QFACTOR",
@@ -569,6 +575,9 @@ class _Item:
     #: could enlarge it by, kept only for a figure that may be enlarged (see
     #: :func:`_fill_scale`); ``None`` otherwise.
     hires: bytes | None = None
+    #: Whether it is a text table (:data:`~ocean_skill.plot.typography.TABLE_FIGURE`),
+    #: which is never scaled down to fit under a header.
+    table: bool = False
 
     @property
     def need(self) -> float:
@@ -793,6 +802,7 @@ class PdfReport:
             caption=_wrap_lines(caption, CAPTION_WRAP) if caption else [],
             tight=tight,
             fig=fig,
+            table=fig.get_label() == TABLE_FIGURE,
         )
         # Too tall for an empty page, its caption counted: alone, on a page grown to it.
         item.oversize = item.need > PAGE_H - _top_margin() - PAGE_BOTTOM
@@ -848,8 +858,11 @@ class PdfReport:
         The figure and its caption must fit in ``avail`` (the caption is not scaled).
         That is done when it keeps the figure at :data:`MIN_FIT_SCALE` or more of its
         natural size; otherwise nothing changes and the divider gets a page to itself.
-        A figure so shrunk is no longer oversize: it is packed, centred, below it.
+        A figure so shrunk is no longer oversize: it is packed, centred, below it. A
+        text table is never shrunk: at 0.6 its smallest type would be ~4 pt.
         """
+        if item.table:
+            return
         # a hair under, so float rounding never tips a just-fitting figure over the edge
         scale = (avail - _caption_height(item.caption)) / item.nat_h * (1 - 1e-9)
         if scale >= MIN_FIT_SCALE:

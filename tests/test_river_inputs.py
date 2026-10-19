@@ -668,6 +668,25 @@ def test_map_labels_stay_inside_the_axes_and_apart(inputs):
     assert clashes <= 2  # the synthetic mouths are a dense grid
 
 
+def test_map_labels_stay_inside_a_map_centred_on_0_with_0_360_mouths(
+    inputs, monkeypatch
+):
+    """CCS: grid in -180..180, mouths in 0..360; the labels went past the axes."""
+    monkeypatch.setattr(
+        inputs, "_grid_lon", (inputs._grid_lon - 300.0 + 180.0) % 360.0 - 180.0
+    )
+    monkeypatch.setattr(inputs, "lon", np.mod(inputs.lon - 300.0, 360.0))
+    ((_, fig),) = inputs.figures("map")
+    ax = next(a for a in fig.axes if a.collections and a.texts)
+    x0, x1 = ax.get_xlim()
+    texts = [t for t in ax.texts if t.get_text()]
+    assert len(texts) >= 12
+    # each label points at its mark in the axes' own longitudes (the placer measures
+    # these; at 0..360 it pushed every label off the map's left edge)
+    for t in texts:
+        assert x0 <= t.xy[0] <= x1, (t.get_text(), t.xy)
+
+
 def test_labels_are_placed_around_marks_at_the_axes_corners():
     import matplotlib.pyplot as plt
 

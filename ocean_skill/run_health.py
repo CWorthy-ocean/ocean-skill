@@ -2391,10 +2391,14 @@ def _draw_grid(
     """Draw ``cells`` as a grid, the top-left corner at ``(left, top)`` inches.
 
     The first row is the header (gray, bold); the others alternate white and light
-    gray. ``centered`` columns center their text, the others align left.
+    gray. ``centered`` columns center their text, the others align left. ``fig`` is
+    labelled a text table (:data:`~ocean_skill.plot.typography.TABLE_FIGURE`).
     """
     from matplotlib.patches import Rectangle
 
+    from ocean_skill.plot.typography import TABLE_FIGURE
+
+    fig.set_label(TABLE_FIGURE)
     w, h = fig.get_size_inches()
     y = top
     for i, (row, height) in enumerate(zip(cells, heights, strict=True)):

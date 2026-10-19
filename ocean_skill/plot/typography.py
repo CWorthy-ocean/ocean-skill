@@ -166,6 +166,10 @@ FONT_STEPS: dict[str, tuple[str, int]] = {
 PAGE_W = 8.5
 PAGE_H = 11.0
 
+#: The label (``Figure.set_label``) of a text table: a report never scales one down to
+#: pack it under a section divider, since its type is already as small as it reads.
+TABLE_FIGURE = "ocean-skill:table"
+
 
 @dataclass(frozen=True)
 class Canvas:
