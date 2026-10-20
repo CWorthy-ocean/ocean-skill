@@ -553,6 +553,23 @@ def test_pacmed_like_grid_gets_the_equator_and_a_central_meridian(tmp_path):
     assert list(found) == ["Equator (77E-44W)", "163W (40S-60N)"]
 
 
+def test_a_default_line_keeps_the_longest_stretch_of_ocean(tmp_path):
+    """The PACMED equator: Halmahera to Ecuador, not from Sumatra through Borneo."""
+
+    def mask(lon, lat):
+        land = (lon >= 105) & (lon <= 127)  # Sumatra..Halmahera, 22 degrees wide
+        land |= (lon >= 270.5) & (lon <= 271.5)  # a small island (the Galapagos)
+        land |= lon >= 280  # South America
+        return np.where(land, 0.0, 1.0)
+
+    grid = _regular(
+        tmp_path, np.arange(77.0, 316.01, 0.5), np.arange(-40, 60.1, 0.5), mask
+    )
+    zonal, _ = _lines(new.default_transects(grid))
+    assert zonal["lat"] == 0
+    assert zonal["lon"] == {"min": 127.5, "max": 279.5}  # the island is crossed
+
+
 def test_zonal_line_uses_the_median_latitude_away_from_the_equator(tmp_path):
     grid = _regular(
         tmp_path, np.arange(-130.0, -119.9, 0.5), np.arange(30.0, 40.1, 0.5)
