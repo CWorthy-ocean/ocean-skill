@@ -910,6 +910,30 @@ def test_a_lat_line_over_a_straddling_domain_gets_bounds_from_the_harmonized_bbo
     assert lon.max() <= 250.0 + 1.0
 
 
+def test_a_lat_line_wider_than_180_degrees_runs_east_not_the_short_way_round():
+    """The PACMED equator, 95E to 80W: 185 degrees east, not 175 degrees west."""
+    from ocean_skill.transect import apply_transect
+
+    ny, nx = 12, 120
+    lon = np.linspace(77.0, 316.0, nx)[None, :] * np.ones((ny, 1))
+    lat = np.linspace(-10.0, 10.0, ny)[:, None] * np.ones((1, nx))
+    field = xr.DataArray(
+        np.ones((ny, nx)),
+        dims=("eta", "xi"),
+        coords={"lon": (("eta", "xi"), lon), "lat": (("eta", "xi"), lat)},
+    )
+    out = apply_transect(
+        field.to_dataset(name="v"),
+        {"lat": 0.0, "lon": {"min": 95.0, "max": 279.9}},
+        subject="test",
+    )
+    sampled = np.asarray(out["lon"]) % 360.0
+    assert sampled.min() >= 95.0 - 2.5 and sampled.max() <= 279.9 + 2.5
+    # it covers the whole Pacific, not 0-95E and 280-360E
+    assert np.any(np.abs(sampled - 180.0) < 2.5)
+    assert np.all(np.diff(np.asarray(out["along"])) > 0)
+
+
 def test_a_fixed_lon_line_trims_to_a_rotated_domain_with_one_warning():
     from ocean_skill.transect import apply_transect
 

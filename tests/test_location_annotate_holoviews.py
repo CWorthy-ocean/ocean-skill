@@ -176,7 +176,7 @@ def test_labels_sit_on_their_shapes_plain_frame():
     xy = _label_xy(_hv(PLAIN, PLAIN_ITEMS, legend="annotate"))
     assert xy["SG"] == (-92.0, -3.0)
     assert xy["BOX"] == (-92.0, 5.0)
-    assert xy["Eq"] == (-85.0, 0.0)
+    assert xy["Eq"] == (-87.5, 0.0)  # three quarters of the way along -95 -> -85
 
 
 def test_labels_sit_on_their_shapes_180_centred_frame():
@@ -190,10 +190,9 @@ def test_labels_sit_on_their_shapes_180_centred_frame():
     x0 = rects.dimension_values(0)
     x1 = rects.dimension_values(2)
     assert min(x0) <= xy["Band"][0] <= max(x1)  # on the band, not across the map
-    # the line ends at the last vertex of its last piece, 210E -> 30
-    (path,) = _of(overlay, "Path")
-    last = path.split()[-1]
-    assert xy["Eq"] == (last.dimension_values(0)[-1], last.dimension_values(1)[-1])
+    # three quarters of the way along 160E -> 210E, across the seam: 197.5E -> 17.5
+    assert xy["Eq"][0] == pytest.approx(17.5)
+    assert xy["Eq"][1] == pytest.approx(0.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         import holoviews as hv

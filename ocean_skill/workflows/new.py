@@ -25,6 +25,7 @@ import re
 import sys
 import warnings
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -193,6 +194,33 @@ def _lat_label(lat: float) -> str:
     return f"{abs(deg)}{'S' if deg < 0 else 'N'}"
 
 
+#: A stretch of land this many degrees wide or more along a default section line ends
+#: it: the line keeps the longest unbroken run of ocean (the Pacific equator from
+#: Halmahera to Ecuador, not through Sumatra and Borneo), while a smaller island
+#: (the Galapagos) is crossed.
+LAND_GAP = 2.0
+
+
+def _longest_run(along: Any, gap: float) -> Any:
+    """Return the indices into ``along`` of its longest run without a ``gap`` jump.
+
+    ``along`` is each ocean cell's position along the line (degrees, or cell index
+    scaled to degrees); sorted, it is cut wherever the land between two neighbors
+    (their distance less the typical step between ocean cells) is ``gap`` or more and
+    the distance is over twice that step, so a grid coarser than ``gap`` is not cut at
+    every cell. The run spanning the most is kept.
+    """
+    import numpy as np
+
+    order = np.argsort(along)
+    steps = np.diff(along[order])
+    distinct = np.diff(np.unique(along))  # several cells of a band share a position
+    step = float(np.median(distinct)) if distinct.size else 0.0
+    cuts = np.flatnonzero((steps - step >= gap) & (steps > 2.0 * step)) + 1
+    runs = np.split(order, cuts)
+    return max(runs, key=lambda r: along[r].max() - along[r].min())
+
+
 def default_transects(grid: Path) -> dict[str, dict]:
     """Return the two default section lines of ``grid``, ``{label: {"transect": ...}}``.
 
@@ -272,6 +300,7 @@ def _default_transects(grid: Path) -> tuple[dict[str, dict], float]:
     # the median line can fall between ocean patches: then span all the ocean
     lons = lon[on_lat] if on_lat.any() else lon[ocean]
     lats = lat[on_lon] if on_lon.any() else lat[ocean]
+    lons, lats = (v[_longest_run(v, LAND_GAP)] for v in (lons, lats))
     (x0, x1), (y0, y1) = (
         _outward(lons.min(), lons.max()),
         _outward(lats.min(), lats.max()),
@@ -290,9 +319,10 @@ def _default_transects(grid: Path) -> tuple[dict[str, dict], float]:
 def _grid_lines(lon, lat, ocean) -> dict[str, dict]:
     """Return waypoint lines along the middle row and column of a rotated grid.
 
-    Each runs from the first to the last ocean cell of the row (``eta_rho``) or column
-    (``xi_rho``) nearest the middle that has any, its endpoints the cells' lon/lat to
-    0.01 degree, ordered west to east for the row and south to north for the column.
+    Each runs over the longest unbroken stretch of ocean (no :data:`LAND_GAP` of land)
+    of the row (``eta_rho``) or column (``xi_rho``) nearest the middle that has any,
+    its endpoints the cells' lon/lat to 0.01 degree, ordered west to east for the row
+    and south to north for the column.
     """
     import numpy as np
 
@@ -301,7 +331,10 @@ def _grid_lines(lon, lat, ocean) -> dict[str, dict]:
         return int(have[np.argmin(np.abs(have - len(wet) // 2))])
 
     def ends(cells: np.ndarray, x: np.ndarray, y: np.ndarray, by) -> list[list[float]]:
-        idx = np.flatnonzero(cells)
+        # cell index scaled to degrees by the line's median cell width
+        step = np.hypot(np.diff(x) * np.cos(np.radians(y[:-1])), np.diff(y))
+        wet = np.flatnonzero(cells)
+        idx = wet[np.sort(_longest_run(wet * float(np.median(step)), LAND_GAP))]
         pts = [
             [round(float(x[i]), 2), round(float(y[i]), 2)] for i in (idx[0], idx[-1])
         ]

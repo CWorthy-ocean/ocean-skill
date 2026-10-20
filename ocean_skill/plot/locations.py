@@ -26,6 +26,7 @@ seam, so one code path serves both renderers.
 
 from __future__ import annotations
 
+import itertools
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -295,6 +296,39 @@ def _extent_anchor(item: dict[str, Any]) -> tuple[float, float] | None:
     return lon, float(max(b[3] for b in boxes))
 
 
+#: How far along a selection line (0 = its first vertex, 1 = its last) its
+#: ``legend="annotate"`` label sits: inside the map rather than at an end, where a
+#: line reaching the frame pushed its name out of it, and off the middle, where two
+#: crossing lines would put their names on top of each other.
+LINE_LABEL_AT = 0.75
+
+
+def _along(paths: list[np.ndarray], fraction: float) -> tuple[float, float]:
+    """Return the lon/lat ``fraction`` of the way along ``paths``, pieces in order.
+
+    Length is measured in degrees with longitude scaled by cos(latitude), within each
+    piece only: the hop between two seam-split pieces (180 to -180) is no distance.
+    """
+    segments = []
+    for piece in paths:
+        xy = np.asarray(piece, dtype=float)
+        for a, b in itertools.pairwise(xy):
+            dx = (b[0] - a[0]) * np.cos(np.radians(0.5 * (a[1] + b[1])))
+            segments.append((a, b, float(np.hypot(dx, b[1] - a[1]))))
+    total = sum(s[2] for s in segments)
+    if total == 0:
+        lon, lat = np.asarray(paths[-1], dtype=float)[-1]
+        return float(lon), float(lat)
+    goal = fraction * total
+    for a, b, length in segments:
+        if goal <= length and length > 0:
+            lon, lat = a + (b - a) * (goal / length)
+            return float(lon), float(lat)
+        goal -= length
+    lon, lat = segments[-1][1]
+    return float(lon), float(lat)
+
+
 def _anchor_for(item: dict[str, Any]) -> dict[str, Any] | None:
     """Where and how one shape's label sits, or ``None`` for a kind not labelled."""
     kind = item["kind"]
@@ -323,11 +357,11 @@ def _anchor_for(item: dict[str, Any]) -> dict[str, Any] | None:
         paths = [p for p in item.get("paths") or [] if len(p)]
         if not paths:
             return None
-        lon, lat = paths[-1][-1]
+        lon, lat = _along(paths, LINE_LABEL_AT)
         return {
-            "lon": float(lon),
-            "lat": float(lat),
-            "ha": "right",
+            "lon": lon,
+            "lat": lat,
+            "ha": "center",
             "va": "bottom",
             "dx": 0,
             "dy": 1,
@@ -354,9 +388,10 @@ def annotation_anchors(
     does not change with map scale. Placement: a **point** just east of the marker
     (``left``/``center``); an **extent** centred over its top edge (``center``/
     ``bottom``; a seam-split box takes the true midpoint across ±180); a **line**
-    (selection transect or slice) at the last vertex of its last path, above it
-    (``right``/``bottom``). A ring (or any other kind) is skipped for the group's next
-    item; a group with nothing placeable stays in the key.
+    (selection transect or slice) :data:`LINE_LABEL_AT` of the way along its paths,
+    centred above that point (``center``/``bottom``). A ring (or any other kind) is
+    skipped for the group's next item; a group with nothing placeable stays in the
+    key.
 
     ``unlabelled_groups`` is every other :func:`legend_groups` tuple, unchanged and in
     order: catalog featureTypes, the shared unlabelled ``"selection"`` group, and

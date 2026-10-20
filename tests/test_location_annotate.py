@@ -89,11 +89,14 @@ def test_anchor_geometry_point_box_line():
         0,
         1,
     )
-    # last vertex of the LAST path
-    assert (eq["lon"], eq["lat"], eq["ha"], eq["va"], eq["dx"], eq["dy"]) == (
-        3.0,
-        4.0,
-        "right",
+    # three quarters of the way along the paths (10 degrees, then ~2.8 more), centred
+    # above: inside the map, not at an end where a line reaching the frame pushed its
+    # name out of it
+    total = 10.0 + np.hypot(2.0 * np.cos(np.radians(3.0)), 2.0)
+    assert eq["lon"] == pytest.approx(-95.0 + 0.75 * total)
+    assert (eq["lat"], eq["ha"], eq["va"], eq["dx"], eq["dy"]) == (
+        0.0,
+        "center",
         "bottom",
         0,
         1,

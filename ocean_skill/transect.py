@@ -1333,7 +1333,13 @@ def _bilinear_dataset(cropped, lon_name: str, lat_name: str, lons, lats):
 
 
 def _line_endpoints(obj, parsed: dict[str, Any]) -> list[list[float]]:
-    """Return the two endpoint waypoints for a fixed-``lon``/``lat``-line transect.
+    """Return the waypoints of a fixed-``lon``/``lat``-line transect: its two ends.
+
+    A zonal line spanning more than 180 degrees of longitude also gets evenly spaced
+    waypoints between its ends, so no leg is 180 degrees or more:
+    :func:`densify_waypoints` unwraps each leg the short way round, which would
+    otherwise send the Pacific equator (95E to 80W, 185 degrees east) 175 degrees
+    west, through Africa.
 
     Missing bounds are filled from ``obj``'s own bounding box
     (:func:`ocean_skill.align.bbox_of`) -- ``obj`` must already be harmonized to
@@ -1363,7 +1369,10 @@ def _line_endpoints(obj, parsed: dict[str, Any]) -> list[list[float]]:
         # not resolve that way
         wrapped_lo, wrapped_hi = lo % 360.0, hi % 360.0
         lo, hi = (wrapped_lo, wrapped_hi) if wrapped_lo <= wrapped_hi else (hi, lo)
-    return [[lo, lat], [hi, lat]]
+    if hi - lo < 180.0:
+        return [[lo, lat], [hi, lat]]
+    legs = int(np.ceil((hi - lo) / 90.0))
+    return [[float(x), lat] for x in np.linspace(lo, hi, legs + 1)]
 
 
 def apply_transect(obj, spec: dict[str, Any], *, subject: str = "the source"):
