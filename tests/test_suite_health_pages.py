@@ -21,8 +21,8 @@ import yaml
 
 from ocean_skill import build
 from ocean_skill.config import HEALTH_DRAWS, INPUT_DRAWS, RIVER_DRAWS, SuiteConfig
-from ocean_skill.workflows import cover
-from ocean_skill.workflows import pages as P
+from ocean_skill.suites import cover
+from ocean_skill.suites import pages as P
 
 INDEX = pd.date_range("2010-01-05", periods=10, freq="7D")  # Jan 5 .. Mar 9, 2010
 
@@ -438,7 +438,7 @@ def test_segment_starts_never_raises(tmp_path):
 def test_the_river_refresh_kind_dispatches_to_add_river_source(
     tmp_path, monkeypatch
 ):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     calls = []
 

@@ -17,13 +17,13 @@ cleared first, and anything else a user keeps there is left alone. ``timestamped
 true`` writes a new directory per run instead (see :func:`_report_dir_name`).
 
 ``report.pdf``'s first page is a cover describing the simulation
-(:mod:`ocean_skill.workflows.cover`), also recorded as the manifest's ``run_info`` with
+(:mod:`ocean_skill.suites.cover`), also recorded as the manifest's ``run_info`` with
 copies of the C-Star blueprint and workplan under ``run_info/``. Like a ``section:``
 page it is not a figure: PDF-only, unnumbered, and dropped if nothing draws.
 
 A ``section:`` page is not a figure and so is not counted as one: it appears only in
 ``report.pdf`` (and only if some page after it drew -- see
-:meth:`~ocean_skill.workflows.report.PdfReport.section`), and
+:meth:`~ocean_skill.suites.report.PdfReport.section`), and
 :attr:`SuiteResult.exit_code` and ``main``'s "N page(s) drawn" count both ignore it.
 
 A suite whose ``refresh:`` block rebuilds a live run's kerchunk reference gets a copy
@@ -193,7 +193,7 @@ def _reopen_catalog(catalog_path: Path):
                 f"  refresh: could not reopen existing {catalog_path} ({exc}); "
                 "starting a fresh catalog"
             )
-    return new_catalog(title="refreshed by ocean_skill.workflows.run")
+    return new_catalog(title="refreshed by ocean_skill.suites.run")
 
 
 def _refresh_sources(spec: list[dict[str, Any]], catalog_path: str | Path) -> None:
@@ -799,7 +799,7 @@ def _write_manifest(
         # ordinary full run
         "modes": modes,
         "problems": [asdict(p) for p in problems or []],
-        # The cover page's content (see ocean_skill.workflows.cover.RunInfo.as_dict).
+        # The cover page's content (see ocean_skill.suites.cover.RunInfo.as_dict).
         "run_info": run_info,
         # What the suite asked of report.pdf's rasters, and whether the Ghostscript
         # pass actually ran (False for "lossless", pdf: false, no PDF, or a fallback).
@@ -857,7 +857,7 @@ def _resolve_cache_dir(entry: str | None, suite_path: Path) -> Path | None:
 
 def _self_check_pages(expanded: list[Any]) -> tuple[list[Any], set[int]]:
     """Swap every ``compare:`` page for its self-check copy; also return their ids."""
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     out, checked = [], set()
     for page in expanded:
@@ -876,7 +876,7 @@ def _page_problems(
     page: Any, strict_hits: list[str], self_checked: bool
 ) -> list[tuple[str, str]]:
     """Return the ``(kind, reason)`` problems of a page that drew."""
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     found = []
     if page.dropped:
@@ -968,7 +968,7 @@ def _smoke_expand(suite: Any, only: list[str]) -> list[Any] | None:
     """
     import io
 
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     try:
         with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
@@ -991,7 +991,7 @@ def _smoke_pins(suite: Any, only: list[str]) -> Any:
     will not expand keeps only its first and last steps.
     """
     from ocean_skill import sources as _sources
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     expanded = _smoke_expand(suite, only)
     return _sources.TimePins() if expanded is None else _pages.time_pins(expanded)
@@ -1209,7 +1209,7 @@ def run_suite(
         (``thin_dates``; the pins are collected after that, so fewer steps are kept);
         every truncated model source is read on every ``smoke_stride``-th horizontal
         cell (:func:`ocean_skill.sources.truncate_time`); and figures are saved at no
-        more than :data:`~ocean_skill.workflows.report.SMOKE_DPI` dpi. The strided
+        more than :data:`~ocean_skill.suites.report.SMOKE_DPI` dpi. The strided
         values are physically inconsistent (staggering, cell areas) -- it is a test of
         the code paths, not of the numbers. The stride is part of the smoke-cache hash.
     ``smoke_stride``
@@ -1217,7 +1217,7 @@ def run_suite(
         grid whole). Ignored without ``smoke``.
     ``self_check``
         Every ``compare:`` page is redrawn with the reference replaced by the test
-        source (:func:`ocean_skill.workflows.pages.self_check_page`) and any bias, error
+        source (:func:`ocean_skill.suites.pages.self_check_page`) and any bias, error
         or correlation shortfall between those identical lanes is a problem. Report in
         ``<name>-selfcheck/``.
     ``only``
@@ -1240,7 +1240,7 @@ def run_suite(
 
     from ocean_skill import catalog, extrema, outputs
     from ocean_skill.config import SuiteConfig
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     path = Path(path).expanduser()
     raw = yaml.safe_load(path.read_text())
@@ -1321,7 +1321,7 @@ def run_suite(
         if smoke is not None:
             from ocean_skill import cache as _smoke_cache
             from ocean_skill import sources as _sources
-            from ocean_skill.workflows.report import SMOKE_DPI
+            from ocean_skill.suites.report import SMOKE_DPI
 
             test = suite.defaults.get("test")
             smoke_sources = (
@@ -1477,7 +1477,7 @@ def run_suite(
         cap.attach(report_dir / "run.log")
         (report_dir / "suite.yaml").write_text(path.read_text())
 
-        from ocean_skill.workflows import cover
+        from ocean_skill.suites import cover
 
         # gather() only warns over missing or garbled C-Star files; this guard is for a
         # bug in it, which must not cost a long suite run its report.
@@ -1528,7 +1528,7 @@ def run_suite(
             "objects": {},
         }
 
-        from ocean_skill.workflows.report import PDF_DPI, PNG_DPI, SMOKE_DPI, PdfReport
+        from ocean_skill.suites.report import PDF_DPI, PNG_DPI, SMOKE_DPI, PdfReport
 
         # test mode caps the figures' resolution: drawing, saving and the PDF's
         # rasterized maps all scale with it
@@ -1663,7 +1663,7 @@ def run_suite(
 
         pdf_images_applied = False
         if suite.pdf_images == "jpeg" and pdf_path is not None and pdf_path.exists():
-            from ocean_skill.workflows.report import compress_pdf_images
+            from ocean_skill.suites.report import compress_pdf_images
 
             sizes = compress_pdf_images(pdf_path)
             if sizes is not None:

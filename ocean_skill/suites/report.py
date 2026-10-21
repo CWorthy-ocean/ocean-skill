@@ -134,7 +134,7 @@ HEADER_NOTES_GAP = 0.1
 HEADER_BOTTOM_GAP = 0.3
 
 #: PNGs carry the detail a suite's now-ignored ``zoom=`` used to buy (see
-#: ocean_skill.workflows.pages._pin_to_page): a plain dpi bump costs nothing extra
+#: ocean_skill.suites.pages._pin_to_page): a plain dpi bump costs nothing extra
 #: since the PDF copy is rasterized/downsampled separately at its own dpi.
 PNG_DPI = 200
 PDF_DPI = 150
@@ -240,7 +240,7 @@ def _tight_bbox(fig: Any, stem: str) -> Any:
     are drawn against that canvas by default -- see :mod:`ocean_skill.plot.typography`)
     is placed on an exact letter page by :func:`_page_bbox`; one that does not -- an
     explicit ``figsize=`` wider or taller than the page slipped past
-    :func:`ocean_skill.workflows.pages._pin_to_page` -- gets a page grown just enough to
+    :func:`ocean_skill.suites.pages._pin_to_page` -- gets a page grown just enough to
     hold it, with this warning, rather than a clipped page.
     """
     from ocean_skill.plot.matplotlib_renderer import _measure

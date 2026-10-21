@@ -22,8 +22,8 @@
 # Before you run it:
 #   (a) The chlorophyll page reads Copernicus Marine, so log in once first:
 #           copernicusmarine login
-#       WOA23 files are downloaded from NCEI the first time they are read, so that run
-#       needs network access.
+#       A catalog entry that points at a URL rather than a local file downloads it the
+#       first time it is read, so that run needs network access.
 #   (b) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH. Without it the run warns
 #       and leaves the PDF lossless.
 #

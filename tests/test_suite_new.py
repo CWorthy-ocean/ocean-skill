@@ -18,7 +18,7 @@ import xarray as xr
 import yaml
 
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import new
+from ocean_skill.suites import new
 
 RST = "output_rst.{}.nc"
 
@@ -318,7 +318,7 @@ def test_input_check_picks_the_task_whose_restarts_start_first(tmp_path):
 
 
 def test_input_check_pages_expand_one_per_open_side(tmp_path):
-    from ocean_skill.workflows import pages
+    from ocean_skill.suites import pages
 
     rc, out = _new(tmp_path, inputs(tmp_path, False), template="input-check")
     assert rc == 0
@@ -377,7 +377,7 @@ def _entries(out: Path) -> dict:
 
 
 def _expanded(out: Path):
-    from ocean_skill.workflows import pages
+    from ocean_skill.suites import pages
 
     suite = SuiteConfig.model_validate(yaml.safe_load(out.read_text()))
     return suite, pages.expand(suite)

@@ -1,4 +1,4 @@
-"""Tests for :mod:`ocean_skill.workflows.report`: assembling PNGs (+ a PDF)."""
+"""Tests for :mod:`ocean_skill.suites.report`: assembling PNGs (+ a PDF)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from ocean_skill.workflows import report as _report
-from ocean_skill.workflows.report import (
+from ocean_skill.suites import report as _report
+from ocean_skill.suites.report import (
     PAGE_H,
     PAGE_W,
     PNG_DPI,
@@ -51,7 +51,7 @@ def _full_bleed_figure(figsize):
 
 
 #: Twelve lines of notes: a divider header so tall that a 9.8in figure would have to
-#: shrink below :data:`~ocean_skill.workflows.report.MIN_FIT_SCALE` to fit under it.
+#: shrink below :data:`~ocean_skill.suites.report.MIN_FIT_SCALE` to fit under it.
 _LONG_NOTES = "\n".join(["A line of notes."] * 12)
 
 

@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 
 import ocean_skill as osk
 from ocean_skill.comparison import _flatten
-from ocean_skill.workflows.pages import MetricRecord
+from ocean_skill.suites.pages import MetricRecord
 
 
 def _row(variable, depth, corr, bias):

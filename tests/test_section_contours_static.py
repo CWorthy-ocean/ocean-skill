@@ -663,7 +663,7 @@ def test_the_new_options_are_accepted_by_every_section_signature():
 
 
 def test_the_report_rasterization_leaves_the_labels_alone(tmp_path: Path):
-    from ocean_skill.workflows.report import _rasterize
+    from ocean_skill.suites.report import _rasterize
 
     fig = _draw(
         "section",

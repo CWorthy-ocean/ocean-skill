@@ -1,19 +1,19 @@
-"""Every suite YAML shipped in the repository still loads and expands.
+"""Every suite template the package ships still loads and expands.
 
 A suite is data, and nothing else exercises the real files: the other workflow tests
-build their suites inline. This parametrizes over ``suites/*.yaml`` and the three
-shipped suites under ``ocean_skill/workflows/templates/`` (found from this file's own
-location, so it works from any working directory) and, for each, does
-exactly what :func:`ocean_skill.workflows.run.run_suite` does before it touches any
-data -- ``yaml.safe_load`` then ``SuiteConfig.model_validate`` (schema errors, e.g. a
+build their suites inline. This parametrizes over the four shipped suites under
+``ocean_skill/suites/templates/`` (found from this file's own location, so it works
+from any working directory) and, for each, does exactly what
+:func:`ocean_skill.suites.run.run_suite` does before it touches any data --
+``yaml.safe_load`` then ``SuiteConfig.model_validate`` (schema errors, e.g. a
 ``section:`` carrying a ``plot:``, surface here) -- followed by
-:func:`ocean_skill.workflows.pages.expand` (unresolvable placeholders, a ``then:``
+:func:`ocean_skill.suites.pages.expand` (unresolvable placeholders, a ``then:``
 chain out of order, a depth on a surface-only variable, ...).
 
 No refresh, no catalog registration, no cache, no network. ``expand`` reads only one
 thing: the test source's native time axis (``extrema._native_time_index``), used to
 resolve ``time: latest``/``month: run`` and to bound the injected windows. That is
-monkeypatched, as ``test_workflows_pages.py`` does, to a stand-in index of four
+monkeypatched, as ``test_suites_pages.py`` does, to a stand-in index of four
 month-end restart snapshots -- July to October 2010, 23:45 each -- for any source
 name. Nothing else in ``expand`` reads data: ``_is_closed`` and
 ``_resolve_series_window`` work from that same index alone, so they need no patch.
@@ -28,12 +28,11 @@ import pytest
 import yaml
 
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
+from ocean_skill.suites import pages as P
 
 ROOT = Path(__file__).resolve().parents[1]
-SUITES_DIR = ROOT / "suites"
-TEMPLATES_DIR = ROOT / "ocean_skill/workflows/templates"
-SUITE_FILES = sorted([*SUITES_DIR.glob("*.yaml"), *TEMPLATES_DIR.glob("*.yaml")])
+TEMPLATES_DIR = ROOT / "ocean_skill/suites/templates"
+SUITE_FILES = sorted(TEMPLATES_DIR.glob("*.yaml"))
 
 #: Four month-end restart snapshots, standing in for any suite's test source.
 RESTART_INDEX = pd.DatetimeIndex(
@@ -62,7 +61,7 @@ def _expand(path: Path) -> tuple[SuiteConfig, list[P.ExpandedPage]]:
 
 def test_suites_directory_is_found():
     # Guards the parametrization below: an empty glob would pass vacuously.
-    assert SUITE_FILES, f"no suite YAML found under {SUITES_DIR} or {TEMPLATES_DIR}"
+    assert SUITE_FILES, f"no suite YAML found under {TEMPLATES_DIR}"
     assert {p.name for p in TEMPLATES_DIR.glob("*.yaml")} == {
         "mid-run-check.yaml",
         "final-report.yaml",
@@ -71,31 +70,7 @@ def test_suites_directory_is_found():
     }
 
 
-#: Shipped suites that do not expand at HEAD, and why. ``strict`` xfail, so the moment
-#: one is fixed this flags the stale entry here instead of silently staying green.
-_KNOWN_BROKEN = {
-    name: (
-        "its 'Monthly means -- {variable}' page fans PH and pCO2 (surface-only "
-        "variables) through select: {depth: '{depths}'}, which expand() refuses: "
-        "move them to a surface-only page"
-    )
-    for name in ("roms_marbl_diagnostic.yaml", "roms_marbl_quick.yaml")
-}
-
-
-def _suite_params():
-    for path in SUITE_FILES:
-        marks = []
-        if path.name in _KNOWN_BROKEN:
-            marks.append(
-                pytest.mark.xfail(
-                    strict=True, raises=ValueError, reason=_KNOWN_BROKEN[path.name]
-                )
-            )
-        yield pytest.param(path, id=path.name, marks=marks)
-
-
-@pytest.mark.parametrize("path", _suite_params())
+@pytest.mark.parametrize("path", SUITE_FILES, ids=lambda p: p.name)
 def test_shipped_suite_loads_and_expands(path):
     _, expanded = _expand(path)
     assert expanded, f"{path.name} expanded to no pages"
@@ -115,69 +90,17 @@ def test_shipped_suite_loads_and_expands(path):
     assert any(p.kind != "section" for p in expanded)
 
 
-# -- suites/pacmed_review.yaml: the exact expanded sequence ---------------------------
-
-_SNAPSHOT_VARIABLES = [
-    "temperature",
-    "salinity",
-    "nitrate",
-    "phosphate",
-    "oxygen",
-    "dissolved_inorganic_carbon",
-    "alkalinity",
-]
-_MONTHS = ["July", "August", "September", "October"]
-
-EXPECTED_PACMED = (
-    [
-        ("section", "Domain-wide trends"),
-        ("field", "Domain-mean time series"),
-        ("section", "Extreme values"),
-        ("field", "Alkalinity minimum — time series"),
-        ("field", "Alkalinity maximum — time series"),
-        ("section", "Model snapshots — surface"),
-    ]
-    + [("field", f"Snapshot — {v} (surface)") for v in _SNAPSHOT_VARIABLES]
-    + [("section", "Model snapshots — 100 m")]
-    + [("field", f"Snapshot — {v} (100 m)") for v in _SNAPSHOT_VARIABLES]
-    + [("section", "Model snapshots — 200 m")]
-    + [("field", f"Snapshot — {v} (200 m)") for v in _SNAPSHOT_VARIABLES]
-    + [
-        ("section", "Chlorophyll and mixed layer depth vs observations"),
-        ("compare", "Chlorophyll vs satellite — each snapshot"),
-    ]
-    + [("compare", f"Mixed layer depth vs Holte & Talley — {m} 2010") for m in _MONTHS]
-    + [("section", "Nutrients vs WOA23")]
-    + [
-        ("compare", f"Nutrients vs WOA23 — {m} 2010 ({depth})")
-        for m in _MONTHS
-        for depth in ("surface", "100 m")
-    ]
-    + [
-        ("section", "Carbon vs GLODAPv2"),
-        ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (surface)"),
-        ("compare", "Alkalinity & DIC vs GLODAPv2 — run mean (100 m)"),
-        ("section", "Water masses"),
-        ("TS", "T-S diagrams — six Pacific regions"),
-        ("section", "Zonal currents"),
-        ("compare", "Zonal velocity — 180-160W"),
-        ("compare", "Zonal velocity — 160-120W"),
-    ]
-)
-
-_TS_REGIONS = [
-    "North West Pacific",
-    "Subpolar Gyre",
-    "California Current System",
-    "South West Pacific",
-    "South Pacific Gyre",
-    "Peru Current",
-]
+# -- the final-report and mid-run-check templates: grammar the pages rely on ----------
 
 
 @pytest.fixture
-def pacmed():
-    return _expand(SUITES_DIR / "pacmed_review.yaml")
+def final_report():
+    return _expand(TEMPLATES_DIR / "final-report.yaml")
+
+
+@pytest.fixture
+def mid_run_check():
+    return _expand(TEMPLATES_DIR / "mid-run-check.yaml")
 
 
 def _by_title(expanded, title):
@@ -185,46 +108,37 @@ def _by_title(expanded, title):
     return page
 
 
-def test_pacmed_review_settings(pacmed):
-    suite, _ = pacmed
-    assert suite.name == "pacmed-review"
-    assert suite.pdf_images == "jpeg"
-    assert suite.defaults["test"] == "all_the_rest"
-    assert suite.defaults["depths"] == ["surface", 100]
-
-
-def test_pacmed_review_expands_to_the_exact_page_sequence(pacmed):
-    _, expanded = pacmed
-    assert len(expanded) == 52
-    assert sum(p.kind == "section" for p in expanded) == 10
-    assert [(p.kind, p.title) for p in expanded] == EXPECTED_PACMED
-
-
-def test_pacmed_review_section_pages_carry_text_and_nothing_else(pacmed):
-    _, expanded = pacmed
-    for page in (p for p in expanded if p.kind == "section"):
-        assert page.kwargs["text"].strip(), page.title
+@pytest.mark.parametrize("name", ["mid-run-check.yaml", "final-report.yaml"])
+def test_section_pages_carry_only_their_text(name):
+    _, expanded = _expand(TEMPLATES_DIR / name)
+    sections = [p for p in expanded if p.kind == "section"]
+    assert sections
+    for page in sections:
+        assert set(page.kwargs) <= {"text"}, page.title
         assert page.plot == {} and page.steps == []
 
 
-def test_pacmed_review_domain_mean_keeps_its_depth_list_and_aggregate(pacmed):
-    _, expanded = pacmed
+def test_mid_run_check_domain_mean_keeps_its_depth_list_and_aggregate(mid_run_check):
+    suite, expanded = mid_run_check
     page = _by_title(expanded, "Domain-mean time series")
+    assert page.kwargs["source"] == suite.defaults["test"]
     assert page.kwargs["select"]["depth"] == ["surface", 100, 200]
-    assert page.kwargs["select"]["time"] == RUN_WINDOW
+    assert page.kwargs["select"]["time"] == suite.defaults["period"]
     assert page.kwargs["aggregate"] == {"lon": "mean", "lat": "mean"}
     assert page.plot["rows"] == "variable"
     assert page.plot["encode"] == {"color": "depth"}
-    assert len(page.kwargs["variable"]) == 6
     assert page.kwargs["variable"][-1]["sum"] == ["spChl", "diatChl", "diazChl"]
 
 
 @pytest.mark.parametrize("kind", ["min", "max"])
-def test_pacmed_review_extremum_pages_chain_extremum_then_series(pacmed, kind):
-    _, expanded = pacmed
+def test_mid_run_check_extremum_pages_chain_extremum_then_series(mid_run_check, kind):
+    suite, expanded = mid_run_check
     name = {"min": "minimum", "max": "maximum"}[kind]
-    page = _by_title(expanded, f"Alkalinity {name} — time series")
-    assert page.kwargs["select"] == {"depth": "surface", "time": "2010-10-31T23:45:00"}
+    page = _by_title(expanded, f"Surface alkalinity {name} — time series")
+    assert page.kwargs["select"] == {
+        "depth": "surface",
+        "time": suite.defaults["period"],
+    }
     assert [s["name"] for s in page.steps] == ["extremum", "series"]
     assert page.steps[0]["kwargs"] == {"kind": kind}
     series = page.steps[1]["kwargs"]
@@ -234,98 +148,24 @@ def test_pacmed_review_extremum_pages_chain_extremum_then_series(pacmed, kind):
         "salinity",
         "nitrate",
     ]
-    assert "time" in series  # the fixed-snapshot pad window was resolved to a literal
+    assert series["time"] == suite.defaults["period"]
 
 
-def test_pacmed_review_snapshot_pages_share_variables_and_plot(pacmed):
-    _, expanded = pacmed
-    for depth_label, depth in (("surface", "surface"), ("100 m", 100), ("200 m", 200)):
-        for v in _SNAPSHOT_VARIABLES:
-            page = _by_title(expanded, f"Snapshot — {v} ({depth_label})")
-            assert page.kwargs["variable"] == [v]
-            assert page.kwargs["select"]["depth"] == depth
-            assert page.kwargs["select"]["time"] == RUN_WINDOW
-            assert page.plot["shared_limits"] is True
-            assert page.plot["robust"] is True
-            assert page.plot["colorbar_label_clipped"] is True
-
-
-def test_pacmed_review_chlorophyll_page_keeps_times_and_gets_the_run_window(pacmed):
-    _, expanded = pacmed
-    page = _by_title(expanded, "Chlorophyll vs satellite — each snapshot")
-    assert page.kwargs["reference"] == "chl_gapfree_my_daily_geo"
-    assert page.kwargs["times"] == {"resample": "1D", "reduce": "mean"}
-    assert page.kwargs["select"] == {
-        "test": {"depth": "surface", "time": RUN_WINDOW},
-        "reference": {},
-    }
-    # times= fans the page into per-bin comparisons, so it is never cacheable.
-    assert page.cache is False
-
-
-def test_pacmed_review_mld_pages_select_the_calendar_month_as_an_int(pacmed):
-    _, expanded = pacmed
-    for month, name in zip((7, 8, 9, 10), _MONTHS, strict=True):
-        page = _by_title(expanded, f"Mixed layer depth vs Holte & Talley — {name} 2010")
-        reference = page.kwargs["select"]["reference"]
-        assert reference == {"month": month}
-        assert type(reference["month"]) is int  # not the string "7"
-        assert page.kwargs["select"]["test"]["time"] == {
-            "min": f"2010-{month:02d}-01T00:00:00",
-            "max": f"2010-{month:02d}-{31 if month in (7, 8, 10) else 30}T23:59:59",
-        }
-        assert page.kwargs["aggregate"] == {"test": {"time": "mean"}, "reference": {}}
-
-
-def test_pacmed_review_woa_pages_are_month_major_with_month_matched_references(
-    pacmed,
-):
-    _, expanded = pacmed
-    woa = [p for p in expanded if p.title.startswith("Nutrients vs WOA23 — ")]
-    assert len(woa) == 8
-    expected = [
-        (month, name, depth)
-        for month, name in zip((7, 8, 9, 10), _MONTHS, strict=True)
-        for depth in ("surface", 100)
-    ]
-    for page, (month, name, depth) in zip(woa, expected, strict=True):
-        assert page.title.startswith(f"Nutrients vs WOA23 — {name} 2010")
-        assert page.kwargs["reference"] == [
-            f"woa23_{v}_month{month:02d}"
-            for v in ("nitrate", "phosphate", "silicate", "oxygen")
-        ]
-        assert page.kwargs["select"]["test"]["depth"] == depth
-        assert page.kwargs["select"]["reference"] == {"depth": depth}
-
-
-def test_pacmed_review_glodap_pages_get_one_depth_each_and_the_run_window(pacmed):
-    _, expanded = pacmed
-    for label, depth in (("surface", "surface"), ("100 m", 100)):
-        page = _by_title(expanded, f"Alkalinity & DIC vs GLODAPv2 — run mean ({label})")
-        assert page.kwargs["reference"] == ["glodap"]
-        assert page.kwargs["depths"] == [depth]
-        assert page.kwargs["aggregate"] == {"time": "mean"}
-        assert page.kwargs["select"]["test"]["time"] == RUN_WINDOW
-
-
-def test_pacmed_review_ts_page_pins_roms_and_glorys_to_the_run(
-    pacmed,
-):
-    suite, expanded = pacmed
+def test_final_report_ts_page_pins_roms_and_glorys_to_the_run(final_report):
+    suite, expanded = final_report
     page = _by_title(expanded, "T-S diagrams — six Pacific regions")
     assert page.kind == "TS"
     members = page.kwargs["members"]
     assert list(members) == ["ROMS", "WOA23", "GLORYS12"]
 
     roms = members["ROMS"]
-    assert roms["source"] == suite.defaults["test"] == "all_the_rest"
+    assert roms["source"] == suite.defaults["test"]
     assert roms["variable"] == ["temperature", "salinity"]
     assert roms["select"] == {"time": RUN_WINDOW}
     assert roms["cache"] is True
 
     # WOA23 is a climatology: no run window, no select at all. GLORYS12 reanalysis
-    # takes the run's window (window: run) so it covers the dots' dates. Both cache
-    # with the suite.
+    # takes the run's window so it covers the dots' dates. All cache with the suite.
     woa, glorys = members["WOA23"], members["GLORYS12"]
     assert woa["source"] == ["woa23_temperature_annual", "woa23_salinity_annual"]
     assert "select" not in woa
@@ -337,23 +177,18 @@ def test_pacmed_review_ts_page_pins_roms_and_glorys_to_the_run(
     assert page.cache is True
 
 
-def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
-    pacmed,
+def test_final_report_ts_page_has_boxed_regions_with_matching_annotations(
+    final_report,
 ):
-    _, expanded = pacmed
+    _, expanded = final_report
     page = _by_title(expanded, "T-S diagrams — six Pacific regions")
 
     regions = page.kwargs["regions"]
-    assert list(regions) == _TS_REGIONS
+    assert len(regions) == 6
     for box in regions.values():
         assert set(box) == {"lon", "lat"}
         assert 0 <= box["lon"]["min"] < box["lon"]["max"] <= 360
         assert -90 <= box["lat"]["min"] < box["lat"]["max"] <= 90
-    assert regions["North West Pacific"] == {
-        "lon": {"min": 156.16, "max": 157.23},
-        "lat": {"min": 19.32, "max": 20.32},
-    }
-    assert regions["South West Pacific"]["lat"] == {"min": -15.45, "max": -14.67}
 
     # WOA23's 1-degree grid has no cell centre in two of the boxes
     assert page.kwargs["at_center"] == ["WOA23"]
@@ -365,7 +200,7 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
         "GLORYS12": "tab:blue",
     }
     annotations = page.plot["annotations"]
-    assert list(annotations) == _TS_REGIONS  # every panel is annotated
+    assert list(annotations) == list(regions)  # every panel is annotated
     for texts in annotations.values():
         for s_pos, t_pos in texts.values():
             assert 32 < s_pos < 37 and -2 < t_pos < 30  # (S, T) in plausible ranges
@@ -380,11 +215,11 @@ def test_pacmed_review_ts_page_has_six_boxed_regions_with_matching_annotations(
         ("Zonal velocity — 160-120W", "cravatte_u_160w_120w", {"min": 200, "max": 240}),
     ],
 )
-def test_pacmed_zonal_current_pages_are_lon_mean_slabs_with_zero_contours(
-    pacmed, title, reference, lon
+def test_final_report_zonal_current_pages_are_lon_mean_slabs_with_zero_contours(
+    final_report, title, reference, lon
 ):
-    """Fig. 10: only the model is box-averaged (the obs are a band mean already)."""
-    _, expanded = pacmed
+    """Only the model is box-averaged (the obs are a band mean already)."""
+    _, expanded = final_report
     page = _by_title(expanded, title)
     assert page.kwargs["reference"] == [reference]
     assert page.kwargs["variables"] == ["east_velocity"]

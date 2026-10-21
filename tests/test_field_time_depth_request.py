@@ -241,7 +241,7 @@ def _page(**plot):
 
 def test_a_suite_field_page_passes_family_through_to_plot(monkeypatch):
     import ocean_skill as osk
-    from ocean_skill.workflows import pages as P
+    from ocean_skill.suites import pages as P
 
     monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda s: INDEX)
     calls = []
@@ -259,7 +259,7 @@ def test_a_suite_field_page_passes_family_through_to_plot(monkeypatch):
 
 
 def test_a_suite_field_page_draws_colour_end_to_end(monkeypatch, stub):
-    from ocean_skill.workflows import pages as P
+    from ocean_skill.suites import pages as P
 
     monkeypatch.setattr("ocean_skill.extrema._native_time_index", lambda s: INDEX)
     stub(_point_time_depth())

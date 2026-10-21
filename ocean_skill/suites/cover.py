@@ -23,7 +23,7 @@ import yaml
 
 from ocean_skill.config import SuiteConfig
 from ocean_skill.plot.typography import PAGE_H, PAGE_W, STEP, reference_scale
-from ocean_skill.workflows.report import _wrap_lines
+from ocean_skill.suites.report import _wrap_lines
 
 __all__ = [
     "RunInfo",

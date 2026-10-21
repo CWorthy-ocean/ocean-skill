@@ -4,12 +4,12 @@ A suite is a *list of pages* -- each one a single :func:`ocean_skill.field.field
 :func:`ocean_skill.comparison.compare`, :func:`ocean_skill.comparison.summary`, or
 :class:`ocean_skill.xy.XY`/:class:`~ocean_skill.xy.TS` call, expressed as YAML instead
 of Python -- plus shared defaults, output settings, and an
-optional live-run refresh step. :mod:`ocean_skill.workflows.pages` expands a
+optional live-run refresh step. :mod:`ocean_skill.suites.pages` expands a
 :class:`SuiteConfig` into a flat list of fully-resolved page dicts (``for_each``
 fanned out, ``{placeholder}``\ s filled in, ``time: latest``/``month: run`` resolved
-to literal values); :mod:`ocean_skill.workflows.run` draws each one and assembles a
-report directory. See ``docs/suites.md`` for the full grammar and ``suites/*.yaml`` and
-``ocean_skill/workflows/templates/*.yaml`` for worked examples.
+to literal values); :mod:`ocean_skill.suites.run` draws each one and assembles a
+report directory. See ``docs/suites.md`` for the full grammar and
+``ocean_skill/suites/templates/*.yaml`` for worked examples.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ def summary_kinds(title: str, summary: dict[str, Any]) -> list[str]:
 
     The one check of a summary page's ``kind:`` and ``scope:``, called at load time
     (before ``{placeholders}`` are filled) and again after they are, by
-    :func:`ocean_skill.workflows.pages.expand`. A missing ``kind:`` is
+    :func:`ocean_skill.suites.pages.expand`. A missing ``kind:`` is
     :data:`DEFAULT_SUMMARY_KINDS`.
     """
     kind = summary.get("kind", list(DEFAULT_SUMMARY_KINDS))
@@ -128,7 +128,7 @@ def check_draw(title: str, draw: str, contours: Any) -> None:
 
     The one check of a compare page's ``draw:`` value, called at load time (before
     ``{placeholders}`` are filled) and again after they are, by
-    :func:`ocean_skill.workflows.pages.expand`.
+    :func:`ocean_skill.suites.pages.expand`.
     """
     if draw not in COMPARE_DRAWS:
         raise ValueError(
@@ -147,7 +147,7 @@ def check_diagnostic_draw(title: str, kind: str, draw: Any) -> None:
 
     The one check of such a page's ``draw:``, called at load time (a value still holding
     a ``{placeholder}`` is left for later) and again after the placeholders are
-    filled, by :func:`ocean_skill.workflows.pages.expand`.
+    filled, by :func:`ocean_skill.suites.pages.expand`.
     """
     draws = _DIAGNOSTIC_DRAWS[kind]
     if isinstance(draw, str) and "{" in draw:
@@ -171,7 +171,7 @@ class RefreshSourceConfig(BaseModel):
     task folders of a run restarted in pieces): the matched files are joined in time
     order, and where two give the same time step the later one wins -- the later glob of
     the list, within one glob the later path in sorted order
-    (:func:`ocean_skill.workflows.run._refresh_sources`).
+    (:func:`ocean_skill.suites.run._refresh_sources`).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -299,8 +299,8 @@ class RefreshConfig(BaseModel):
     """``refresh:`` block: rebuild a live run's kerchunk references first.
 
     ``sources`` is forwarded, unchanged in shape, to
-    :func:`ocean_skill.workflows.run._refresh_sources`; ``forcing`` to
-    :func:`ocean_skill.workflows.run._refresh_forcing`, into the same catalog.
+    :func:`ocean_skill.suites.run._refresh_sources`; ``forcing`` to
+    :func:`ocean_skill.suites.run._refresh_forcing`, into the same catalog.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -315,7 +315,7 @@ class RunInfoConfig(BaseModel):
 
     Every key is optional. ``blueprint``/``workplan`` name a C-Star resolved blueprint
     and workplan directly -- absolute, or relative to the suite file -- instead of
-    letting :func:`ocean_skill.workflows.cover.gather` find them from ``refresh:``;
+    letting :func:`ocean_skill.suites.cover.gather` find them from ``refresh:``;
     ``name`` overrides the simulation name the cover is titled with; ``notes`` is
     printed on the cover as written, in order.
     """
@@ -343,7 +343,7 @@ class PageConfig(BaseModel):
     ``XY`` and ``TS`` are the property-property plots (:class:`ocean_skill.xy.XY`;
     ``TS`` is the salinity-temperature preset): a ``members:`` mapping of label -> one
     ``osk.field()`` call each, plus ``x:``/``y:`` (``XY`` only), ``regions:`` and
-    ``at_center:``. Their shape is checked in :mod:`ocean_skill.workflows.pages`, like
+    ``at_center:``. Their shape is checked in :mod:`ocean_skill.suites.pages`, like
     ``then:``'s. They take ``for_each:`` and ``plot:`` but not ``then:`` (there is no
     single field to chain on).
 
@@ -368,7 +368,7 @@ class PageConfig(BaseModel):
     same page keys as the other two.
 
     ``for_each`` fans this one page into several -- one page per element of the
-    Cartesian product of its lists (see :mod:`ocean_skill.workflows.pages`).
+    Cartesian product of its lists (see :mod:`ocean_skill.suites.pages`).
 
     ``then`` runs a chain of methods on the object ``field:`` builds, before
     ``plot:`` draws it -- the suite-YAML form of a Python chain like
@@ -376,8 +376,8 @@ class PageConfig(BaseModel):
     *names* and their basic shape (a bare name, or one ``{name: args}`` mapping
     per list entry) are checked here; the fuller check -- argument validation, and
     that consecutive steps' types actually fit together -- happens in
-    :func:`ocean_skill.workflows.pages.expand`, which is also where the whole
-    chain runs against real step names (see :data:`~ocean_skill.workflows.pages
+    :func:`ocean_skill.suites.pages.expand`, which is also where the whole
+    chain runs against real step names (see :data:`~ocean_skill.suites.pages
     .STEP_REGISTRY`) rather than a hardcoded list here, so the two can never drift
     apart. ``field:``-only for now.
 
@@ -387,7 +387,7 @@ class PageConfig(BaseModel):
 
     ``contours`` overlays contour lines on a ``field:``/``compare:`` page's figure --
     ``true`` for the plotted object's own, or a mapping of overrides for a second
-    object (see :func:`ocean_skill.workflows.pages.expand`, which checks its value
+    object (see :func:`ocean_skill.suites.pages.expand`, which checks its value
     once placeholders are filled; only the page kind is checked here).
     """
 
@@ -480,10 +480,10 @@ class PageConfig(BaseModel):
                 f"(this page is {self.kind}:)"
             )
         # Lazy import: keeps this module's own import light (see the module
-        # docstring) -- ocean_skill.workflows.pages imports only the stdlib and
+        # docstring) -- ocean_skill.suites.pages imports only the stdlib and
         # pydantic at module level, so this costs nothing beyond the import
         # itself, paid once per suite load, not once per page.
-        from ocean_skill.workflows.pages import STEP_REGISTRY
+        from ocean_skill.suites.pages import STEP_REGISTRY
 
         for item in self.then:
             if isinstance(item, str):
@@ -559,7 +559,7 @@ class SuiteConfig(BaseModel):
 
     ``cover`` (default ``True``) puts a cover page describing the simulation first in
     ``report.pdf``; ``run_info`` (:class:`RunInfoConfig`) overrides what it is built
-    from. See "Cover page" in ``docs/suites.md``.
+    from. See "Output" in ``docs/suites.md``.
 
     ``catalog_search_paths`` registers extra shared catalog directories -- absolute, or
     relative to this suite file (not the working directory) -- in the same tier as
@@ -577,7 +577,7 @@ class SuiteConfig(BaseModel):
     ``pdf_images`` picks how ``report.pdf`` stores the rasterized map images that are
     ~95% of its bytes: ``"lossless"`` (the default, matplotlib's own output, untouched)
     or ``"jpeg"`` (re-encoded afterwards with Ghostscript -- see
-    :func:`ocean_skill.workflows.report.compress_pdf_images`; roughly a third smaller
+    :func:`ocean_skill.suites.report.compress_pdf_images`; roughly a third smaller
     with no visible change, and a warning plus the lossless PDF if ``gs`` is not
     available). PNGs are never touched, and it does nothing under ``pdf: false``.
     """

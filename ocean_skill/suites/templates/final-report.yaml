@@ -26,8 +26,8 @@
 #           copernicusmarine login
 #       Several years of daily DUACS are a large download (chlorophyll reads only the
 #       36 restart days).
-#   (c) The WOA23 annual temperature and salinity files are downloaded from NCEI the
-#       first time they are read, so that run needs network access.
+#   (c) A catalog entry that points at a URL rather than a local file downloads it the
+#       first time it is read, so that run needs network access.
 #   (d) `pdf_images: jpeg` needs Ghostscript (`gs`) on PATH; without it the run warns
 #       and leaves the PDF lossless.
 #

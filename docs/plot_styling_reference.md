@@ -2335,7 +2335,7 @@ widened to hold every position, so a label placed outside the data is not clippe
 Annotations cannot be automatic: where a water mass is named is a judgement made on the
 picture, so place them by hand from a first render and adjust. The positions for the six
 panels above are the `annotations:` block of the `TS:` page in
-`suites/pacmed_review.yaml`.
+`ocean_skill/suites/templates/final-report.yaml`.
 
 ### `density=` — σ₀ contours
 

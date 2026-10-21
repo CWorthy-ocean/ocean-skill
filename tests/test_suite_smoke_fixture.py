@@ -1,7 +1,7 @@
 """The PACMED suites, expanded and drawn end to end against a synthetic PACMED.
 
 The shipped ``mid-run-check``, ``final-report`` and ``model-comparison`` suites (under
-``ocean_skill/workflows/templates/``) and ``suites/ccs-mid-run-check.yaml`` used
+``ocean_skill/suites/templates/``) used
 to be debugged one failure at a time, hours into an HPC run. ``_suite_fixture`` builds a
 small stand-in for every input they read (UCLA restart files, roms-tools forcing, WOA23,
 GLODAP, Holte & Talley, Copernicus, Cravatte -- see its docstring for the quirks it
@@ -32,17 +32,15 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from ocean_skill.workflows.run import run_suite
+from ocean_skill.suites.run import run_suite
 from tests import _suite_fixture as fx
 
 ROOT = Path(__file__).resolve().parents[1]
-#: Where each suite under test lives: the three shipped ones are the package's own
-#: templates; the CCS run's instance of mid-run-check stays in ``suites/``.
+#: Where each suite under test lives: the package's own templates.
 SUITE_FILES = {
-    "mid-run-check": ROOT / "ocean_skill/workflows/templates/mid-run-check.yaml",
-    "ccs-mid-run-check": ROOT / "suites/ccs-mid-run-check.yaml",
-    "final-report": ROOT / "ocean_skill/workflows/templates/final-report.yaml",
-    "model-comparison": ROOT / "ocean_skill/workflows/templates/model-comparison.yaml",
+    "mid-run-check": ROOT / "ocean_skill/suites/templates/mid-run-check.yaml",
+    "final-report": ROOT / "ocean_skill/suites/templates/final-report.yaml",
+    "model-comparison": ROOT / "ocean_skill/suites/templates/model-comparison.yaml",
 }
 PACMED_SUITES = tuple(SUITE_FILES)
 

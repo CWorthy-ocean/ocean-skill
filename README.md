@@ -843,7 +843,7 @@ from that panel with a warning that says why. Without `regions=`, each member ne
 lon/lat box or point in its own `select` — otherwise it would load its whole domain, every
 level and time step, and `XY` refuses instead. Water-mass names are placed by hand with
 `annotations=`; the positions for the six panels above are the `annotations:` block of
-the `TS:` page in `suites/pacmed_review.yaml`. The same figure is a suite page — see
+the `TS:` page in `ocean_skill/suites/templates/final-report.yaml`. The same figure is a suite page — see
 `XY:`/`TS:` below.
 
 ## Suites: run a whole diagnostic from one YAML
@@ -855,7 +855,8 @@ One command draws every page and writes PNGs, a PDF, and a metrics CSV, with no 
 required:
 
 ```bash
-ocean-skill-run suites/roms_marbl_diagnostic.yaml
+ocean-skill-suite new mid-run-check --run RUN --name NAME --output-dir DIR -o mid-run-check.yaml
+ocean-skill-run mid-run-check.yaml
 ```
 
 Every run writes its own report directory (nothing is ever overwritten), named after
@@ -866,9 +867,8 @@ as it was at that moment. See
 `{placeholder}` templating, `time: latest`/`month: run`, a `catalog_search_paths:` key
 for shared catalog directories, a `cache_dir:` key to pin the suite's cache to one
 directory across runs, and the report layout —
-and `suites/roms_marbl_diagnostic.yaml`/`suites/roms_marbl_quick.yaml` for a worked
-ROMS-MARBL example (latest snapshot, monthly means, WOA23/GLODAPv2/satellite
-chlorophyll comparisons).
+and the four shipped suites in `ocean_skill/suites/templates/` (`mid-run-check`,
+`input-check`, `model-comparison`, `final-report`) for worked examples.
 
 ## Variable specs
 
@@ -1412,9 +1412,6 @@ catalogs/          project-local catalogs you build (auto-discovered; gitignored
 tests/             pytest suite
 docs/              MyST / Jupyter Book docs + notebooks
 examples/          short runnable scripts
-suites/            declarative multi-page suites (YAML) -- run with ocean-skill-run
-                   (the shipped mid-run-check / final-report / model-comparison live in
-                   ocean_skill/workflows/templates/; see docs/suites.md)
 environment.yml    conda scientific stack (source of truth)
 ```
 
