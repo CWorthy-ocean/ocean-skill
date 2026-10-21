@@ -3,8 +3,8 @@
 ``"latest"`` is resolved to the ISO string of the source's newest native step inside
 ``Field.__init__`` and ``Comparison.__init__`` -- before any cache key or label is
 built from ``select`` -- exactly as a suite page already resolves it in
-``workflows.pages.expand``. ``extrema._native_time_index`` is monkeypatched the same
-way ``tests/test_extrema.py`` and ``tests/test_workflows_run.py`` do, so none of this
+``suites.pages.expand``. ``extrema._native_time_index`` is monkeypatched the same
+way ``tests/test_extrema.py`` and ``tests/test_suites_run.py`` do, so none of this
 needs a catalog.
 """
 

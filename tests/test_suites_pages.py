@@ -1,9 +1,9 @@
-"""Tests for :mod:`ocean_skill.workflows.pages`: expanding a suite into pages.
+"""Tests for :mod:`ocean_skill.suites.pages`: expanding a suite into pages.
 
 Pure and fast -- no catalog, no real data. ``extrema._native_time_index`` is
 monkeypatched to a small, fixed index (Jan-Mar 2010), the same stub pattern
 ``tests/test_extrema.py`` uses, since resolving ``latest``/``month: run`` and the
-injected time windows is the one place :func:`~ocean_skill.workflows.pages.expand`
+injected time windows is the one place :func:`~ocean_skill.suites.pages.expand`
 reads anything at all -- and even that read is coordinate-only.
 """
 
@@ -15,7 +15,7 @@ import pandas as pd
 import pytest
 
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
+from ocean_skill.suites import pages as P
 
 INDEX = pd.date_range("2010-01-05", periods=10, freq="7D")  # Jan 5 .. Mar 9, 2010
 
@@ -1023,7 +1023,7 @@ def test_expand_with_then_steps_is_json_serializable_and_deterministic():
 
 def test_summary_pages_own_kwargs_are_pinned_too():
     # a summary page's sizing kwargs live directly on `summary:`, not `plot:` -- see
-    # ocean_skill.workflows.pages.build, which forwards page.kwargs (not page.plot)
+    # ocean_skill.suites.pages.build, which forwards page.kwargs (not page.plot)
     # to osk.summary().
     suite = _suite(
         [

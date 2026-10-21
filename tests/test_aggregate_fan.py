@@ -25,7 +25,7 @@ from ocean_skill.comparison import (
     _aggregate_label,
 )
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
+from ocean_skill.suites import pages as P
 
 MEAN = {"time": "mean"}
 SEASONAL_VAR = {"time": [{"groupby": "month", "reduce": "mean"}, "var"]}

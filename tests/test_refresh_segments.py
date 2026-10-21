@@ -24,7 +24,7 @@ import xarray as xr
 
 from ocean_skill import build, sources
 from ocean_skill.config import RefreshForcingConfig, RefreshSourceConfig, SuiteConfig
-from ocean_skill.workflows.run import _refresh_sources
+from ocean_skill.suites.run import _refresh_sources
 from tests import _suite_fixture as sf
 
 
@@ -258,7 +258,7 @@ def test_the_config_takes_a_list_of_globs():
 
 
 def test_the_cover_reads_a_list_of_globs(tmp_path):
-    from ocean_skill.workflows import cover
+    from ocean_skill.suites import cover
 
     run = tmp_path / "cstar_run"
     (run / "work").mkdir(parents=True)

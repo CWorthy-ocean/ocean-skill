@@ -20,11 +20,11 @@ from ocean_skill import comparison as _comparison
 from ocean_skill import roms
 from ocean_skill import sources as _sources
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
-from ocean_skill.workflows import report as _report
-from ocean_skill.workflows import run as _run
-from ocean_skill.workflows.run import main, run_suite
-from tests.test_workflows_run_guardrails import (
+from ocean_skill.suites import pages as P
+from ocean_skill.suites import report as _report
+from ocean_skill.suites import run as _run
+from ocean_skill.suites.run import main, run_suite
+from tests.test_suites_run_guardrails import (
     _smoke_suite,
     _write_suite,
     fake_sources,  # noqa: F401  (used as a fixture)

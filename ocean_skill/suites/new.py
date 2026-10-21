@@ -650,7 +650,7 @@ def render(
     args: argparse.Namespace, roots: list[Path], out: Path
 ) -> tuple[str, list[str], list[str]]:
     """Return the suite text, its ``# TODO check`` items and its warnings."""
-    from ocean_skill.workflows import cover
+    from ocean_skill.suites import cover
 
     tasks = sorted(t for r in roots for t in (r / "tasks").glob("*"))
     with warnings.catch_warnings():
@@ -769,7 +769,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.template not in TEMPLATES:
             raise SuiteNewError(
                 f"template {args.template!r} is not supported yet; copy "
-                f"ocean_skill/workflows/templates/{args.template}.yaml and edit its "
+                f"ocean_skill/suites/templates/{args.template}.yaml and edit its "
                 "setup block (between '# >>> setup' and '# <<< setup') by hand"
             )
         out, roots = (

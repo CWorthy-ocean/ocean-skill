@@ -35,7 +35,7 @@ not the run's.
 A ``section:`` page is the one kind :func:`build` never draws: it has no figure, just
 a title and notes text for a divider page in ``report.pdf``. :func:`expand` templates
 both against ``defaults`` (there is no ``for_each``), and the runner hands them
-straight to :meth:`~ocean_skill.workflows.report.PdfReport.section`; :func:`build`
+straight to :meth:`~ocean_skill.suites.report.PdfReport.section`; :func:`build`
 refuses one outright.
 
 A ``health:``/``rivers:`` page draws the figures of a run-diagnostic object
@@ -1093,7 +1093,7 @@ def _pin_to_page(kwargs: dict[str, Any], *, seen: set[str]) -> dict[str, Any]:
     """Drop ``zoom``/``size``/``figsize`` and pin the figure to the ``"page"`` canvas.
 
     A suite's ``report.pdf`` pages are a fixed 8.5x11in (see
-    :mod:`ocean_skill.workflows.report`), so a page or its ``defaults.plot`` asking to
+    :mod:`ocean_skill.suites.report`), so a page or its ``defaults.plot`` asking to
     be drawn a different size no longer means anything once it lands there -- the
     figure is pinned regardless, with a warning naming the ignored kwarg. Warned once
     per key across the whole suite (via ``seen``), not once per expanded page, since

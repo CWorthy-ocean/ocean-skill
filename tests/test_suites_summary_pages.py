@@ -19,9 +19,9 @@ import pandas as pd
 import pytest
 
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
-from ocean_skill.workflows.run import run_suite
-from tests.test_workflows_run import (  # noqa: F401  (stub_model is a fixture)
+from ocean_skill.suites import pages as P
+from ocean_skill.suites.run import run_suite
+from tests.test_suites_run import (  # noqa: F401  (stub_model is a fixture)
     _write_suite,
     stub_model,
 )

@@ -1,7 +1,7 @@
 """A small synthetic PACMED, so the real suites can be expanded *and drawn* off-line.
 
 The shipped ``mid-run-check``, ``final-report`` and ``model-comparison`` suites
-(``ocean_skill/workflows/templates/``) read a UCLA-ROMS run's monthly restarts,
+(``ocean_skill/suites/templates/``) read a UCLA-ROMS run's monthly restarts,
 roms-tools forcing files and a dozen observational products. Their bugs used to be
 found one at a time, hours into an HPC run. This module builds a tiny stand-in for
 every input -- same layouts, same names, same units, same awkward corners -- plus
@@ -1208,8 +1208,6 @@ def build_fixture(root: Path) -> SuiteFixture:
             "grid": str(model_grid),
         },
     }
-    # the CCS mid-run check reads its own run; here it is the same stand-in
-    fx.sources["ccs_4km"] = dict(fx.sources["pacmed_pyesper"])
 
     # -- the model-comparison pair: both runs from 2010-01, split over task folders ----
     def tasks(folder: str, layout: dict[str, tuple[str, ...]], kw) -> None:

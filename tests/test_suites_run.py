@@ -1,4 +1,4 @@
-"""``ocean_skill.workflows.run._refresh_sources``: rebuilding a suite's kerchunk refs.
+"""``ocean_skill.suites.run._refresh_sources``: rebuilding a suite's kerchunk refs.
 
 No suite ever had to say ``keep:`` for the ordinary case -- these check that leaving
 it out really does let :func:`ocean_skill.build.make_kerchunk`'s own default apply,
@@ -21,10 +21,10 @@ from ocean_skill import cache as _cache
 from ocean_skill import catalog as _catalog
 from ocean_skill import comparison as _comparison
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as _pages
-from ocean_skill.workflows.run import _refresh_sources, main, run_suite
+from ocean_skill.suites import pages as _pages
+from ocean_skill.suites.run import _refresh_sources, main, run_suite
 from tests.test_catalog import _write_catalog
-from tests.test_workflows_report import _pagecount_by_bytes
+from tests.test_suites_report import _pagecount_by_bytes
 
 
 def _segment(path, t0, value):
@@ -110,7 +110,7 @@ def test_a_subchunk_key_is_forwarded(tmp_path):
 
 
 def test_a_forcing_entrys_subchunk_key_is_forwarded(tmp_path):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     (tmp_path / "bry_201101.nc").touch()
     entry = {
@@ -253,7 +253,7 @@ def test_a_stream_matching_only_unfinished_files_keeps_its_existing_entry(tmp_pa
 # minimal stub ``tests/test_field_map_grid.py`` uses) -- everything else, including
 # ``FieldSet``'s own variable-availability pre-filter, runs for real. ``compare``/
 # ``summary`` pages are exercised at the boundary this module owns:
-# :func:`ocean_skill.workflows.pages.build` is the only place that calls
+# :func:`ocean_skill.suites.pages.build` is the only place that calls
 # ``osk.compare``/``osk.summary``, and those functions already have their own
 # extensive test suites elsewhere in the repo, so here it is monkeypatched to
 # isolate what ``run_suite`` itself is responsible for -- report layout, PNGs, the
@@ -332,9 +332,8 @@ def test_a_one_variable_monthly_means_page_draws_instead_of_being_skipped(
 
     :meth:`~ocean_skill.field.Field._map_item` used to refuse a standing monthly
     time axis (see ``tests/test_field_map_grid.py``'s own coverage of the same
-    fix), logging the page as ``skipped`` -- the exact shape of the shipped
-    suites' own monthly-means pages (``suites/roms_marbl_quick.yaml``,
-    ``suites/roms_marbl_diagnostic.yaml``).
+    fix), logging the page as ``skipped`` -- the shape of a suite page that fans
+    one variable across a standing monthly time axis.
     """
     months = pd.date_range("2010-01-01", periods=3, freq="MS")
     lat = xr.DataArray([10.0, 20.0], dims="lat")
@@ -545,7 +544,7 @@ def test_list_only_still_runs_the_refresh_block(tmp_path, stub_model):
             "sources": [{"name": "stub", "files": "x*.nc", "ref": "stub.json"}],
         },
     )
-    with mock.patch("ocean_skill.workflows.run._refresh_sources") as refresh:
+    with mock.patch("ocean_skill.suites.run._refresh_sources") as refresh:
         run_suite(_write_suite(tmp_path, suite), list_only=True)
     refresh.assert_called_once()
     (sources, catalog_path), _ = refresh.call_args
@@ -566,7 +565,7 @@ def test_a_first_refresh_creates_its_catalog_folder_on_the_search_path(
             "sources": [{"name": "stub", "files": "x*.nc", "ref": "stub.json"}],
         },
     )
-    with mock.patch("ocean_skill.workflows.run._refresh_sources"):
+    with mock.patch("ocean_skill.suites.run._refresh_sources"):
         run_suite(_write_suite(tmp_path, suite), list_only=True)
     assert new_dir.is_dir()
 
@@ -1018,7 +1017,7 @@ def test_catalog_search_paths_registered_before_refresh_runs(
     def _fake_refresh(spec, cat):
         seen_during_refresh.append(shared in _catalog.search_paths())
 
-    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", _fake_refresh)
+    monkeypatch.setattr("ocean_skill.suites.run._refresh_sources", _fake_refresh)
 
     suite = _model_only_suite(
         tmp_path,
@@ -1220,7 +1219,7 @@ def test_a_latest_page_recomputes_once_the_run_has_moved(monkeypatch, counted_pr
 def test_refresh_block_still_calls_refresh_sources(tmp_path, stub_model, monkeypatch):
     calls = []
     monkeypatch.setattr(
-        "ocean_skill.workflows.run._refresh_sources",
+        "ocean_skill.suites.run._refresh_sources",
         lambda spec, cat: calls.append((spec, cat)),
     )
     suite = _model_only_suite(
@@ -1401,7 +1400,7 @@ def test_main_no_refresh_flag_skips_the_refresh_block(
 ):
     calls = []
     monkeypatch.setattr(
-        "ocean_skill.workflows.run._refresh_sources",
+        "ocean_skill.suites.run._refresh_sources",
         lambda spec, cat: calls.append(spec),
     )
     suite = _model_only_suite(
@@ -1463,7 +1462,7 @@ def test_main_runs_a_suite_end_to_end(tmp_path, stub_model, capsys):
 # -- run.log: the terminal transcript, persisted -------------------------------------
 #
 # ``run_suite`` mirrors stdout/stderr to ``<report_dir>/run.log`` for the whole run
-# (see ``ocean_skill.workflows.run._capture_terminal``). These tests check that the
+# (see ``ocean_skill.suites.run._capture_terminal``). These tests check that the
 # file matches what the terminal actually showed, carries the tracebacks the terminal
 # never shows (skipped pages, a fatal crash), stays attributable per page via headers
 # and timing, is never written for ``--list``, and never leaves stdout/stderr swapped
@@ -1501,7 +1500,7 @@ def test_run_log_of_a_skipped_page(tmp_path, stub_model, monkeypatch, capsys):
 def test_a_page_whose_source_cannot_be_read_is_skipped_untried(
     tmp_path, stub_model, monkeypatch, capsys
 ):
-    from ocean_skill.workflows import pages as _pages
+    from ocean_skill.suites import pages as _pages
 
     def index(source):
         if source == "gone":
@@ -1537,7 +1536,7 @@ def test_a_page_whose_source_cannot_be_read_is_skipped_untried(
 def test_entries_sharing_a_ref_over_different_files_are_refused(
     tmp_path, monkeypatch, capsys
 ):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     for year in (2011, 2013):
         (tmp_path / f"co2_{year}.nc").write_text("")
@@ -1560,7 +1559,7 @@ def test_entries_sharing_a_ref_over_different_files_are_refused(
 
 
 def test_a_ref_under_home_is_reported_rebuilt(tmp_path, monkeypatch, capsys):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / "surf.nc").write_text("")
@@ -1596,7 +1595,7 @@ def test_an_unreadable_defaults_test_does_not_abort_the_run(
 def test_refresh_forcing_says_whether_a_reference_was_reused(
     tmp_path, monkeypatch, capsys
 ):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     (tmp_path / "surf.nc").write_text("")
     ref = tmp_path / "refs" / "surf.parquet"
@@ -1630,11 +1629,11 @@ def test_refresh_forcing_runs_after_the_sources_into_the_same_catalog(
 ):
     calls = []
     monkeypatch.setattr(
-        "ocean_skill.workflows.run._refresh_sources",
+        "ocean_skill.suites.run._refresh_sources",
         lambda spec, cat: calls.append(("sources", spec, cat)),
     )
     monkeypatch.setattr(
-        "ocean_skill.workflows.run._refresh_forcing",
+        "ocean_skill.suites.run._refresh_forcing",
         lambda spec, cat: calls.append(("forcing", spec, cat)),
     )
     suite = _model_only_suite(
@@ -1673,7 +1672,7 @@ def test_output_before_report_dir_exists_is_buffered_into_run_log(
     def fake_refresh(spec, cat):
         print("refresh happened")
 
-    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", fake_refresh)
+    monkeypatch.setattr("ocean_skill.suites.run._refresh_sources", fake_refresh)
     suite = _model_only_suite(
         tmp_path,
         refresh={
@@ -1697,7 +1696,7 @@ def test_a_fatal_crash_still_leaves_run_log_and_restores_streams(
     part of it. Kept as one function, not one assertion, so a failure still says
     which claim broke.
     """
-    from ocean_skill.workflows.report import PdfReport
+    from ocean_skill.suites.report import PdfReport
 
     def boom(self, fig, stem, caption=None):
         raise RuntimeError("boom")
@@ -1830,8 +1829,8 @@ def test_no_refresh_reads_the_existing_reference_and_still_snapshots_it(
     def _must_not_run(spec, cat):
         raise AssertionError("refresh ran under refresh=False")
 
-    monkeypatch.setattr("ocean_skill.workflows.run._refresh_sources", _must_not_run)
-    monkeypatch.setattr("ocean_skill.workflows.run._refresh_forcing", _must_not_run)
+    monkeypatch.setattr("ocean_skill.suites.run._refresh_sources", _must_not_run)
+    monkeypatch.setattr("ocean_skill.suites.run._refresh_forcing", _must_not_run)
 
     run_suite(path, list_only=True, refresh=False)
     result = run_suite(path, refresh=False)
@@ -1891,7 +1890,7 @@ def test_a_parquet_reference_directory_is_copied_as_a_tree(tmp_path):
     import filecmp
 
     from ocean_skill.config import RefreshConfig
-    from ocean_skill.workflows.run import _snapshot_refs
+    from ocean_skill.suites.run import _snapshot_refs
 
     src = tmp_path / "refs" / "x.parquet"
     (src / "NO3").mkdir(parents=True)
@@ -2174,7 +2173,7 @@ def fake_compress(monkeypatch):
 
     fake.calls = calls
     fake.result = (2_000_000, 1_000_000)
-    monkeypatch.setattr("ocean_skill.workflows.report.compress_pdf_images", fake)
+    monkeypatch.setattr("ocean_skill.suites.report.compress_pdf_images", fake)
     return fake
 
 
@@ -2242,7 +2241,7 @@ def test_pdf_images_jpeg_is_skipped_without_a_pdf_to_compress(
 def test_pdf_images_jpeg_without_ghostscript_warns_and_keeps_the_lossless_pdf(
     tmp_path, stub_model, monkeypatch
 ):
-    from ocean_skill.workflows import report as _report
+    from ocean_skill.suites import report as _report
 
     monkeypatch.setattr(_report.shutil, "which", lambda name: None)
     path = _write_suite(tmp_path, _model_only_suite(tmp_path, pdf_images="jpeg"))
@@ -2261,7 +2260,7 @@ def test_main_refuses_an_unknown_pdf_images_value(tmp_path):
 
 # ======================================================================================
 # The cover page: PdfReport.cover buffers it like a divider; run_suite builds it from
-# ``ocean_skill.workflows.cover`` and records the same content as the manifest's
+# ``ocean_skill.suites.cover`` and records the same content as the manifest's
 # ``run_info``. It is not a figure -- PDF-only, unnumbered, dropped if nothing draws.
 # ======================================================================================
 
@@ -2280,7 +2279,7 @@ def _blank_pages(n, *, agg=False):
 
 
 def test_cover_is_written_first_and_before_a_pending_divider(tmp_path):
-    from ocean_skill.workflows.report import PdfReport
+    from ocean_skill.suites.report import PdfReport
 
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         order = []
@@ -2300,7 +2299,7 @@ def test_cover_is_written_first_and_before_a_pending_divider(tmp_path):
 
 
 def test_cover_is_dropped_when_nothing_draws_and_a_noop_without_a_pdf(tmp_path):
-    from ocean_skill.workflows.report import PdfReport
+    from ocean_skill.suites.report import PdfReport
 
     with PdfReport(tmp_path / "report.pdf", tmp_path / "figures") as report:
         report.cover(_blank_pages(1))
@@ -2316,7 +2315,7 @@ def test_run_suite_puts_the_cover_pages_in_the_pdf_and_the_manifest(
     tmp_path, stub_model, monkeypatch
 ):
     monkeypatch.setattr(
-        "ocean_skill.workflows.cover.cover_figures", lambda info: _blank_pages(2)
+        "ocean_skill.suites.cover.cover_figures", lambda info: _blank_pages(2)
     )
     path = _write_suite(
         tmp_path,
@@ -2356,7 +2355,7 @@ def test_cover_false_or_pdf_false_or_nothing_drawn_writes_no_cover(
 ):
     calls = []
     monkeypatch.setattr(
-        "ocean_skill.workflows.cover.cover_figures",
+        "ocean_skill.suites.cover.cover_figures",
         lambda info: calls.append(info) or _blank_pages(1),
     )
     off = run_suite(_write_suite(tmp_path, _model_only_suite(tmp_path, cover=False)))
@@ -2386,7 +2385,7 @@ def test_the_c_star_blueprint_and_workplan_are_copied_under_run_info(
     info = SimpleNamespace(
         blueprint=bp, workplan=wp, as_dict=lambda: {"name": "x", "sections": []}
     )
-    monkeypatch.setattr("ocean_skill.workflows.cover.gather", lambda *a, **k: info)
+    monkeypatch.setattr("ocean_skill.suites.cover.gather", lambda *a, **k: info)
     result = run_suite(_write_suite(tmp_path, _model_only_suite(tmp_path)))
 
     assert (result.report_dir / "run_info" / "bp.yaml").read_text() == "name: bp"

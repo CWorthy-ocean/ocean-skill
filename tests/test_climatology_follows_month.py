@@ -537,7 +537,7 @@ def test_no_page_of_a_shipped_suite_follows_a_climatology(
     monkeypatch,
 ):
     from ocean_skill.comparison import Comparison
-    from ocean_skill.workflows.run import run_suite
+    from ocean_skill.suites.run import run_suite
 
     followed: list[tuple[str, str]] = []
     real = Comparison._follow_steps

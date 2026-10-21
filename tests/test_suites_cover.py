@@ -1,4 +1,4 @@
-"""``ocean_skill.workflows.cover``: the cover page's content and drawing.
+"""``ocean_skill.suites.cover``: the cover page's content and drawing.
 
 A synthetic C-Star run folder modeled on a real one (workplan one level above
 ``tasks/``, ``tasks/<step>/work/`` holding blueprints and ``directives.yaml``).
@@ -18,7 +18,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 from ocean_skill.config import SuiteConfig
 from ocean_skill.plot.typography import PAGE_H, PAGE_W
-from ocean_skill.workflows.cover import _condense, cover_figures, gather
+from ocean_skill.suites.cover import _condense, cover_figures, gather
 
 IN = "/data/input"
 

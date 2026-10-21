@@ -495,7 +495,7 @@ def test_refresh_forcing_joins_glob_lists_into_the_refresh_catalog(
 ):
     import intake
 
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid = _forcing_files(tmp_path)
     catalog_path = isolated_catalogs / "run.yaml"
@@ -541,7 +541,7 @@ def test_refresh_forcing_keeps_entries_whose_files_are_gone(
 ):
     import intake
 
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid = _forcing_files(tmp_path)
     catalog_path = isolated_catalogs / "run.yaml"
@@ -564,7 +564,7 @@ def test_refresh_forcing_reports_a_failed_entry_and_builds_the_rest(
 ):
     import intake
 
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid = _forcing_files(tmp_path)
     catalog_path = isolated_catalogs / "run.yaml"
@@ -1163,7 +1163,7 @@ def test_subchunk_without_a_ref_is_refused(layouts):
 def test_refresh_forcing_subchunk_builds_a_set_that_otherwise_fails(
     isolated_catalogs, tmp_path, capsys
 ):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid, _, _ = _grid(tmp_path)
     _uneven_months(tmp_path)
@@ -1365,7 +1365,7 @@ def test_two_ics_compare_at_a_depth(ic):
 def test_refresh_forcing_builds_an_ic_entry_and_takes_an_hc(
     isolated_catalogs, tmp_path, capsys
 ):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
     from tests import _suite_fixture as sf
 
     grid = _ic_grid(tmp_path, hc=False)
@@ -1602,7 +1602,7 @@ def test_a_strip_keeps_only_the_variables_every_side_has(tmp_path):
 
 
 def test_refresh_forcing_builds_a_strip_entry(isolated_catalogs, tmp_path, capsys):
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid, _, _ = _grid(tmp_path)
     _boundary_file(tmp_path / "bry.nc", [0, 1, 2])
@@ -1644,7 +1644,7 @@ def test_refresh_forcing_label_is_how_figures_name_each_entry(
     isolated_catalogs, tmp_path
 ):
     from ocean_skill import catalog
-    from ocean_skill.workflows.run import _refresh_forcing
+    from ocean_skill.suites.run import _refresh_forcing
 
     grid = _forcing_files(tmp_path)
     catalog_path = isolated_catalogs / "run.yaml"

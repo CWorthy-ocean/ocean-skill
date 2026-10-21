@@ -21,11 +21,11 @@ import xarray as xr
 from matplotlib.figure import Figure
 
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
-from ocean_skill.workflows import report as _report
-from ocean_skill.workflows.report import CAPTION_WRAP, PdfReport
-from ocean_skill.workflows.run import run_suite
-from tests.test_workflows_report import (
+from ocean_skill.suites import pages as P
+from ocean_skill.suites import report as _report
+from ocean_skill.suites.report import CAPTION_WRAP, PdfReport
+from ocean_skill.suites.run import run_suite
+from tests.test_suites_report import (
     _big,
     _figure,
     _full_bleed_figure,
@@ -33,7 +33,7 @@ from tests.test_workflows_report import (
     _mediaboxes,
     _small,
 )
-from tests.test_workflows_run import (  # noqa: F401  (stub_model is a fixture)
+from tests.test_suites_run import (  # noqa: F401  (stub_model is a fixture)
     _model_only_suite,
     _write_suite,
     stub_model,
@@ -336,7 +336,7 @@ def test_a_packed_page_survives_the_jpeg_pass(tmp_path):
 
     if shutil.which("gs") is None:
         pytest.skip("Ghostscript (gs) not installed")
-    from tests.test_workflows_report import _map_like_figure
+    from tests.test_suites_report import _map_like_figure
 
     pdf = tmp_path / "report.pdf"
     with PdfReport(pdf, tmp_path / "figures") as report:

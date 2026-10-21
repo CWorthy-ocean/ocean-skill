@@ -30,10 +30,10 @@ import ocean_skill as osk
 from ocean_skill import cache as _cache
 from ocean_skill import comparison as _comparison
 from ocean_skill import sources as _sources
-from ocean_skill.workflows import pages as _pages
-from ocean_skill.workflows import run as _run
-from ocean_skill.workflows.run import PageProblem, main, run_suite
-from tests.test_workflows_run import (
+from ocean_skill.suites import pages as _pages
+from ocean_skill.suites import run as _run
+from ocean_skill.suites.run import PageProblem, main, run_suite
+from tests.test_suites_run import (
     _field_page,
     _model_only_suite,
     _section_page,
@@ -225,7 +225,7 @@ def test_smoke_does_not_touch_the_real_report_dir(tmp_path, fake_sources, monkey
 
 
 def stub_model_field():
-    from tests.test_workflows_run import _stub_field
+    from tests.test_suites_run import _stub_field
 
     return _stub_field()
 

@@ -15,7 +15,7 @@ from matplotlib.backends.backend_agg import RendererAgg
 from matplotlib.collections import QuadMesh
 
 from ocean_skill.plot.registry import render
-from ocean_skill.workflows.report import PdfReport
+from ocean_skill.suites.report import PdfReport
 from tests.test_grid_panels import _diff_items, _grid
 
 

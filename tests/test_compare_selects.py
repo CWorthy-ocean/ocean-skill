@@ -18,7 +18,7 @@ import pytest
 from ocean_skill import comparison
 from ocean_skill.comparison import Comparison, ComparisonSet
 from ocean_skill.config import SuiteConfig
-from ocean_skill.workflows import pages as P
+from ocean_skill.suites import pages as P
 
 DECLARED = {"model": {"variables": []}, "obs": {"variables": []}}
 
