@@ -2568,7 +2568,8 @@ osk.plot({"Eq": eq, "180-160": b180, "160-120": b160})
 
 Two things make a section look like a paper figure, such as phosphate filled with
 temperature isotherms drawn on top. Both work the same in the static and interactive
-renderers, on a single section, a stacked set, and comparison rows.
+renderers, on a single section, a stacked set, and comparison rows. `contours=` also
+draws on maps (see below); `mark="contourf"` is a section option.
 
 ```python
 po4 = [osk.field("woa23_phosphate_annual", "phosphate", select=s, aggregate=a)
@@ -2597,8 +2598,12 @@ osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], n
     - for `osk.plot`, a list or `{label: ...}` dict shaped like its items.
   - Over a comparison, the overlay comparison's test lines go on the test panel and
     its reference lines on the reference panel. The difference panel gets none.
-  - An overlay on a different grid is refused, naming the axis that differs. Nothing
-    is regridded.
+  - A section's overlay on a different grid is refused, naming the axis that differs.
+    Nothing is regridded.
+  - `contours=True` draws the plotted object's own lines: its test lines over its
+    test panel and its reference lines over its reference panel, for a comparison.
+    `contours=False` or `None` draws none. This works on a `Field`, `FieldSet`,
+    `Comparison`, `ComparisonSet` and `osk.plot`, for sections and maps alike.
 - **`contour_levels=`** picks the lines: `True` (the default) for about six round
   values, an int for about that many, or a list. The levels are chosen once for the
   whole figure, so every panel shows the same isotherms.
@@ -2610,6 +2615,52 @@ osk.plot(po4, contours=temp, mark="contourf", contour_levels=[10, 15, 20, 25], n
   Statically, any other `ax.contour` keyword works too. The interactive renderer
   honours a single colour, a scalar width and the named line styles, and warns for
   the rest. Interactively, hovering a line shows its value, such as `temperature 15 °C`.
+
+### Contour lines over maps (`contours=`)
+
+`contours=` draws on a map the same way, so a paper's oxygen isolines can sit over an
+OMZ-thickness map. The overlay is built like the map (same source, `select` and
+`aggregate` machinery), but it is usually a *different* variable, and often a
+different depth range:
+
+```python
+omz = osk.field(
+    "pacmed_roms",
+    {"calculate": "thickness", "variable": "oxygen", "below": 50},
+    select={"time": "2012-06"},
+)
+o2_mean = osk.field(
+    "pacmed_roms", "oxygen",
+    select={"time": "2012-06", "depth": {"min": 200, "max": 500}},
+    aggregate={"depth": "mean"},
+)
+omz.plot(contours=o2_mean, contour_levels=[5, 20, 60], contour_kwargs={"colors": "k"})
+```
+
+- **Which shapes take lines:** a single map (`Field`), a set of maps (`FieldSet`), a
+  comparison row (`test | reference | difference`) and a stack of them (`ComparisonSet`,
+  `osk.plot`). Movies, skill maps and depth-time panels draw none and refuse
+  `contours=`.
+- **Pairing:** the same rules as for sections.
+  - A `FieldSet` or list pairs by position.
+  - A comparison's test lines go over the test panel and its reference lines over the
+    reference panel. The difference panel gets none, and `panels="difference"` with
+    `contours=` is refused because it would have nowhere to draw them.
+  - A map member fanned over levels (`select={"depth": [0, 200]}`) pairs with its
+    overlay level by level, so the overlay must split into the same number of maps.
+- **Same axes as the map:** a map faceted over time or depth is paired panel by panel
+  with an overlay standing on the same axes. An overlay with other facet axes is
+  refused, naming both. Narrow or collapse it with the same `select=`/`aggregate=` as
+  the map. A bare grid source with no vertical request draws its surface, for the map
+  and for its overlay alike.
+- **A different grid is fine:** unlike a section, a map's lines live in longitude and
+  latitude, so a climatology's isolines over a model's fill, or the reverse, land where
+  they belong with no regridding. Lines are cropped to the map's own extent, and a
+  domain across the dateline draws its lines in its own longitude convention.
+- **Levels and style** are `contour_levels=` and `contour_kwargs=` exactly as above,
+  and the levels are shared by every panel of the figure.
+- **`contours=True`** draws the plotted map's own lines, for example `omz.plot(
+  contours=True)`.
 
 ### Sections built from casts: cast markers, the seafloor and the fill between casts (`casts=`, `bathymetry=`, `cast_fill=`)
 

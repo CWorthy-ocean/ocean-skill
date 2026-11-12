@@ -2,7 +2,9 @@
 
 ``po4.plot(contours=temp)`` draws temperature isotherms over a phosphate section -- a
 second variable, built the same way as the first (same source, same ``select`` and
-``aggregate``), so that it lands on the same section grid. The overlay is a whole
+``aggregate``), so that it lands on the same section grid -- and ``omz.plot(
+contours=o2)`` draws oxygen isolines over a map the same way (a map's overlay may sit
+on another grid; see :mod:`ocean_skill.plot.map_contours`). The overlay is a whole
 object of the same shape as the one plotted: a :class:`~ocean_skill.field.Field` over
 a ``Field``, a :class:`~ocean_skill.field.FieldSet` over a ``FieldSet`` (paired by
 position), a :class:`~ocean_skill.comparison.Comparison` over a ``Comparison`` (its
@@ -12,16 +14,24 @@ This module only pairs and checks; it reads nothing new. Each plotted item gains
 three keys a renderer reads -- ``contour`` (the overlay's own section data: one
 DataArray for a field, a ``{"test", "reference"}`` pair for a comparison),
 ``contour_standard_name`` and ``contour_units`` (for the interactive hover) -- and
-the renderer then puts the overlay on the panel's own grid and refuses one that does
-not match (:func:`ocean_skill.plot.section.prepare_overlay`), rather than
-regridding it silently.
+on a section the renderer then puts the overlay on the panel's own grid and refuses
+one that does not match (:func:`ocean_skill.plot.section.prepare_overlay`), rather
+than regridding it silently. ``contours=True`` is resolved by each ``plot()`` to the
+plotted object itself before it reaches here.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["comparison_contour", "contour_members", "field_contour"]
+__all__ = [
+    "COMPARISON_FAMILIES",
+    "FIELD_FAMILIES",
+    "comparison_contour",
+    "contour_members",
+    "field_contour",
+    "map_contour",
+]
 
 
 def _members(obj: Any, kind: str) -> list[Any] | None:
@@ -78,20 +88,50 @@ def contour_members(contours: Any, n: int, *, kind: str) -> list[Any]:
     return members
 
 
-def _refuse_non_section(family: str, reason: str, who: str) -> None:
+#: Plotted families that take an overlay: a field's section or map, and a comparison
+#: row's section or map (test | reference | difference -- the difference panel never
+#: gets lines). Movies, skill maps and depth-time panels draw none.
+FIELD_FAMILIES = ("section", "field_facet")
+COMPARISON_FAMILIES = ("section_row", "field_row")
+
+
+def _refuse_family(family: str, reason: str, who: str) -> None:
     raise ValueError(
-        f"contours= draws contour lines over a vertical section, but {who} draws "
-        f"as {family!r} ({reason}). Overlays on maps and depth-time panels are not "
-        "supported yet."
+        f"contours= draws contour lines over a vertical section or a map, but {who} "
+        f"draws as {family!r} ({reason}). Overlays on depth-time panels, skill maps "
+        "and movies are not supported."
     )
 
 
+def _check_families(overlay: Any, plotted: Any, families: tuple[str, ...], what: str):
+    """Refuse a plotted family with no lines, or an overlay that draws differently."""
+    if plotted.family not in families:
+        _refuse_family(plotted.family, plotted.family_reason, f"the plotted {what}")
+    if overlay.family != plotted.family:
+        shape = "a section" if plotted.family.startswith("section") else "a map"
+        raise ValueError(
+            f"contours= over {shape} takes an overlay that is {shape} too, but the "
+            f"overlay draws as {overlay.family!r} ({overlay.family_reason}) -- build "
+            "it the way the plotted one was built (same source, select= and "
+            "aggregate=) with the variable to draw as lines."
+        )
+
+
 def field_contour(overlay: Any, *, plotted: Any) -> dict[str, Any]:
-    """Return the item keys that draw ``overlay``'s lines over field ``plotted``."""
-    if plotted.family != "section":
-        _refuse_non_section(plotted.family, plotted.family_reason, "the plotted field")
-    if overlay.family != "section":
-        _refuse_non_section(overlay.family, overlay.family_reason, "the overlay")
+    """Return the item keys that draw ``overlay``'s lines over field ``plotted``.
+
+    For a section, ``contour`` is the overlay's own section data. For a map it is
+    ``None`` here: which slice of the overlay a map draws (its surface default, a
+    level split across a set's panels) is the plotted field's own business, so the
+    caller fills it with :func:`map_contour` once it has built the map's item.
+    """
+    _check_families(overlay, plotted, FIELD_FAMILIES, "field")
+    if plotted.family == "field_facet":
+        return {
+            "contour": None,
+            "contour_standard_name": overlay.standard_name,
+            "contour_units": None,
+        }
     overlay._require_section_shape()
     return {
         "contour": overlay.data,
@@ -100,17 +140,46 @@ def field_contour(overlay: Any, *, plotted: Any) -> dict[str, Any]:
     }
 
 
-def comparison_contour(overlay: Any, *, plotted: Any) -> dict[str, Any]:
-    """Return the item keys that draw ``overlay``'s lines over a comparison row."""
-    if plotted.family != "section_row":
-        _refuse_non_section(
-            plotted.family, plotted.family_reason, "the plotted comparison"
-        )
-    if overlay.family != "section_row":
-        _refuse_non_section(overlay.family, overlay.family_reason, "the overlay")
-    aligned = overlay.aligned
+def map_contour(
+    keys: dict[str, Any], overlay_map: Any, plotted_map: Any
+) -> dict[str, Any]:
+    """Fill :func:`field_contour`'s map keys with the overlay's own map, checked.
+
+    ``overlay_map`` is the overlay's DataArray built exactly as the plotted item's
+    ``field`` was (the same ``_facet_item_or_refuse``/``_map_items_of`` path, so the
+    same surface default and level split); ``plotted_map`` is that ``field``. The two
+    must stand on the same facet axes -- see
+    :func:`ocean_skill.plot.map_contours.check_map_overlay`.
+    """
+    from ocean_skill.plot.map_contours import check_map_overlay
+
+    check_map_overlay(overlay_map, plotted_map)
     return {
-        "contour": {"test": aligned["test"], "reference": aligned["reference"]},
+        **keys,
+        "contour": overlay_map,
+        "contour_units": overlay_map.attrs.get("units"),
+    }
+
+
+def comparison_contour(overlay: Any, *, plotted: Any) -> dict[str, Any]:
+    """Return the item keys that draw ``overlay``'s lines over a comparison row.
+
+    ``contour`` is ``{"test", "reference"}``, the overlay's own aligned pair: its test
+    lines go over the test panel, its reference lines over the reference panel, and
+    the difference panel draws none. On a map row each side is checked to be a map
+    standing on the same axes as the panel it is drawn over.
+    """
+    _check_families(overlay, plotted, COMPARISON_FAMILIES, "comparison")
+    aligned = overlay.aligned
+    pair = {"test": aligned["test"], "reference": aligned["reference"]}
+    if plotted.family == "field_row":
+        from ocean_skill.plot.map_contours import check_map_overlay
+
+        panels = plotted.aligned
+        for side in ("test", "reference"):
+            check_map_overlay(pair[side], panels[side])
+    return {
+        "contour": pair,
         "contour_standard_name": overlay.standard_name,
         "contour_units": aligned["reference"].attrs.get("units"),
     }

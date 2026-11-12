@@ -380,7 +380,29 @@ draws the time series at its location:
 
 `contours: true` draws contour lines of the page's own field over it; a mapping draws
 another variable's (`contours: {variables: [temperature]}` over phosphate). `plot:
-{contour_levels: ...}` sets the levels.
+{contour_levels: ...}` sets the levels. It works on section pages and on map pages
+alike (a `field:` map, a `compare:` row of test | reference | difference): a comparison's
+test lines go over the test panel and its reference lines over the reference panel, and
+the difference panel gets none. The mapping's keys are merged over the page's own, so a
+map's lines can come from a different variable and depth range, such as the 200-500 m
+mean oxygen over the OMZ thickness:
+
+```yaml
+- title: "OMZ thickness with 200-500 m oxygen isolines"
+  compare:
+    reference: [woa23_oxygen_annual]
+    variables: [{calculate: thickness, variable: oxygen, below: 50}]
+    aggregate: {time: mean}
+  contours:
+    variables: [oxygen]
+    select: {depth: {min: 200, max: 500}}
+    aggregate: {test: {time: mean, depth: mean}, reference: {depth: mean}}
+  plot: {contour_levels: [20, 50, 100]}
+```
+
+The overlay has to stand on the same facet axes as the map (a map faceted over months
+needs an overlay over the same months) but may sit on another grid. Movies and skill
+maps take no contours, and `plot: {panels: difference}` with `contours:` is an error.
 
 ## Caching
 

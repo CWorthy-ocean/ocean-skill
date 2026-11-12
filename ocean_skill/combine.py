@@ -119,10 +119,10 @@ def plot(items: Any, *, renderer: str = "matplotlib", **plot_kwargs: Any):
     **plot_kwargs
         Plot options, forwarded unchanged to the set's own ``plot`` -- ``title``,
         ``shared_limits``, ``save``, the ``*_kwargs`` styling dicts, and the rest of
-        ``docs/plot_styling_reference.md``. ``contours=`` (vertical sections only)
-        takes overlays shaped like ``items`` itself -- a list of the same length,
-        or a dict with the same labels -- each drawn as contour lines over the
-        member at the same place::
+        ``docs/plot_styling_reference.md``. ``contours=`` (vertical sections and
+        maps) takes overlays shaped like ``items`` itself -- a list of the same
+        length, or a dict with the same labels -- each drawn as contour lines over
+        the member at the same place; ``contours=True`` draws each member's own::
 
             osk.plot({"ROMS": roms_po4, "WOA": woa_po4},
                      contours={"ROMS": roms_temp, "WOA": woa_temp},
@@ -183,6 +183,11 @@ def plot(items: Any, *, renderer: str = "matplotlib", **plot_kwargs: Any):
             "the comparisons together and the fields together, separately."
         )
 
+    if plot_kwargs.get("contours") is True:
+        # the plotted items' own lines: an overlay shaped like the figure itself
+        plot_kwargs["contours"] = items
+    elif plot_kwargs.get("contours") is False:
+        del plot_kwargs["contours"]
     if plot_kwargs.get("contours") is not None:
         # The overlay mirrors the figure's own structure -- a list for a list, a
         # {label: item} dict for a dict -- put in member order here, then flattened
