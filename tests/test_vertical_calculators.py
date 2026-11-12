@@ -399,3 +399,39 @@ def test_depth_key_refuses_an_unweighted_mean_when_s_rho_is_also_a_coordinate():
     weighted = da.assign_coords(dz=("s_rho", np.array([1.0, 1.0, 2.0, 0.0])))
     got = aggregate(weighted, {"depth": "mean"})
     assert float(got.squeeze()) == pytest.approx(20.0)
+
+
+def _woa_umol(columns):
+    """Build a WOA-like oxygen field in umol/kg (what WOA23 ships)."""
+    ds = _woa(columns)
+    ds["oxygen"].attrs["units"] = "micromoles_per_kilogram"
+    return ds
+
+
+def test_thickness_thresholds_in_canonical_units_not_source_units():
+    # 48 umol/kg = 49.2 mmol m-3 (< 50, counted); 49 umol/kg = 50.225 (not counted)
+    ds = _woa_umol([[48, 49, 49, 49], [49, 48, 49, 49]])
+    out = vertical.calculate_thickness(ds, variable="oxygen", below=50)
+    assert out.values[:, 0] == pytest.approx([5.0, 15.0])  # only the 48 level's layer
+    assert "mmol" in out.attrs["long_name"]
+    assert out.attrs["thickness_threshold_units"] == "mmol/m^3"
+    assert out.attrs["thickness_threshold_units"] in out.attrs["long_name"]
+
+
+def test_thickness_leaves_a_non_concentration_in_its_own_units():
+    ds = _woa([[25, 22, 15, 10]])
+    ds["oxygen"].attrs["units"] = "degC"
+    out = vertical.calculate_thickness(ds, variable="oxygen", above=20)
+    assert out.values[0, 0] == pytest.approx(20.0)  # levels 0 and 10 m: 5 + 15
+    assert out.attrs["thickness_threshold_units"] == "degC"
+    assert "20 degC" in out.attrs["long_name"]
+
+
+def test_thickness_conversion_keeps_roms_depth_coords_and_stays_lazy():
+    ds = _roms([[10, 20, 60, 70]])
+    ds["oxygen"].attrs["units"] = "micromoles_per_kilogram"
+    lazy = ds.chunk({"eta_rho": 1})
+    out = vertical.calculate_thickness(lazy, variable="oxygen", below=50)
+    assert out.chunks is not None
+    # 20 and 10 umol/kg are well below 50 mmol m-3: the bottom two layers (40 + 30 m)
+    assert out.values[0, 0] == pytest.approx(70.0)

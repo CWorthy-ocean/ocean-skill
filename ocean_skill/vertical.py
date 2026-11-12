@@ -10,10 +10,12 @@ one number per column (a 2-D map, per time step)::
   depth of the oxygen minimum, of the chlorophyll maximum. Where the extremum is reached
   at several levels, the shallowest is reported.
 - ``thickness`` is the summed thickness (m) of the layer where the variable is strictly
-  below (``below=``) or strictly above (``above=``) a threshold, *in the variable's own
-  units* -- ``below: 50`` on oxygen in mmol m-3 is the 50 mmol m-3 oxygen minimum zone
-  (OMZ). It is the total across the column, not the span between the first and last
-  qualifying level: two separate thin layers add up.
+  below (``below=``) or strictly above (``above=``) a threshold, *in the package's
+  canonical units* -- mmol m-3 for a concentration (WOA's umol/kg is converted first, at
+  rho=1025), so ``below: 50`` on oxygen is the 50 mmol m-3 oxygen minimum zone (OMZ) on
+  every source; any other quantity keeps its own units. It is the total across the
+  column, not the span between the first and last qualifying level: two separate thin
+  layers add up.
 
 Both work on the two shapes of vertical axis this package meets, which is the point of
 having one calculator for both rather than ``{"Z": "min"}`` spelled once per product:
@@ -218,16 +220,21 @@ def calculate_thickness(
     """Return the summed thickness (m) where ``variable`` is below/above a threshold.
 
     Exactly one of ``below=`` (strictly less than) or ``above=`` (strictly greater
-    than), in the variable's own units. A column with data but no qualifying layer is 0;
-    a column with no data is NaN. Layer thicknesses are described in the module
-    docstring.
+    than), in canonical units: mmol m-3 for a concentration, converted by
+    :func:`ocean_skill.units.convert_units` (WOA's umol/kg at rho=1025) so both sides of
+    a comparison threshold the same water; any other quantity keeps its own units. A
+    column with data but no qualifying layer is 0; a column with no data is NaN. Layer
+    thicknesses are described in the module docstring.
     """
+    from ocean_skill.units import convert_units
+
     if (below is None) == (above is None):
         raise ValueError(
-            "thickness needs exactly one of below= or above= (a threshold in the "
-            f"variable's own units), got below={below!r}, above={above!r}."
+            "thickness needs exactly one of below= or above= (a threshold in mmol m-3 "
+            "for a concentration, else the variable's own units), got "
+            f"below={below!r}, above={above!r}."
         )
-    da = _resolve(ds, variable, "thickness")
+    da = convert_units(_resolve(ds, variable, "thickness"))
     zdim, depth, is_roms = _vertical_of(ds, da, s_dim)
 
     if is_roms:
@@ -253,6 +260,7 @@ def calculate_thickness(
         "long_name": f"thickness where {_describe(da)} is {word} {shown}",
         f"thickness_{word}": float(threshold),
         "thickness_variable": label,
+        "thickness_threshold_units": units,
     }
     return out
 
@@ -272,7 +280,7 @@ def _register() -> None:
     from ocean_skill.operators import register_calculator
 
     register_calculator("depth_of", inputs=_inputs)(calculate_depth_of)
-    register_calculator("thickness", inputs=_inputs)(calculate_thickness)
+    register_calculator("thickness", inputs=_inputs, version=2)(calculate_thickness)
 
 
 _register()

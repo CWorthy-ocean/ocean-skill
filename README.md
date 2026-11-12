@@ -917,7 +917,8 @@ water column:
 # depth (m, positive down) of the column's minimum -- or maximum -- of a variable
 {"calculate": "depth_of", "variable": "oxygen", "extremum": "min"}
 # summed thickness (m) of the layers where the variable is below -- or above -- a
-# threshold, in the variable's own units (oxygen is mmol m-3 here: the OMZ)
+# threshold: mmol m-3 for a concentration whatever the source stores (WOA's umol/kg
+# is converted first, at rho = 1025), else the variable's own units -- the 50 mmol m-3 OMZ
 {"calculate": "thickness", "variable": "oxygen", "below": 50}
 ```
 
@@ -942,6 +943,25 @@ The same two dicts go in a suite's `variables:` list as YAML flow maps
   called: `depth` on WOA, `s_rho` on native ROMS output (`Z` works too). A plain `mean`
   over native levels is refused (their thicknesses are uneven, so it would not be a depth
   mean) unless a depth-band selection has attached the cell weights.
+
+One calculator works the other way round, on a *layer*: `horizontal_gradient` is the
+magnitude of a field's horizontal gradient, per km, taken after the usual depth
+selection (and after any time aggregate, so `{"time": "mean"}` gives the gradient of
+the mean field):
+
+```python
+osk.compare(
+    reference="woa23_oxygen_annual", test="my_run",
+    variables=[{"calculate": "horizontal_gradient", "variable": "oxygen"}],
+    select={"depth": 300}, depth_method="interp", aggregate={"time": "mean"},
+)
+```
+
+Centered differences use the great-circle distance between neighbors, read off the
+field's own lon/lat, so ROMS and WOA lanes are treated alike. A cell without both
+neighbors (a domain edge, the edge of a `select` box, next to land) is NaN. On ROMS give
+`depth_method="interp"` (`nearest` jumps between s-levels from column to column, which
+corrupts a horizontal derivative, and warns); native s-levels left standing are refused.
 
 Any function can be plugged in this way, from a notebook, with no codebase change —
 `register_calculator` is public API, not an internal detail:

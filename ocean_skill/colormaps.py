@@ -85,6 +85,14 @@ __all__ = [
 #: entry below, but still matter), phaeopigment, ciliate, diatom, dinoflagellate --
 #: a cell-count/pigment family unlikely to sit beside the twelve species above.
 _SEQUENTIAL_CMAPS: dict[str, str] = {
+    # Derived-diagnostic names embed the variable they derive from, so "oxygen" would
+    # claim them below (dense_r). They are not oxygen: a horizontal-gradient magnitude
+    # is non-negative and read from zero (amp); a layer thickness or the depth of an
+    # extremum is a length in meters, the same family as MLD (deep). Listed first so
+    # they win the substring match.
+    "horizontal_gradient": "cmo.amp",
+    "thickness_of": "cmo.deep",
+    "depth_of_": "cmo.deep",
     # Height above the geoid has an arbitrary datum -- like temperature it is an
     # interval quantity, only differences mean anything -- so neither a white-to-colour
     # magnitude map (cmo.amp, xcmocean's own default for this vartype: white reads as

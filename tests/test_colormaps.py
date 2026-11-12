@@ -357,3 +357,24 @@ def test_every_centred_variable_names_a_diverging_map():
 )
 def test_tidal_and_pressure_flux_colormaps(name, expected):
     assert cmaps_for(name)[0].name == expected
+
+
+# --- derived diagnostics embed their variable's name ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("horizontal_gradient_of_oxygen", "amp"),
+        ("horizontal_gradient_of_temperature", "amp"),
+        ("thickness_of_oxygen_below_50", "deep"),
+        ("depth_of_minimum_oxygen", "deep"),
+        ("depth_of_maximum_chlorophyll", "deep"),
+        # the variables themselves keep their own maps
+        ("oxygen", "dense_r"),
+        ("nitrate", "deep"),
+    ],
+)
+def test_derived_diagnostic_names_do_not_inherit_their_variable_map(name, expected):
+    """"oxygen" is a substring of these names, but they are not oxygen."""
+    assert cmaps_for(name)[0].name == expected

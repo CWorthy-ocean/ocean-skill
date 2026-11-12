@@ -2551,3 +2551,41 @@ def test_plot_title_must_be_text():
     )
     with pytest.raises(ValueError, match="plot: title: must be text"):
         P.expand(suite)
+
+
+# -- the final-report template's Fig. 21c page ----------------------------------------
+
+
+def test_final_report_oxygen_gradient_page_interpolates_to_300_m(monkeypatch):
+    """Fig. 21c: the run-mean O2 gradient at 300 m, interpolated rather than snapped."""
+    from pathlib import Path
+
+    import yaml
+
+    monkeypatch.setattr(
+        "ocean_skill.extrema._native_time_index",
+        lambda source: pd.DatetimeIndex(["2010-07-31 23:45", "2010-08-31 23:45"]),
+    )
+    template = (
+        Path(__file__).resolve().parents[1]
+        / "ocean_skill/suites/templates/final-report.yaml"
+    )
+    suite = SuiteConfig.model_validate(yaml.safe_load(template.read_text()))
+    titles = [p.title for p in P.expand(suite)]
+    (page,) = [
+        p for p in P.expand(suite) if p.title == "Horizontal oxygen gradient at 300 m"
+    ]
+    assert page.kind == "compare"
+    assert page.kwargs["variables"] == [
+        {"calculate": "horizontal_gradient", "variable": "oxygen"}
+    ]
+    assert page.kwargs["reference"] == ["woa23_oxygen_annual"]
+    assert page.kwargs["select"]["depth"] == 300
+    # a nearest-level pick jumps between s-levels column to column: interpolate
+    assert page.kwargs["depth_method"] == "interp"
+    assert (page.plot["vmin"], page.plot["vmax"]) == (0, 0.15)
+    assert "Fig. 21c" in page.caption
+    # sits between the thickness page and the section's metrics
+    i = titles.index("Horizontal oxygen gradient at 300 m")
+    assert titles[i - 1] == "Depth of the oxygen minimum and OMZ thickness"
+    assert titles[i + 1] == "Oxygen minimum zone — metrics"

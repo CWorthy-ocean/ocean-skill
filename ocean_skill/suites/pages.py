@@ -926,7 +926,12 @@ SURFACE_ONLY_MARKERS = ("ssh", "co2_flux", "pco2", "ph")
 
 
 def _is_calculate_spec(spec: Any) -> bool:
-    return isinstance(spec, dict) and "calculate" in spec
+    """Report a whole-column calculate-spec (a *layer* one follows the depth select)."""
+    from ocean_skill.operators import layer_calculator
+
+    return (
+        isinstance(spec, dict) and "calculate" in spec and not layer_calculator(spec)
+    )
 
 
 def _has_real_depth(select: Any) -> bool:

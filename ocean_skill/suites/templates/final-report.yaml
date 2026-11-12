@@ -497,10 +497,10 @@ pages:
   # -- Fig. 21a: oxygen minimum ----------------------------------------------------------------------
   - title: "Fig. 21 — Oxygen minimum zone"
     section: >-
-      Panels a, b and d of the report's figure, model against the WOA23 annual
-      climatology: the minimum oxygen in the water column, the depth of that minimum, and
-      the thickness of the oxygen minimum zone (oxygen below 50). Panel c, the horizontal
-      oxygen gradient at 300 m, is not drawn.
+      The four panels of the report's figure, model against the WOA23 annual
+      climatology: (a) the minimum oxygen in the water column, (b) the depth of that
+      minimum, (c) the horizontal oxygen gradient at 300 m, and (d) the thickness of the
+      oxygen minimum zone (oxygen below 50 mmol/m³).
 
   # Every level has to stand on both sides (a compare lane otherwise defaults to the
   # surface, and the minimum of one level is that level). One band over the whole water
@@ -530,9 +530,28 @@ pages:
       aggregate: {time: mean}
     caption: >-
       Fig. 21b, d. Top: depth (m) of each column's oxygen minimum. Bottom: total
-      thickness (m) of the water where oxygen is below 50 (the model's mmol/m³; WOA23's
-      µmol/kg, about 2.5% lower). The model's values are calculated on each restart
-      snapshot and then averaged over the run.
+      thickness (m) of the water where oxygen is below 50 mmol/m³ on both sides (WOA23
+      converted from µmol/kg at ρ = 1025). The model's values are calculated on each
+      restart snapshot and then averaged over the run.
+
+  # Panel c takes the run-mean oxygen first: WOA23 annual is a mean field, so the gradient
+  # of the mean is the like-for-like comparison (the mean of snapshot gradients is
+  # not). Oxygen is interpolated to 300 m (`interp`, not `nearest`): picking the
+  # nearest s-level jumps between levels from column to column, which corrupts a
+  # horizontal derivative. WOA's 300 m is a standard level, so it needs no interpolation.
+  - title: "Horizontal oxygen gradient at 300 m"
+    compare:
+      reference: [woa23_oxygen_annual]
+      variables:
+        - {calculate: horizontal_gradient, variable: oxygen}
+      select: {depth: 300}
+      depth_method: interp
+      aggregate: {time: mean}
+    plot: {vmin: 0, vmax: 0.15}
+    caption: >-
+      Fig. 21c. Magnitude of the horizontal oxygen gradient at 300 m (mmol m⁻³ km⁻¹): the
+      model's run-mean oxygen, interpolated to 300 m, against WOA23 annual at 300 m.
+      Centred differences over great-circle grid spacing.
 
   - title: "Oxygen minimum zone — metrics"
     summary: {scope: section, kind: [table, both], color_by: variable}
