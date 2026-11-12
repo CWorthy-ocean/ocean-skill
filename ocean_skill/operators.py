@@ -55,6 +55,8 @@ from typing import Any
 __all__ = [
     "CALCULATORS",
     "CALCULATOR_INPUTS",
+    "CALCULATOR_LAYER",
+    "CALCULATOR_VERSIONS",
     "CF_CELL_METHODS",
     "COMBINERS",
     "DERIVED",
@@ -62,11 +64,14 @@ __all__ = [
     "TIME_GROUPBY_ATTR",
     "TIME_RESAMPLE_ATTR",
     "aggregate",
+    "apply_layer_calculator",
     "box_in_spec",
+    "calculator_versions",
     "cell_method_name",
     "combine",
     "final_step",
     "is_time_fold_coord",
+    "layer_calculator",
     "oriented_slice",
     "point_in_spec",
     "register_calculator",
@@ -161,8 +166,26 @@ CALCULATOR_INPUTS: dict[str, Any] = {}
 #: as well be one argument.
 CALCULATOR_FANS: dict[str, tuple[str, ...]] = {}
 
+#: Calculators registered with ``layer=True``: they take one 2-D horizontal layer
+#: *after* the normal depth selection (see :func:`apply_layer_calculator`) instead of
+#: the whole Dataset, so a ``select={"depth": ...}`` alongside one is legitimate.
+#: Signature: ``fn(da, *, variable=None, **kwargs) -> DataArray``.
+CALCULATOR_LAYER: set[str] = set()
 
-def register_calculator(name: str, *, inputs: Any = None, fans: tuple[str, ...] = ()):
+#: Each registered calculator's formula version. :func:`calculator_versions` reports
+#: those above 1 into the cache key, so changing a calculator's numbers re-keys only
+#: the specs that use it rather than the whole cache (see ``cache._FORMAT_VERSION``).
+CALCULATOR_VERSIONS: dict[str, int] = {}
+
+
+def register_calculator(
+    name: str,
+    *,
+    inputs: Any = None,
+    fans: tuple[str, ...] = (),
+    layer: bool = False,
+    version: int = 1,
+):
     """Register a derived diagnostic -- a real formula, not an operator dispatch.
 
     Unlike :data:`COMBINERS`/:data:`REDUCERS`, a calculator needs the whole dataset
@@ -184,10 +207,21 @@ def register_calculator(name: str, *, inputs: Any = None, fans: tuple[str, ...] 
     A spec stays data even so (a name plus keyword arguments, not the function
     itself), which is what lets it serialize into a cache key and survive a round
     trip through YAML -- see :mod:`ocean_skill.mld` for a complete example.
+
+    ``layer=True`` registers a *layer* calculator instead: ``fn(da, *, variable=None,
+    **kwargs)`` gets the 2-D layer the depth select already produced (with its
+    ``variable`` spec resolved), which is why a horizontal operator belongs here and a
+    water-column one does not. ``version`` is bumped when the formula changes so cached
+    results of specs using it are recomputed.
     """
 
     def decorate(fn):
         CALCULATORS[name] = fn
+        CALCULATOR_VERSIONS[name] = version
+        if layer:
+            CALCULATOR_LAYER.add(name)
+        else:
+            CALCULATOR_LAYER.discard(name)
         if inputs is not None:
             CALCULATOR_INPUTS[name] = inputs
         if fans:
@@ -264,6 +298,90 @@ def combine(arrays: list, how: str, *, name: str | None = None):
     return out
 
 
+def _expanded(spec: Any) -> Any:
+    """Follow a :data:`DERIVED` name to its stored spec (``spec`` itself otherwise)."""
+    seen: set[str] = set()
+    while isinstance(spec, str) and spec in DERIVED and spec not in seen:
+        seen.add(spec)
+        spec = DERIVED[spec]
+    return spec
+
+
+def layer_calculator(spec: Any) -> tuple[str, Any, dict[str, Any]] | None:
+    """Return ``(name, inner_variable, kwargs)`` if ``spec`` is a layer calculate-spec.
+
+    ``spec`` is followed through :data:`DERIVED` first; anything else -- a name, a
+    combination, a whole-column calculator -- gives ``None``. ``kwargs`` is every key
+    but ``calculate``/``variable``/``standard_name``.
+    """
+    spec = _expanded(spec)
+    if not (isinstance(spec, dict) and spec.get("calculate") in CALCULATOR_LAYER):
+        return None
+    if spec.get("variable") is None:
+        raise KeyError(
+            f"{spec['calculate']} needs variable= (a name or a variable spec), e.g. "
+            f"{{'calculate': {spec['calculate']!r}, 'variable': 'oxygen'}}."
+        )
+    kwargs = {
+        k: v
+        for k, v in spec.items()
+        if k not in ("calculate", "variable", "standard_name")
+    }
+    return spec["calculate"], spec.get("variable"), kwargs
+
+
+def apply_layer_calculator(da, spec: Any):
+    """Run the layer calculator ``spec`` names on the already-selected layer ``da``.
+
+    ``da`` goes through :func:`ocean_skill.units.convert_units` first, so a
+    concentration reaches the calculator in mmol/m^3 whatever the source stores.
+    Native ROMS s-levels (``z_rho`` still varying along a standing axis) are refused:
+    they follow the bathymetry, so a horizontal derivative along one is not a
+    derivative along a level.
+    """
+    from ocean_skill.units import convert_units
+
+    name, inner, kwargs = layer_calculator(spec)
+    z_rho = da.coords.get("z_rho")
+    lon = da.coords.get("lon")
+    flat = set(lon.dims) | {"time"} if lon is not None else {"time"}
+    if z_rho is not None and any(d in da.dims for d in z_rho.dims if d not in flat):
+        raise ValueError(
+            f"{name!r} is a layer calculator, taken on a fixed-depth surface, but this "
+            "field is still on native s-levels. Give select={'depth': <meters>} (or "
+            "'surface')."
+        )
+    out = CALCULATORS[name](convert_units(da), variable=inner, **kwargs)
+    standard_name = _expanded(spec).get("standard_name")
+    if standard_name:
+        out = out.rename(standard_name)
+        out.attrs["standard_name"] = standard_name
+    return out
+
+
+def calculator_versions(spec: Any) -> dict[str, int]:
+    """Return ``{name: version}`` for each calculator ``spec`` uses above version 1.
+
+    Walks names, pair-specs, combinations and a calculate-spec's nested ``variable``.
+    Empty for every spec that uses none, so a cache key that adds this only when it is
+    non-empty stays byte-identical for them.
+    """
+    spec = _expanded(spec)
+    if isinstance(spec, dict):
+        found: dict[str, int] = {}
+        name = spec.get("calculate")
+        if name is not None and CALCULATOR_VERSIONS.get(name, 1) > 1:
+            found[name] = CALCULATOR_VERSIONS[name]
+        for value in spec.values():
+            if isinstance(value, (dict, str)):
+                found.update(calculator_versions(value))
+            elif isinstance(value, (list, tuple)):
+                for one in value:
+                    found.update(calculator_versions(one))
+        return found
+    return {}
+
+
 def resolve_variable(ds, spec: Any):
     """Return the field ``spec`` describes, or ``None`` if it is not in ``ds``.
 
@@ -310,6 +428,14 @@ def resolve_variable(ds, spec: Any):
         if name not in CALCULATORS:
             raise NotImplementedError(
                 f"derived diagnostic {name!r}: register a calculator first"
+            )
+        if name in CALCULATOR_LAYER:
+            # Notebook/direct use: the caller has already picked the layer.
+            inner = resolve_variable(ds, spec.get("variable"))
+            if inner is None:
+                return None
+            return apply_layer_calculator(
+                inner, {**spec, "calculate": name, "standard_name": standard_name}
             )
         out = CALCULATORS[name](ds, **spec)
         if standard_name:

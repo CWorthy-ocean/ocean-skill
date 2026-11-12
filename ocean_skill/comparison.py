@@ -1464,13 +1464,9 @@ def _expand_derived(spec: Any) -> Any:
     The ``seen`` guard is only for a pathological cyclic registration; real chains
     are at most one hop.
     """
-    from ocean_skill.operators import DERIVED
+    from ocean_skill.operators import _expanded
 
-    seen: set[str] = set()
-    while isinstance(spec, str) and spec in DERIVED and spec not in seen:
-        seen.add(spec)
-        spec = DERIVED[spec]
-    return spec
+    return _expanded(spec)
 
 
 def _is_calculated(spec: Any) -> bool:
@@ -1478,14 +1474,32 @@ def _is_calculated(spec: Any) -> bool:
 
     A calculated diagnostic collapses the vertical axis itself -- see the ``ValueError``
     in :func:`_prepare` -- so :func:`compare`'s depth fan-out, which otherwise defaults
-    every variable to ``depths=("surface",)``, has nothing to fan over for it.
+    every variable to ``depths=("surface",)``, has nothing to fan over for it. A
+    *layer* calculator (see :func:`ocean_skill.operators.register_calculator`) runs
+    after the depth selection instead, so it is an ordinary variable here.
     """
+    from ocean_skill import operators
+
     spec = _expand_derived(spec)
+    if operators.layer_calculator(spec):
+        return False
     if isinstance(spec, dict) and "calculate" in spec:
         return True
     if is_pair_spec(spec):
         return _is_calculated(spec["test"]) or _is_calculated(spec["reference"])
     return False
+
+
+def _probe_variable(spec: Any) -> Any:
+    """Return what a read-only probe should resolve: a layer calculator's inner variable.
+
+    A probe asks whether the data is there, not for the calculator's answer, which
+    only makes sense on the 2-D layer :func:`_prepare` hands it.
+    """
+    from ocean_skill import operators
+
+    layer = operators.layer_calculator(spec)
+    return spec if layer is None else layer[1]
 
 
 def _names_geographic_velocity(spec: Any) -> bool:
@@ -1588,7 +1602,7 @@ def _variables_needed(obj, variables: Sequence[Any]) -> set[str] | None:
 
     names: set[str] = set()
     for variable in variables:
-        spec = _expand_derived(variable)
+        spec = _expand_derived(_probe_variable(_expand_derived(variable)))
         if not isinstance(spec, str) or _names_geographic_velocity(spec):
             return None
         # A probe, not the resolution of record: _prepare resolves again (and warns
@@ -2248,8 +2262,13 @@ def _convention_variable_name(variable: Any) -> str | None:
 
     A plain name is itself; a combination spec that names its ``standard_name`` gives
     that; anything else (an unnamed combination, a calculator) has no one name, so
-    only the entry's top level speaks for it.
+    only the entry's top level speaks for it. A layer calculator speaks for the
+    variable it is taken of.
     """
+    from ocean_skill import operators
+
+    if (layer := operators.layer_calculator(variable)) is not None:
+        return _convention_variable_name(layer[1])
     if isinstance(variable, str):
         return variable
     if isinstance(variable, dict) and isinstance(variable.get("standard_name"), str):
@@ -3291,7 +3310,14 @@ def _prepare(
     # a registered name pointing at a calculate-spec is one in every way that
     # matters here, even spelled as a plain string (see _expand_derived).
     expanded_variable = _expand_derived(variable)
-    calculated = isinstance(expanded_variable, dict) and "calculate" in expanded_variable
+    # A *layer* calculator is the exception: it takes the already-selected 2-D layer,
+    # so its inner variable is resolved and the ladder runs as for a plain variable.
+    layer = operators.layer_calculator(expanded_variable)
+    calculated = (
+        layer is None
+        and isinstance(expanded_variable, dict)
+        and "calculate" in expanded_variable
+    )
     # A calculator sees the whole Dataset, so a time window must narrow that Dataset
     # *before* it runs -- left to the horizontal select below, a harmonic analysis
     # would fit the entire record and the window would only trim a result that no
@@ -3304,7 +3330,7 @@ def _prepare(
         if window:
             obj = operators.select(obj, window, subject=source)
 
-    da = operators.resolve_variable(obj, variable)
+    da = operators.resolve_variable(obj, _probe_variable(variable))
     if da is None:
         return None, None
 
@@ -3900,6 +3926,19 @@ def _prepare(
     # Now the vertical reduction, on whatever the vertical selection left: one level
     # (already collapsed), several interpolated levels, or a weighted band.
     da = operators.aggregate(da, _vertical_only(agg))
+    if layer is not None:
+        # After the vertical reduction, before any horizontal one: the calculator
+        # sees the one layer the depth select asked for (of the time-aggregated
+        # field -- early_agg already ran, as a climatology reference would be).
+        da = _apply_layer(
+            da,
+            expanded_variable,
+            layer[0],
+            meta,
+            source,
+            depth_method,
+            (depth, surface, band, column, sigma),
+        )
     # Then, last of all, the joint horizontal mean -- see the ordering note above.
     # By now `da` is one map (or one map per surviving non-horizontal axis, if the
     # caller kept one standing), so the area-weighted reduction operates on exactly
@@ -3934,6 +3973,35 @@ def _prepare(
             # metrics row still reports the depth the comparison was made at.
             da.attrs["actual_depth"] = float(da.attrs["depth_m"])
     return units.convert_units(da), da.attrs.get("actual_depth")
+
+
+def _apply_layer(da, spec, name, meta, source, depth_method, request):
+    """Apply layer calculator ``name`` to ``da``, warning on what would corrupt it.
+
+    A ROMS layer picked by nearest level jumps between s-levels from column to column.
+    (Native s-levels left standing are refused by
+    :func:`ocean_skill.operators.apply_layer_calculator` itself.) ``request`` is
+    ``_prepare``'s ``(depth, surface, band, column, sigma)``.
+    """
+    import warnings
+
+    from ocean_skill import _stacklevel, operators
+
+    depth, surface, band, column, sigma = request
+    if (
+        meta.get("model") == "roms"
+        and depth_method == "nearest"
+        and sigma is None
+        and depth is not None
+        and not (surface or band or column)
+    ):
+        warnings.warn(
+            f"{source!r}: depth_method='nearest' picks a different s-level from "
+            "column to column, which corrupts the horizontal derivatives "
+            f"{name!r} takes; use depth_method='interp'.",
+            stacklevel=_stacklevel.find(),
+        )
+    return operators.apply_layer_calculator(da, spec)
 
 
 #: Size (bytes) past which a source's largest *storage* chunk is worth a warning, before
@@ -4196,7 +4264,9 @@ def _variable_available(
             )
             if tabular.is_frame(obj):
                 obj = tabular.to_dataset(obj, meta)
-            available = operators.resolve_variable(obj, variable) is not None
+            available = (
+                operators.resolve_variable(obj, _probe_variable(variable)) is not None
+            )
             # A ROMS source's geographic velocity is derived on demand now (see
             # prepare_source's own comment and roms.standardize's derive_velocity=,
             # default False), so `obj` here never carries it directly -- resolve_variable
@@ -4282,7 +4352,7 @@ def _bare_time_is_multistep(
             )
             if tabular.is_frame(obj):
                 obj = tabular.to_dataset(obj, meta)
-            da = operators.resolve_variable(obj, variable)
+            da = operators.resolve_variable(obj, _probe_variable(variable))
         if da is None:
             return None
         tdim = operators.resolve_dim(da, "T")
@@ -12117,7 +12187,7 @@ def _profile_reference_depths(
         # its dimensions. Quiet for the reason the read is.
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            field = operators.resolve_variable(obj, variable)
+            field = operators.resolve_variable(obj, _probe_variable(variable))
         if field is None:
             keep[:] = False
         else:

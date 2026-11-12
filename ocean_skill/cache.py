@@ -136,6 +136,11 @@ __all__ = [
 #: no definition (``""``, a source that is not a catalog entry) is still valid, but it
 #: never collides with a fingerprinted one.
 #:
+#: Per-calculator ``version=`` (:func:`ocean_skill.operators.register_calculator`) is
+#: how a calculator's formula changes re-key only the specs that use it: a version above
+#: 1 is added to the key (:func:`_with_calculators`), version 1 adds nothing, so 9 was
+#: not bumped for it.
+#:
 #: A related fix that did *not* bump this: :func:`ocean_skill.sources.read`'s
 #: singleton-horizontal squeeze (giving an ADCP-shaped station a recoverable
 #: scalar lon/lat) changed what a *fresh* read produces without changing what
@@ -373,6 +378,18 @@ def enabled() -> bool:
     return _enabled
 
 
+def _with_calculators(fields: dict[str, Any], variable: Any) -> dict[str, Any]:
+    """Add ``variable``'s versioned calculators to a key payload, only if it has any.
+
+    Absent (not ``{}``) when empty, so every key built before a calculator carried a
+    version above 1 stays byte-identical.
+    """
+    from ocean_skill import operators
+
+    versions = operators.calculator_versions(variable)
+    return {**fields, "calculators": versions} if versions else fields
+
+
 def key_for(
     *,
     test: str,
@@ -395,19 +412,18 @@ def key_for(
     definition's result. They are separate fields, so swapping the two sides'
     definitions is a different key, as swapping the two names is.
     """
+    fields = {
+        "v": _FORMAT_VERSION,
+        "test": test,
+        "reference": reference,
+        "variable": variable,
+        "select": select,
+        "method": method,
+        "test_definition": test_definition,
+        "reference_definition": reference_definition,
+    }
     payload = json.dumps(
-        {
-            "v": _FORMAT_VERSION,
-            "test": test,
-            "reference": reference,
-            "variable": variable,
-            "select": select,
-            "method": method,
-            "test_definition": test_definition,
-            "reference_definition": reference_definition,
-        },
-        sort_keys=True,
-        default=str,
+        _with_calculators(fields, variable), sort_keys=True, default=str
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -426,16 +442,15 @@ def key_for_prepared(
     for a source with none) -- the source's, and only the source's: the other side's
     definition has no more business in a lane's key than its name does.
     """
+    fields = {
+        "v": _FORMAT_VERSION,
+        "source": source,
+        "variable": variable,
+        "select": select,
+        "definition": definition,
+    }
     payload = json.dumps(
-        {
-            "v": _FORMAT_VERSION,
-            "source": source,
-            "variable": variable,
-            "select": select,
-            "definition": definition,
-        },
-        sort_keys=True,
-        default=str,
+        _with_calculators(fields, variable), sort_keys=True, default=str
     )
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
