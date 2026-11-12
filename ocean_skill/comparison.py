@@ -9624,13 +9624,17 @@ class Comparison:
             (interactive) -- goes through the same renderer registry either
             way.
         contours
-            Sections only. Another :class:`Comparison` of a second variable, built
-            the same way (same sources, ``select`` and ``aggregate``) so it lands on
-            the same section grid, drawn as black, labelled contour lines: its test
-            over the test panel and its reference over the reference panel (the
-            difference panel gets none). ``contour_levels=`` picks the lines
-            (``True`` for about six round values, an int for about that many, or a
-            list) and ``contour_kwargs=`` styles them.
+            Sections and maps. Another :class:`Comparison` of a second variable,
+            built the same way (same sources, ``select`` and ``aggregate``), drawn
+            as black, labelled contour lines: its test over the test panel and its
+            reference over the reference panel (the difference panel gets none).
+            ``contours=True`` draws this comparison's own lines. ``contour_levels=``
+            picks the lines (``True`` for about six round values, an int for about
+            that many, or a list) and ``contour_kwargs=`` styles them. A section's
+            overlay must land on the same section grid; a map's must stand on the
+            same facet axes (time, depth) but may sit on another grid. Not for
+            time-depth panels, skill maps or movies, and refused with
+            ``panels="difference"`` (that panel takes no lines).
         casts
             Sections only. Marks each cast of a section built from casts
             (``select={"transect": {"from": "reference"}}``) with a labelled line.
@@ -9711,7 +9715,9 @@ class Comparison:
         # keeps naming it "time_depth" regardless of whether it ever gets plotted.
         plot_family = "time_depth_row" if family == "time_depth" else family
         item = self.as_item()
-        if contours is not None:
+        if contours is True:
+            contours = self
+        if contours is not None and contours is not False:
             from ocean_skill._overlay import comparison_contour, contour_members
 
             (overlay,) = contour_members(contours, 1, kind="comparison")
@@ -10950,10 +10956,10 @@ class ComparisonSet:
             One of ``"matplotlib"`` (default, static) or ``"holoviews"``
             (interactive).
         contours
-            Sections only. A :class:`ComparisonSet` (or a list of comparisons) of
-            the same length, paired with this set's rows by position, drawn as
+            Sections and maps. A :class:`ComparisonSet` (or a list of comparisons)
+            of the same length, paired with this set's rows by position, drawn as
             contour lines over each row's test and reference panels -- see
-            :meth:`Comparison.plot`.
+            :meth:`Comparison.plot`. ``contours=True`` draws this set's own lines.
         casts
             Sections only. Cast marks for every row -- see :meth:`Comparison.plot`
             (a list or dict of labels applies to each row's casts).
@@ -10996,7 +11002,9 @@ class ComparisonSet:
         for c in self.comparisons:
             c._require_drawable()
         items = self._items()
-        if contours is not None:
+        if contours is True:
+            contours = self
+        if contours is not None and contours is not False:
             from ocean_skill._overlay import comparison_contour, contour_members
 
             overlays = contour_members(

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from numbers import Real
 from typing import Any
@@ -41,6 +41,7 @@ from ocean_skill.plot.coastline import (
     nearest_ne_resolution,
     normalize_coastline_resolution,
 )
+from ocean_skill.plot.map_contours import refuse_difference_contours
 from ocean_skill.plot.matplotlib_renderer import (
     DEFAULT_METRIC_KEYS,
     _aspect_of,
@@ -61,6 +62,7 @@ from ocean_skill.plot.section import (
     SEAFLOOR_COLOR,
     WATER_COLOR,
     cast_marks,
+    check_contour_options,
     check_section_options,
     contour_label,
     contour_paths,
@@ -827,8 +829,15 @@ def _contour_caption(item) -> tuple[str, str]:
     )
 
 
-def _contour_label_size(field, *, font_scale, width_px, canvas_factor) -> str:
-    """Return the font size of the lines' labels on a section panel of this frame."""
+def _contour_label_size(
+    field, *, font_scale, width_px, canvas_factor, geo: bool = False
+) -> str:
+    """Return the font size of the lines' labels on a panel of this frame.
+
+    A section's frame is the design constant :data:`~ocean_skill.plot.typography.
+    SECTION_ASPECT`; a map's (``geo=True``) is its own domain's shape, as
+    :func:`_quadmesh` frames it.
+    """
     from ocean_skill.plot.typography import SECTION_ASPECT
 
     frame_w, frame_h, _ = _panel_geometry(
@@ -836,7 +845,7 @@ def _contour_label_size(field, *, font_scale, width_px, canvas_factor) -> str:
         font_scale=font_scale,
         width_px=width_px,
         canvas_factor=canvas_factor,
-        aspect=SECTION_ASPECT,
+        aspect=None if geo else SECTION_ASPECT,
     )
     return bokeh_scale((frame_w, frame_h), font_scale=font_scale)["contour_label"]
 
@@ -851,11 +860,24 @@ def _line_layers(overlay, levels, *, x, y, style, name, units, label_size) -> li
     contour_paths` picks, black on white as matplotlib's inline ``clabel`` is. A figure
     with no line to draw (every level misses the data) gets no elements at all.
     """
-    import holoviews as hv
-
     paths = contour_paths(
         overlay["distance"].values, overlay["depth"].values, overlay.values, levels
     )
+    return _line_elements(
+        paths, x=x, y=y, style=style, name=name, units=units, label_size=label_size
+    )
+
+
+def _line_elements(paths, *, x, y, style, name, units, label_size) -> list:
+    """Return the ``hv.Contours`` and ``hv.Labels`` that draw ``paths`` (see above).
+
+    ``paths`` is :func:`~ocean_skill.plot.section.contour_paths`' return, with its
+    vertices and anchors already in the frame they are drawn in -- the one thing a
+    section's lines and a map's differ on (:func:`_line_layers`,
+    :func:`_map_line_layers`).
+    """
+    import holoviews as hv
+
     suffix = f" {units}" if units else ""
     lines = [
         {
@@ -900,6 +922,97 @@ def _line_layers(overlay, levels, *, x, y, style, name, units, label_size) -> li
             )
         )
     return layers
+
+
+# --- contour-line overlays on maps ----------------------------------------------------
+#
+# A map's lines are the section's -- contourpy paths from
+# :func:`~ocean_skill.plot.section.contour_paths`, drawn as ``hv.Contours`` -- except
+# that they live in longitude and latitude, so the vertices go through the same
+# per-panel transform every other plain-holoviews overlay on a map does
+# (:func:`_overlay_xform`), and the arrays come from
+# :func:`ocean_skill.plot.map_contours.map_contour_arrays`, which settles the longitude
+# convention first so a dateline-straddling map's lines do not cross the globe.
+
+
+def _map_overlay_arrays(overlay, panel):
+    """Return ``overlay``'s ``(lon, lat, values)`` for ``panel``, checked, one map.
+
+    :func:`~ocean_skill.plot.map_contours.prepare_map_overlay`, the call the static
+    renderer makes too.
+    """
+    from ocean_skill.plot.map_contours import prepare_map_overlay
+
+    return prepare_map_overlay(overlay, panel)
+
+
+def _map_levels(spec, arrays) -> tuple[float, ...]:
+    """Return one figure's contour levels, ``spec`` pooled over every overlay's values.
+
+    ``arrays`` are :func:`_map_overlay_arrays`' returns, whose values are already NaN
+    off their panel, so a global climatology over a regional model is levelled by what
+    the panel shows.
+    """
+    return _figure_levels(spec, [z for _, _, z in arrays])
+
+
+def _move_paths(paths, xform) -> list:
+    """Return ``paths`` with every vertex and label anchor moved by ``xform``.
+
+    One call for all of them: :func:`_to_mercator` checks the projection library on
+    every call, which would otherwise be once per line.
+    """
+    pieces = [line for path in paths for line in path.lines]
+    anchors = [path.anchor for path in paths if path.anchor is not None]
+    if not pieces:
+        return list(paths)
+    ends = np.asarray(anchors, dtype=float).reshape(-1, 2)
+    stacked = np.concatenate([*pieces, ends])
+    xs, ys = xform(stacked[:, 0], stacked[:, 1])
+    moved = np.column_stack([xs, ys])
+    n_line_points = sum(len(line) for line in pieces)
+    cuts = np.cumsum([len(line) for line in pieces])[:-1]
+    chunks = iter(np.split(moved[:n_line_points], cuts))
+    tail = iter(moved[n_line_points:])
+    out = []
+    for path in paths:
+        lines = tuple(next(chunks) for _ in path.lines)
+        anchor = None
+        if path.anchor is not None:
+            point = next(tail)
+            anchor = (float(point[0]), float(point[1]))
+        out.append(replace(path, lines=lines, anchor=anchor))
+    return out
+
+
+def _map_line_layers(
+    arrays, levels, panel, *, tiles, geo, style, name, units, label_size
+) -> list:
+    """Return the elements drawing one overlay's lines over a map ``panel``.
+
+    ``arrays`` is :func:`_map_overlay_arrays`' return for this panel's overlay and
+    ``levels`` the figure's one set. The lines' vertices -- and each level's label
+    anchor -- are moved into the panel's own frame by :func:`_overlay_xform` (Web
+    Mercator under tiles, the 180-centred shift on a dateline-straddling mesh, plain
+    ±180 degrees otherwise), exactly as the domain ring is. They are context rather
+    than data: ``apply_ranges=False`` keeps a line that runs off the map from widening
+    its view.
+    """
+    lon, lat, z = arrays
+    paths = _move_paths(
+        contour_paths(lon, lat, z, levels), _overlay_xform(panel, tiles, geo=geo)
+    )
+    layers = _line_elements(
+        paths, x="x", y="y", style=style, name=name, units=units, label_size=label_size
+    )
+    return [layer.opts(apply_ranges=False) for layer in layers]
+
+
+def _over(panel, layers):
+    """Return ``panel`` with each element of ``layers`` overlaid, in order."""
+    for layer in layers:
+        panel = panel * layer
+    return panel
 
 
 def _layers(edges: np.ndarray, *, log: bool) -> np.ndarray:
@@ -1495,6 +1608,22 @@ def _metrics_summary(metrics: dict[str, Any] | None, metric_keys) -> str:
     )
 
 
+def _row_overlays(item, t, r) -> dict[str, tuple[Any, Any]]:
+    """Return ``{side: (overlay, panel)}`` for a comparison row's contour lines.
+
+    The test overlay's lines go over the test panel and the reference overlay's over the
+    reference panel; a side with no overlay, or an item with none at all, is absent.
+    """
+    raw = item.get("contour")
+    if raw is None:
+        return {}
+    return {
+        side: (raw[side], panel)
+        for side, panel in (("test", t), ("reference", r))
+        if raw.get(side) is not None
+    }
+
+
 def _field_row(
     item: dict[str, Any],
     labels=("test", "reference"),
@@ -1522,6 +1651,9 @@ def _field_row(
     seq_range: tuple[float, float] | None = None,
     div_range: tuple[float, float] | None = None,
     titles=None,
+    contour_levels=None,
+    contour_kwargs=None,
+    _overlay_arrays=None,
     **_,
 ):
     """Test | reference | difference as three linked interactive maps.
@@ -1579,6 +1711,15 @@ def _field_row(
     ``titles=`` overrides the three panel titles by hand -- test, reference,
     difference, in that order -- with ``None`` at a position keeping that
     panel's own title; see :func:`ocean_skill.plot._titles.resolve_titles`.
+
+    An item carrying ``contour`` -- a ``{"test", "reference"}`` pair of maps, see
+    :mod:`ocean_skill._overlay` -- draws the test overlay's black, labelled lines over
+    the test panel and the reference overlay's over the reference panel, never over the
+    difference (:func:`_map_line_layers`). The overlay may sit on a different grid from
+    the panel: the lines live in longitude and latitude. ``contour_levels`` (``True``
+    or unset: about six round values; an int; a list) and ``contour_kwargs`` (see
+    :func:`_contour_style`) are as for a section; the levels are decided once from both
+    overlays so both panels show the same lines.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -1588,6 +1729,13 @@ def _field_row(
     aligned = item["aligned"]
     t, r, d = aligned["test"], aligned["reference"], aligned["difference"]
     tiles = _tiles_for(_check_tiles(tiles), t, r)
+    overlays = _row_overlays(item, t, r)
+    check_contour_options(
+        has_contours=bool(overlays),
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    style = _contour_style(contour_kwargs) if overlays else None
     statistic = statistic_of(item)
     units = units_text(item.get("units"), statistic)
     standard_name = item.get("standard_name")
@@ -1689,6 +1837,40 @@ def _field_row(
         coastline_resolution=coastline_resolution,
     )
     outline = _domain_overlay(domain, t, geo=geo, tiles=tiles)
+    if overlays:
+        # test lines on the test panel, reference lines on the reference panel, none on
+        # the difference; levels from both, so the two read the same lines
+        # a grid has prepared every row's arrays already, to pool its levels
+        arrays = _overlay_arrays or {
+            side: _map_overlay_arrays(overlay, panel)
+            for side, (overlay, panel) in overlays.items()
+        }
+        levels = _map_levels(contour_levels, arrays.values())
+        name, line_units = _contour_caption(item)
+        for side, index in (("test", 0), ("reference", 1)):
+            if side not in overlays:
+                continue
+            panel = overlays[side][1]
+            panels[index] = _over(
+                panels[index],
+                _map_line_layers(
+                    arrays[side],
+                    levels,
+                    panel,
+                    tiles=tiles,
+                    geo=geo,
+                    style=style,
+                    name=name,
+                    units=line_units,
+                    label_size=_contour_label_size(
+                        panel,
+                        font_scale=font_scale,
+                        width_px=PANEL_WIDTH_PX,
+                        canvas_factor=factor,
+                        geo=True,
+                    ),
+                ),
+            )
     for overlay in (coast, outline):
         if overlay is not None:
             panels = [p * overlay for p in panels]
@@ -1724,6 +1906,8 @@ def _field_grid(
     panels: str = "all",
     ncols: int | None = None,
     titles=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """One interactive row per comparison, stacked.
@@ -1778,11 +1962,25 @@ def _field_grid(
     grid of ``n`` rows takes ``3 * n`` entries. ``None`` at a position keeps
     that panel's own title; the wrong count raises a copy-pasteable
     ``ValueError`` listing the current titles.
+
+    Rows whose item carries ``contour`` draw its lines over their test and reference
+    panels (see :func:`_field_row`); the levels are decided **once** for the whole
+    grid, from every row's overlays at once, so every row shows the same lines.
+    ``panels="difference"`` has no panel to draw them on and refuses them.
     """
     from ocean_skill.plot import _titles
     from ocean_skill.plot.matplotlib_renderer import _check_panels
 
     _check_panels(panels, ncols)
+    has_contours = any(it.get("contour") is not None for it in items)
+    check_contour_options(
+        has_contours=has_contours,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    # read (and a bad one refused) before the difference-only branch, the order the
+    # static renderer checks in, so both refuse the same call the same way
+    style = _contour_style(contour_kwargs) if has_contours else None
     if panels == "difference":
         return _difference_grid(
             items,
@@ -1868,6 +2066,23 @@ def _field_grid(
             "div_range": _data_range(*all_d),
         }
 
+    # every row's overlays prepared once, the lines' levels pooled over all of them,
+    # and both handed to the rows with the style read above
+    row_arrays = [
+        {
+            side: _map_overlay_arrays(overlay, panel)
+            for side, (overlay, panel) in _row_overlays(
+                it, it["aligned"]["test"], it["aligned"]["reference"]
+            ).items()
+        }
+        for it in items
+    ]
+    levels = None
+    if has_contours:
+        levels = _map_levels(
+            contour_levels, [a for arrays in row_arrays for a in arrays.values()]
+        )
+
     rows = [
         _field_row(
             it,
@@ -1891,6 +2106,9 @@ def _field_grid(
             vmax=vmax,
             colorbar_label_clipped=colorbar_label_clipped,
             titles=resolved_titles[i * 3 : i * 3 + 3],
+            contour_levels=levels if it.get("contour") is not None else None,
+            contour_kwargs=style if it.get("contour") is not None else None,
+            _overlay_arrays=row_arrays[i] or None,
             **shared,
         )
         for i, it in enumerate(items)
@@ -1946,6 +2164,10 @@ def _difference_grid(
 
     hv = _extension()
     factor = _canvas_factor(size, zoom)
+    if not sections:
+        # a difference has no isolines of its own; a section grid keeps its own
+        # behavior here (see _section_row_grid)
+        refuse_difference_contours(any(it.get("contour") is not None for it in items))
     n = len(items)
     if title is None:
         title = grid_suptitle(items)
@@ -2118,6 +2340,8 @@ def _field_facet(
     legend: bool | str = True,
     marker_size: float = 9.0,
     colors=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """One interactive map per value of the facet axis: a field over time, in order.
@@ -2187,6 +2411,14 @@ def _field_facet(
     widen the map. ``colors`` recolours the legend groups they draw (see
     :func:`~ocean_skill.plot.locations.legend_groups`) and is ignored without
     ``location_items``, as ``marker_size`` and ``legend`` are.
+
+    An item carrying ``contour`` -- a map standing on the same facet axes as the field,
+    see :mod:`ocean_skill._overlay` -- draws its lines over every panel: each panel's
+    own slice of the overlay, picked by the same position as the panel's own. The
+    overlay may sit on a different grid; the lines live in longitude and latitude
+    (:func:`_map_line_layers`). ``contour_levels`` and ``contour_kwargs`` are as for a
+    section, the levels decided **once** from every panel's overlay so all panels show
+    the same lines.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -2207,6 +2439,13 @@ def _field_facet(
             raise ValueError(
                 f"{name} {value!r} is not a dimension of the field ({list(field.dims)})"
             )
+    raw_contour = item.get("contour")
+    check_contour_options(
+        has_contours=raw_contour is not None,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    style = _contour_style(contour_kwargs) if raw_contour is not None else None
     # resolved once for the whole facet -- every panel shares the same grid, so one
     # antimeridian/source check covers them all (see _tiles_for/_check_tiles)
     tiles = _tiles_for(_check_tiles(tiles), field)
@@ -2305,14 +2544,42 @@ def _field_facet(
         [_auto_title(row, col) for row, col in coords], titles
     )
 
-    def _panel(row, col, panel_title):
-        sub = (
-            field.isel({row_dim: row, facet_dim: col})
+    def _pick(da, row, col):
+        """``da``'s own slice for the panel at ``(row, col)``."""
+        return (
+            da.isel({row_dim: row, facet_dim: col})
             if row_dim is not None
-            else field.isel({facet_dim: col})
+            else da.isel({facet_dim: col})
             if facet_dim
-            else field
+            else da
         )
+
+    # each panel's own slice of the overlay, picked by the position its field's was; the
+    # levels are decided once across all of them
+    overlay_arrays: dict[tuple[int, int], Any] = {}
+    levels: tuple[float, ...] = ()
+    if raw_contour is not None:
+        from ocean_skill.plot.map_contours import check_map_overlay
+
+        check_map_overlay(raw_contour, field)
+        overlay_arrays = {
+            (row, col): _map_overlay_arrays(
+                _pick(raw_contour, row, col), _pick(field, row, col)
+            )
+            for row, col in coords
+        }
+        levels = _map_levels(contour_levels, overlay_arrays.values())
+        line_name, line_units = _contour_caption(item)
+        line_label_size = _contour_label_size(
+            one_panel,
+            font_scale=font_scale,
+            width_px=PANEL_WIDTH_PX,
+            canvas_factor=factor,
+            geo=True,
+        )
+
+    def _panel(row, col, panel_title):
+        sub = _pick(field, row, col)
         mesh = _quadmesh(
             sub,
             title=panel_title,
@@ -2331,6 +2598,21 @@ def _field_facet(
             label_clipped=colorbar_label_clipped,
         )
         panel = mesh
+        if raw_contour is not None:
+            panel = _over(
+                panel,
+                _map_line_layers(
+                    overlay_arrays[(row, col)],
+                    levels,
+                    sub,
+                    tiles=tiles,
+                    geo=geo,
+                    style=style,
+                    name=line_name,
+                    units=line_units,
+                    label_size=line_label_size,
+                ),
+            )
         for overlay in (coast, outline):
             if overlay is not None:
                 panel = panel * overlay
@@ -3236,6 +3518,8 @@ def _field_map_grid(
     shared_limits: bool | str = False,
     colorbars: str = "panel",
     titles=None,
+    contour_levels=None,
+    contour_kwargs=None,
     **_,
 ):
     """One interactive map per item -- several *variables*, not one facet axis.
@@ -3291,6 +3575,12 @@ def _field_map_grid(
     ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included. ``None`` at
     a position keeps that panel's own auto title; the wrong count raises a
     copy-pasteable ``ValueError`` listing the current titles.
+
+    An item carrying ``contour`` -- one map, see :mod:`ocean_skill._overlay` -- draws
+    its lines over its own panel (:func:`_map_line_layers`); the overlay may sit on a
+    different grid. ``contour_levels`` and ``contour_kwargs`` are as for a section, the
+    levels decided **once** from every item's overlay so all panels show the same
+    lines.
     """
     from ocean_skill.colormaps import is_log
     from ocean_skill.plot import _titles
@@ -3321,6 +3611,13 @@ def _field_map_grid(
         )
 
     n = len(items)
+    has_contours = any(it.get("contour") is not None for it in items)
+    check_contour_options(
+        has_contours=has_contours,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    style = _contour_style(contour_kwargs) if has_contours else None
     # resolved once across every item's field -- a straddling domain on any one of
     # them would tear the same way on its own panel (see _tiles_for)
     tiles = _tiles_for(_check_tiles(tiles), *(it["field"] for it in items))
@@ -3405,6 +3702,17 @@ def _field_map_grid(
                 clims[i] = span
                 reaches[i] = reach
 
+    # every item's overlay, put in its own panel's longitude convention, and the lines'
+    # levels decided once across all of them
+    overlay_arrays = {
+        i: _map_overlay_arrays(item["contour"], item["field"])
+        for i, item in drawn
+        if item.get("contour") is not None
+    }
+    levels = (
+        _map_levels(contour_levels, overlay_arrays.values()) if has_contours else ()
+    )
+
     panels: list[Any] = []
     for i in range(len(cell_items)):
         item = cell_items[i]
@@ -3449,6 +3757,28 @@ def _field_map_grid(
             tiles=tiles,
             label_clipped=colorbar_label_clipped,
         )
+        if i in overlay_arrays:
+            name, line_units = _contour_caption(item)
+            mesh = _over(
+                mesh,
+                _map_line_layers(
+                    overlay_arrays[i],
+                    levels,
+                    field,
+                    tiles=tiles,
+                    geo=geo,
+                    style=style,
+                    name=name,
+                    units=line_units,
+                    label_size=_contour_label_size(
+                        field,
+                        font_scale=font_scale,
+                        width_px=PANEL_WIDTH_PX,
+                        canvas_factor=factor,
+                        geo=True,
+                    ),
+                ),
+            )
         outline = _domain_overlay(domain, field, geo=geo, tiles=tiles)
         for overlay in (coast, outline):
             if overlay is not None:

@@ -1231,6 +1231,106 @@ def domain_ring(domain) -> np.ndarray | None:
     )
 
 
+#: Where a map's overlay lines sit: over the fill (matplotlib's default of 1) and the
+#: land (2), under the coastline (3) and the domain ring (4). A section's overlay shares
+#: the land's level (:data:`_OVERLAY_ZORDER`) since a section has no land to tie with.
+_MAP_OVERLAY_ZORDER = 2.5
+
+
+def _lanes(aligned, test_name: str, reference_name: str) -> dict[str, Any]:
+    """Return a comparison row's ``{"test", "reference"}`` maps, by whatever names."""
+    return {"test": aligned[test_name], "reference": aligned[reference_name]}
+
+
+def _map_overlays(raws, panels, spec) -> tuple[list[Any], tuple[float, ...]]:
+    """Prepare every map panel's overlay, and pick the figure's one set of levels.
+
+    The map counterpart of :func:`_section_overlays`. ``raws`` and ``panels`` are the
+    figure's items' raw overlays and the maps they are drawn over, in the same order:
+    a raw overlay is ``None`` (no lines), one DataArray over a panel that is one
+    DataArray, or a ``{"test", "reference"}`` pair over a panel that is a dict of the
+    same two lanes (a comparison row -- the difference lane never gets lines; a lane
+    that is ``None`` draws none). Each overlay is checked against its panel
+    (:func:`ocean_skill.plot.map_contours.check_map_overlay`) and turned into the
+    ``(lon, lat, values)`` a contour takes
+    (:func:`~ocean_skill.plot.map_contours.map_contour_arrays`); unlike a section's it
+    is never regridded onto the panel, since a line lives in longitude and latitude.
+
+    The levels are decided once over every ``values`` array pooled
+    (:func:`_pooled_levels`), so every panel of every row shows the same lines.
+    Everything is prepared before anything is drawn, so a refused overlay fails before
+    a figure exists.
+    """
+    from ocean_skill.plot.map_contours import prepare_map_overlay
+
+    def prepare(raw, panel):
+        return None if raw is None else prepare_map_overlay(raw, panel)
+
+    overlays: list[Any] = []
+    for raw, panel in zip(raws, panels, strict=True):
+        if raw is None:
+            overlays.append(None)
+        elif isinstance(raw, Mapping):
+            overlays.append(
+                {
+                    lane: prepare(raw.get(lane), panel[lane])
+                    for lane in ("test", "reference")
+                }
+            )
+        else:
+            overlays.append(prepare(raw, panel))
+    arrays = [
+        found[2]
+        for overlay in overlays
+        if overlay is not None
+        for found in (overlay.values() if isinstance(overlay, dict) else (overlay,))
+        if found is not None
+    ]
+    return overlays, _pooled_levels(arrays, spec)
+
+
+def _draw_map_overlay(
+    ax,
+    arrays: tuple[np.ndarray, np.ndarray, np.ndarray],
+    levels: Sequence[float],
+    contour_kwargs: Mapping[str, Any] | None,
+    *,
+    fontsize: float,
+) -> None:
+    """Draw one map panel's overlay contour lines at ``levels``.
+
+    ``arrays`` is :func:`~ocean_skill.plot.map_contours.map_contour_arrays`' return:
+    the overlay's own longitudes and latitudes (in the convention the panel is
+    contiguous in) and values, handed to ``ax.contour`` with the same
+    ``transform=PlateCarree()`` the fill uses, so cartopy puts the lines wherever the
+    axes' own frame (centred on 180 for a dateline-straddling domain) puts the fill.
+    Styled exactly as a section's lines are (:func:`_overlay_style`), at
+    :data:`_MAP_OVERLAY_ZORDER`; a panel with no finite value, or a flat one, draws
+    nothing. The labels wait for :func:`_label_overlays`, as a section's do.
+
+    A global overlay over a regional panel is already cut to the panel's own
+    extent (``map_contour_arrays``), but with half a degree of slack, which
+    matplotlib would fold into the data limits and so widen the panel. The view
+    the fill has set is read before the lines are drawn and pinned after, so lines are
+    context the view does not frame itself around -- as the domain ring is.
+    """
+    import cartopy.crs as ccrs
+
+    style, fmt, labelled = _overlay_style(contour_kwargs, _MAP_OVERLAY_ZORDER)
+    x, y, z = arrays
+    z = np.ma.masked_invalid(z)
+    finite = z.compressed()
+    if finite.size == 0 or not finite.min() < finite.max():
+        return
+    xlim, ylim = ax.get_xlim(), ax.get_ylim()
+    lines = ax.contour(
+        x, y, z, levels=list(levels), transform=ccrs.PlateCarree(), **style
+    )
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    _stash_labels(ax, lines, fmt, labelled, fontsize)
+
+
 def _draw_map(
     ax,
     da,
@@ -1247,6 +1347,10 @@ def _draw_map(
     bottom_labels: bool | None = None,
     coastline_resolution: str = DEFAULT_COASTLINE_RESOLUTION,
     land: bool | float = True,
+    overlay: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
+    levels: Sequence[float] = (),
+    contour_kwargs: Mapping[str, Any] | None = None,
+    contour_fontsize: float = 8.0,
 ):
     """Draw one map panel into ``ax`` and return its mappable.
 
@@ -1261,6 +1365,12 @@ def _draw_map(
     explicitly, which is how a grid shows each axis once.
 
     ``coastline_resolution``/``land`` are forwarded to :func:`_basemap` — see there.
+
+    ``overlay`` is :func:`_map_overlays`' ``(lon, lat, values)`` for this panel, or
+    ``None`` for no lines; ``levels``/``contour_kwargs``/``contour_fontsize`` are the
+    figure's (see :func:`_draw_map_overlay`). The lines go over the fill, the land and
+    the grid but under the coastline, and wait for :func:`_label_overlays` to be
+    labelled.
     """
     import cartopy.crs as ccrs
 
@@ -1268,6 +1378,10 @@ def _draw_map(
     draw = getattr(ax, "contourf" if mark == "contourf" else "pcolormesh")
     kw = _contour_kw(norm) if mark == "contourf" else {}
     im = draw(da["lon"], da["lat"], da, transform=proj, cmap=cmap, norm=norm, **kw)
+    if overlay is not None and len(levels):
+        _draw_map_overlay(
+            ax, overlay, levels, contour_kwargs, fontsize=contour_fontsize
+        )
     # the one place every field/skill/movie map passes through, so the one place that
     # draws them all in true shape rather than in equal-length degrees
     _true_shape(ax, _stretch_of(da))
@@ -1346,6 +1460,10 @@ def _draw_row(
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
     statistic: str | None = None,
+    overlays: Mapping[str, Any] | None = None,
+    levels: Sequence[float] = (),
+    contour_kwargs: Mapping[str, Any] | None = None,
+    contour_fontsize: float = 8.0,
 ):
     """Draw one test|reference|difference row into three existing cartopy axes.
 
@@ -1380,6 +1498,13 @@ def _draw_row(
     ``statistic`` is the reduction the row's fields are the result of, if they are one
     (:func:`ocean_skill.plot._statistic.statistic_of`): a spread has no pinned range or
     log scale, and its units are printed readably (``°C²``) on the colour bars.
+
+    ``overlays`` is this row's :func:`_map_overlays` entry -- a ``{"test",
+    "reference"}`` pair of contour arrays (a lane may be ``None``), or ``None`` for no
+    lines. The test lines go over the test panel and the reference lines over the
+    reference panel; the difference panel never gets any. ``levels``,
+    ``contour_kwargs`` and ``contour_fontsize`` are the figure's, as in
+    :func:`_draw_map`.
     """
     import matplotlib.colors as mcolors
 
@@ -1426,6 +1551,11 @@ def _draw_row(
         (r, resolved_titles[1], seq, seq_norm),
         (d, resolved_titles[2], div, div_norm),
     ]
+    lane_overlays = (
+        (overlays or {}).get("test"),
+        (overlays or {}).get("reference"),
+        None,  # a difference has no isolines of its own
+    )
     ims = []
     for j, (ax, (da, lab, cmap, norm)) in enumerate(zip(axes, panels, strict=True)):
         # None leaves every panel labelling its own axes, as every version before
@@ -1446,6 +1576,10 @@ def _draw_row(
                 bottom_labels=is_bottom_row if shared_axis_labels else None,
                 coastline_resolution=coastline_resolution,
                 land=land,
+                overlay=lane_overlays[j],
+                levels=levels,
+                contour_kwargs=contour_kwargs,
+                contour_fontsize=contour_fontsize,
             )
         )
         ax.title._osk_size_pinned = title_pinned
@@ -3049,6 +3183,9 @@ def field_row(
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
+    contour: Mapping[str, Any] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one ``test | reference | difference`` row for a gridded comparison.
 
@@ -3144,10 +3281,27 @@ def field_row(
     default. With ``robust`` set and no ``diff_quantile`` the difference panel follows
     ``robust`` too (``True`` is 0.8, ``robust=q`` is ``q``); ``diff_quantile=1`` spans
     the largest difference.
+
+    ``contour`` is the row's overlay, ``{"test", "reference"}`` maps (each may sit on
+    a grid of its own -- lines live in longitude and latitude), drawn as contour lines
+    over the test and reference panels; the difference panel gets none.
+    ``contour_levels`` picks which values get a line (``None``/``True``: about six
+    round ones, decided once over both maps; an ``int``; or a list) and
+    ``contour_kwargs`` restyles them (``colors``, ``linewidths``, ``linestyles``, ...
+    plus ``fmt=`` and ``labels=`` for the labels) exactly as on a section row. Either
+    without ``contour`` is refused.
     """
     import matplotlib.pyplot as plt
 
+    _check_map_contours(
+        contour is not None,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
     _warn_if_interactive_only(rasterize, hover, tiles)
+    (overlay,), levels = _map_overlays(
+        [contour], [_lanes(aligned, test_name, reference_name)], contour_levels
+    )
     if title is None:
         title = suptitle_text(standard_name, (depth, time, region))
 
@@ -3205,6 +3359,10 @@ def field_row(
         vmax=vmax,
         titles=titles,
         statistic=statistic_of(aligned),
+        overlays=overlay,
+        levels=levels,
+        contour_kwargs=contour_kwargs,
+        contour_fontsize=scale["contour_label"],
     )
     _draw_colorbar(
         fig,
@@ -3240,6 +3398,7 @@ def field_row(
         # a shrunken row label is a *narrower* one, and its placement was measured
         # against the old width — re-place it against what is actually drawn now
         _clear_row_labels(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=1)
     if save:
         save = Path(save).expanduser()
@@ -4028,6 +4187,8 @@ def field_grid(
     vmin: float | None = None,
     vmax: float | None = None,
     titles: Sequence[str | None] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Stack one ``test | reference | difference`` row per comparison.
 
@@ -4123,9 +4284,20 @@ def field_grid(
 
     ``coastline_resolution``/``land`` pick the coastline/land dataset and the land
     fill's visibility for every row — see :func:`field_row`'s docstring.
+
+    A row whose item carries ``contour`` (``{"test", "reference"}`` maps, as in
+    :func:`field_row`) gets contour lines over its test and reference panels, never its
+    difference; some rows may have none. ``contour_levels`` and ``contour_kwargs`` are
+    shared by every row, and the levels are decided once over all of them, so each row's
+    lines mean the same values. ``panels="difference"`` has no panel to put them on and
+    refuses.
     """
     import matplotlib.pyplot as plt
 
+    has_overlay = any(c.get("contour") is not None for c in comparisons)
+    _check_map_contours(
+        has_overlay, contour_levels=contour_levels, contour_kwargs=contour_kwargs
+    )
     _warn_if_interactive_only(rasterize, hover, tiles)
     _check_panels(panels, ncols)
     if panels == "difference":
@@ -4160,6 +4332,11 @@ def field_grid(
     if title is None:
         title = grid_suptitle(comparisons)
 
+    overlays, levels = _map_overlays(
+        [c.get("contour") for c in comparisons],
+        [_lanes(c["aligned"], test_name, reference_name) for c in comparisons],
+        contour_levels,
+    )
     n = len(comparisons)
     proj = _map_projection(*(c["aligned"] for c in comparisons))
     canvas = resolve_canvas(size, zoom)
@@ -4253,6 +4430,10 @@ def field_grid(
             vmax=vmax,
             titles=resolved_titles[i * 3 : i * 3 + 3],
             statistic=statistic_of(comp),
+            overlays=overlays[i],
+            levels=levels,
+            contour_kwargs=contour_kwargs,
+            contour_fontsize=scale["contour_label"],
         )
         _draw_colorbar(
             fig,
@@ -4289,6 +4470,7 @@ def field_grid(
         # a shrunken row label is a *narrower* one, and its placement was measured
         # against the old width — re-place it against what is actually drawn now
         _clear_row_labels(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, canvas=canvas, nrows=n)
     if save:
         save = Path(save).expanduser()
@@ -4356,7 +4538,9 @@ def _difference_grid(
     :func:`~ocean_skill.plot._colorbar.resolve_diff_quantile`). The panels have to share
     units; a set mixing variables warns, as ``shared_limits=True`` does. Only the
     differences are drawn: no metrics box, and a section's contour/cast overlays are
-    left off.
+    left off. A map's contour lines have nowhere to go, so :func:`field_grid` with
+    ``contour`` items refuses (:func:`ocean_skill.plot.map_contours
+    .refuse_difference_contours`).
     """
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
@@ -4364,6 +4548,12 @@ def _difference_grid(
     from ocean_skill.plot.typography import SECTION_ASPECT, facet_figsize, facet_layout
 
     n = len(items)
+    if not sections:
+        # a map row's lines belong to its test and reference panels, which this
+        # figure does not draw; a section's are simply left off (see the docstring)
+        from ocean_skill.plot.map_contours import refuse_difference_contours
+
+        refuse_difference_contours(any(i.get("contour") is not None for i in items))
     if title is None:
         title = grid_suptitle(items)
     if sections:
@@ -4946,6 +5136,9 @@ def field_facet(
     marker_size: float = 80.0,
     colors: str | Sequence[str] | Mapping[str, str] | None = None,
     annot_kwargs: dict[str, Any] | None = None,
+    contour: xr.DataArray | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one map per value of ``facet_dim``: a single field over time, in order.
 
@@ -5023,10 +5216,29 @@ def field_facet(
     **every** panel (part of the map, not a key) and keeps the framed key, on the
     first panel, only for the unlabelled groups -- none, no key; ``annot_kwargs``
     (``Axes.annotate`` keywords) restyles the names.
+
+    ``contour`` is a second map on the same facet axes as ``field`` (a variable to draw
+    as lines, built the way the field was); each panel draws the lines of its own slice
+    of it -- the same position along ``facet_dim``/``row_dim`` as the panel -- over the
+    fill. ``contour_levels`` picks which values get a line (``None``/``True``: about six
+    round ones, decided once over every panel's slice so all of them show the same
+    values; an ``int``; or a list) and ``contour_kwargs`` restyles them (``colors``,
+    ``linewidths``, ``linestyles``, ... plus ``fmt=`` and ``labels=`` for the labels).
+    Either without ``contour`` is refused.
     """
     import matplotlib.pyplot as plt
 
     from ocean_skill.plot.typography import facet_figsize, facet_layout
+
+    _check_map_contours(
+        contour is not None,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    if contour is not None:
+        from ocean_skill.plot.map_contours import check_map_overlay
+
+        check_map_overlay(contour, field)  # the whole facet set, before slicing it
 
     _warn_if_interactive_only(rasterize, hover, tiles)
     canvas = resolve_canvas(size, zoom)
@@ -5169,6 +5381,23 @@ def field_facet(
         [lab if lab is not None else "" for lab in labels], titles
     )
 
+    n_panels = nrows * ncols if row_dim is not None else n
+
+    def panel_of(da, i):
+        """Return ``da``'s slice for grid cell ``i`` (the field's or the overlay's)."""
+        if row_dim is not None:
+            row, col = divmod(i, ncols)
+            return da.isel({row_dim: row, facet_dim: col})
+        return da.isel({facet_dim: i}) if facet_dim else da
+
+    # Every panel's own slice of the overlay, prepared (and its levels pooled over all
+    # of them) before any figure exists, so a refused overlay fails cleanly.
+    overlays, levels = _map_overlays(
+        [None if contour is None else panel_of(contour, i) for i in range(n_panels)],
+        [panel_of(field, i) for i in range(n_panels)],
+        contour_levels,
+    )
+
     fig, axes = plt.subplots(
         nrows,
         ncols,
@@ -5179,17 +5408,15 @@ def field_facet(
     )
     flat = list(axes.ravel())
     used, ims, im = [], [], None
-    n_panels = nrows * ncols if row_dim is not None else n
     for i in range(n_panels):
         ax = flat[i]
         row, col = divmod(i, ncols)
+        panel = panel_of(field, i)
         if row_dim is not None:
-            panel = field.isel({row_dim: row, facet_dim: col})
             # Below the top row every panel repeats its column's period; the row is
             # named down the left edge instead.
             label = labels[col] if row == 0 else None
         else:
-            panel = field.isel({facet_dim: i}) if facet_dim else field
             label = labels[i]
         im = _draw_map(
             ax,
@@ -5208,6 +5435,10 @@ def field_facet(
             bottom_labels=(i + ncols >= n_panels) if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
             land=land,
+            overlay=overlays[i],
+            levels=levels,
+            contour_kwargs=contour_kwargs,
+            contour_fontsize=scale["contour_label"],
         )
         if location_items:
             _overlay_locations(
@@ -5265,6 +5496,7 @@ def field_facet(
         _align_colorbars(fig)
     _fit_text_widths(fig)
     _clear_row_labels(fig)
+    _label_overlays(fig)
     # last, for the same reason: the panels have to be where they will be drawn before
     # the title can be centred over them
     _centre_suptitle(fig)
@@ -5372,6 +5604,16 @@ def _check_section_contours(
         fill_levels=fill_levels,
         section_x=section_x,
     )
+    _check_contour_kwargs(contour_kwargs)
+    if fill_levels is not None:
+        fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
+
+
+def _check_contour_kwargs(contour_kwargs: Any) -> None:
+    """Refuse a ``contour_kwargs`` that is not a mapping or that carries ``levels``.
+
+    Shared by every family that draws overlay lines, sections and maps alike.
+    """
     if contour_kwargs is not None and not isinstance(contour_kwargs, Mapping):
         raise TypeError(
             "contour_kwargs= takes a dict of ax.contour keywords (colors, linewidths, "
@@ -5383,8 +5625,25 @@ def _check_section_contours(
             "contour_kwargs holds 'levels', but which lines are drawn is "
             "contour_levels=, decided once so every panel shows the same ones."
         )
-    if fill_levels is not None:
-        fill_edges(0.0, 1.0, log=False, fill_levels=fill_levels)  # raises on a bad spec
+
+
+def _check_map_contours(
+    has_overlay: bool, *, contour_levels: Any, contour_kwargs: Any
+) -> None:
+    """Refuse a contour style with no overlay to style, before any figure exists.
+
+    The map families' counterpart of :func:`_check_section_contours`: the shared
+    refusal (:func:`ocean_skill.plot.section.check_contour_options`) plus the
+    ``contour_kwargs`` shape check.
+    """
+    from ocean_skill.plot.section import check_contour_options
+
+    check_contour_options(
+        has_contours=has_overlay,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    _check_contour_kwargs(contour_kwargs)
 
 
 def _check_section_casts(
@@ -5501,6 +5760,20 @@ def _prepare_overlay(raw, values, section_x="auto"):
     return prepare_overlay(raw, values, section_x)
 
 
+def _pooled_levels(arrays, spec) -> tuple[float, ...]:
+    """Return the one set of contour levels a figure draws, pooled over ``arrays``.
+
+    ``spec=None`` means ``True`` (about six round levels); no arrays at all means no
+    lines. Shared by sections and maps (:func:`_section_overlays`,
+    :func:`_map_overlays`), so the levels rule is one function.
+    """
+    from ocean_skill.plot.section import contour_levels
+
+    if not arrays:
+        return ()
+    return contour_levels(True if spec is None else spec, arrays)
+
+
 def _section_overlays(
     raws, panels, spec, section_x="auto"
 ) -> tuple[list[Any], tuple[float, ...]]:
@@ -5514,8 +5787,6 @@ def _section_overlays(
     means ``True``: about six round levels. Everything is prepared before anything is
     drawn, so a mismatched mesh fails before a figure exists.
     """
-    from ocean_skill.plot import section as _section_layout
-
     overlays = [
         _prepare_overlay(raw, v, section_x) for raw, v in zip(raws, panels, strict=True)
     ]
@@ -5525,11 +5796,7 @@ def _section_overlays(
         if overlay is not None
         for array in (overlay.values() if isinstance(overlay, dict) else (overlay,))
     ]
-    if not arrays:
-        return overlays, ()
-    return overlays, _section_layout.contour_levels(
-        True if spec is None else spec, arrays
-    )
+    return overlays, _pooled_levels(arrays, spec)
 
 
 def _draw_overlay(
@@ -5564,16 +5831,7 @@ def _draw_overlay(
     saved size until the layout has settled, so this only leaves what it needs on the
     axes for :func:`_label_overlays` to place once it has.
     """
-    from ocean_skill.plot.section import CONTOUR_COLOR, CONTOUR_WIDTH
-
-    style = dict(contour_kwargs or {})
-    fmt = style.pop("fmt", "%g")
-    labelled = style.pop("labels", True)
-    if "cmap" not in style:  # lines coloured by level, not also by a fixed colour
-        style.setdefault("colors", CONTOUR_COLOR)
-    style.setdefault("linewidths", CONTOUR_WIDTH)
-    style.setdefault("linestyles", "solid")
-    style.setdefault("zorder", _OVERLAY_ZORDER)
+    style, fmt, labelled = _overlay_style(contour_kwargs, _OVERLAY_ZORDER)
 
     z = np.ma.masked_invalid(np.asarray(overlay, dtype="float64"))
     finite = z.compressed()
@@ -5586,6 +5844,40 @@ def _draw_overlay(
         levels=list(levels),
         **style,
     )
+    _stash_labels(ax, lines, fmt, labelled, fontsize)
+
+
+def _overlay_style(
+    contour_kwargs: Mapping[str, Any] | None, zorder: float
+) -> tuple[dict[str, Any], str, bool]:
+    """Split ``contour_kwargs`` into ``(ax.contour style, label format, labelled)``.
+
+    The defaults every overlay shares -- thin black solid lines
+    (:data:`~ocean_skill.plot.section.CONTOUR_COLOR`,
+    :data:`~ocean_skill.plot.section.CONTOUR_WIDTH`) at ``zorder`` -- with the user's
+    keywords laid over them; ``fmt`` and ``labels`` style the labels rather than the
+    lines and so come out of the dict. Sections and maps differ only in ``zorder``.
+    """
+    from ocean_skill.plot.section import CONTOUR_COLOR, CONTOUR_WIDTH
+
+    style = dict(contour_kwargs or {})
+    fmt = style.pop("fmt", "%g")
+    labelled = style.pop("labels", True)
+    if "cmap" not in style:  # lines coloured by level, not also by a fixed colour
+        style.setdefault("colors", CONTOUR_COLOR)
+    style.setdefault("linewidths", CONTOUR_WIDTH)
+    style.setdefault("linestyles", "solid")
+    style.setdefault("zorder", zorder)
+    return style, fmt, labelled
+
+
+def _stash_labels(ax, lines, fmt: str, labelled: bool, fontsize: float) -> None:
+    """Leave ``lines`` on ``ax`` for :func:`_label_overlays`, if any were drawn.
+
+    ``ax.clabel`` has to wait for the final layout (see :func:`_label_overlays`), so
+    all a drawing step does is record what to label, how, and at what size. An axes
+    holds one set, so a panel that draws several would label only the last.
+    """
     if labelled and any(len(segments) for segments in lines.allsegs):
         ax._osk_overlay = (lines, fmt, fontsize)
 
@@ -7806,6 +8098,8 @@ def field_map_grid(
     vmax: float | None = None,
     shared_limits: bool | str = False,
     titles: Sequence[str | None] | None = None,
+    contour_levels: bool | int | Sequence[float] | None = None,
+    contour_kwargs: dict[str, Any] | None = None,
 ):
     """Draw one map per item -- several *variables*, not one variable's own facet axis.
 
@@ -7879,6 +8173,14 @@ def field_map_grid(
     ``rows=``/``cols=`` -- one per *grid cell*, row-major, blanks included. ``None`` at
     a position keeps that panel's own auto title; the wrong count raises a
     copy-pasteable ``ValueError`` listing the current titles.
+
+    An item carrying ``contour`` (one map, no facet axes -- the overlay variable built
+    as the item's field was; some items may have none) gets its lines drawn over its own
+    fill. ``contour_levels`` and ``contour_kwargs`` are shared, and the levels are
+    decided once over every overlay of the grid, so every panel's lines mean the same
+    values; mixing variables with different ranges in one grid is the caller's call
+    (``contour_levels=`` takes explicit values). Either option without any ``contour``
+    is refused.
     """
     import warnings
 
@@ -7895,6 +8197,17 @@ def field_map_grid(
     _warn_if_interactive_only(rasterize, hover, tiles)
     if not items:
         raise ValueError("field_map_grid needs at least one field, got none")
+    _check_map_contours(
+        any(item.get("contour") is not None for item in items),
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
+    item_overlays, levels = _map_overlays(
+        [item.get("contour") for item in items],
+        [item["field"] for item in items],
+        contour_levels,
+    )
+    overlay_of = {id(item): ov for item, ov in zip(items, item_overlays, strict=True)}
     if colorbars not in ("panel", "column"):
         raise ValueError(f'colorbars must be "panel" or "column"; got {colorbars!r}.')
 
@@ -8141,6 +8454,10 @@ def field_map_grid(
             bottom_labels=bottom if shared_axis_labels else None,
             coastline_resolution=coastline_resolution,
             land=land,
+            overlay=overlay_of[id(item)],
+            levels=levels,
+            contour_kwargs=contour_kwargs,
+            contour_fontsize=scale["contour_label"],
         )
         ax.title._osk_size_pinned = title_pinned
         ims[index] = im
@@ -8191,6 +8508,7 @@ def field_map_grid(
         _fit_text_widths(fig)
     if margins:
         _clear_row_labels(fig)
+    _label_overlays(fig)
     _warn_if_cramped(fig, ncols, canvas=canvas, nrows=nrows)
     if save:
         save = Path(save).expanduser()
@@ -10552,6 +10870,7 @@ def _render(spec, **kwargs: Any):
             # made to say nothing -- only an item that *names* "time" (even as
             # None, for a still-standing facet axis) overrides it.
             time=item.get("time", _TIME_NOT_GIVEN),
+            contour=item.get("contour"),
             **opts,
         )
     if family == "facet_movie":
@@ -10576,6 +10895,7 @@ def _render(spec, **kwargs: Any):
             time=item.get("time"),
             region=item.get("region"),
             metrics=item.get("metrics"),
+            contour=item.get("contour"),
             **opts,
         )
     if family == "skill_map":

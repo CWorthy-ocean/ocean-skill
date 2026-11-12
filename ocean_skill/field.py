@@ -1221,6 +1221,27 @@ class Field:
         """
         return self._replace(select={**self.select, "depth": "surface"})
 
+    def _with_grid_defaults(self) -> Field:
+        """Return this field with :meth:`plot`'s grid preamble applied (copy or self).
+
+        The surface default (a bare vertical select on a catalogued grid draws the
+        surface, via :meth:`_surfaced`) followed by the bare-multistep-time precheck:
+        exactly what :meth:`plot` and :meth:`_map_items_of` run before building a
+        map, named once so a contour overlay -- which has to be built the way the
+        map it is drawn over was -- gets the same defaults rather than a second set.
+        Returns ``self`` when nothing applies.
+        """
+        meta = self._grid_metadata_if_eligible()
+        if meta is None:
+            return self
+        field = (
+            self._surfaced()
+            if self._bare_vertical() and _grid_has_vertical_axis(meta)
+            else self
+        )
+        field._refuse_bare_multistep_time_precheck()
+        return field
+
     def _refuse_bare_multistep_time(self) -> None:
         """Raise the "no default instant" message :meth:`plot` gives a bare grid.
 
@@ -1440,11 +1461,9 @@ class Field:
         from ocean_skill.comparison import _aggregate_label
         from ocean_skill.operators import resolve_dim
 
-        grid_meta = self._grid_metadata_if_eligible()
-        if grid_meta is not None:
-            if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
-                return self._surfaced()._map_items_of(levels=levels)
-            self._refuse_bare_multistep_time_precheck()
+        defaulted = self._with_grid_defaults()
+        if defaulted is not self:
+            return defaulted._map_items_of(levels=levels)
 
         item = self._facet_item_or_refuse()
         field = item["field"]
@@ -1564,13 +1583,18 @@ class Field:
             the map. Refused for the other shapes (a series, section, profile...),
             which have no map to draw on.
         contours
-            Sections only. Another :class:`Field` -- a second variable from the same
-            source, built with the same ``select``/``aggregate`` so it lands on the
-            same section grid -- drawn as black, labelled contour lines over this
-            one's fill: isotherms over phosphate, say. ``contour_levels=`` picks the
-            lines (``True`` for about six round values, an int for about that many,
-            or a list), ``contour_kwargs=`` styles them. An overlay on a different
-            grid is refused by name, never regridded.
+            Sections and maps. Another :class:`Field` -- a second variable from the
+            same source, built with the same ``select``/``aggregate`` -- drawn as
+            black, labelled contour lines over this one's fill: isotherms over
+            phosphate, say, or oxygen isolines over an OMZ-thickness map.
+            ``contours=True`` draws this field's own lines. ``contour_levels=``
+            picks the lines (``True`` for about six round values, an int for about
+            that many, or a list), ``contour_kwargs=`` styles them. A section's
+            overlay must land on the same section grid and an overlay on a
+            different one is refused by name, never regridded; a map's overlay must
+            stand on the same facet axes (time, depth) as the map, but may sit on
+            another grid, since lines live in longitude and latitude. Not for
+            series, profiles, depth-time panels or movies.
         **kwargs
             Plot options forwarded to the renderer: option families such as
             ``color_by``, ``marker_by``, ``labels``, ``title``, ``domain``,
@@ -1599,28 +1623,37 @@ class Field:
         # multi-step time axis has no single default instant, and says so rather
         # than guessing one -- read-cheap (a lazy peek at this variable's own axis,
         # see _refuse_bare_multistep_time_precheck), never a full prepare.
-        grid_meta = self._grid_metadata_if_eligible()
-        if grid_meta is not None:
-            if self._bare_vertical() and _grid_has_vertical_axis(grid_meta):
-                return self._surfaced().plot(
-                    renderer=renderer,
-                    locations=locations,
-                    contours=contours,
-                    family=family,
-                    **kwargs,
-                )
-            self._refuse_bare_multistep_time_precheck()
+        defaulted = self._with_grid_defaults()
+        if defaulted is not self:
+            return defaulted.plot(
+                renderer=renderer,
+                locations=locations,
+                contours=contours,
+                family=family,
+                **kwargs,
+            )
 
         if family is not None:
             return self._with_family(family).plot(
                 renderer=renderer, locations=locations, contours=contours, **kwargs
             )
 
+        # contours=True is this field's own lines: resolved only now, on the field
+        # actually drawn (surfaced, its family settled), so the overlay *is* it and
+        # its map is the one already built below rather than a second prepare
+        if contours is True:
+            contours = self
+        elif contours is False:
+            contours = None
         contour_keys: dict[str, Any] = {}
+        overlay = None
         if contours is not None:
             from ocean_skill._overlay import contour_members, field_contour
 
             (overlay,) = contour_members(contours, 1, kind="field")
+            if self.family == "field_facet" and overlay is not self:
+                # a map's overlay gets the grid defaults the map itself just got
+                overlay = overlay._with_grid_defaults()
             contour_keys = field_contour(overlay, plotted=self)
 
         if locations is not None:
@@ -1662,11 +1695,19 @@ class Field:
             # labelless-facet checks -- lives in _facet_item_or_refuse, shared
             # with FieldSet._map_items so the two never draw a map by different
             # rules.
-            spec = PlotSpec(
-                family="field_facet",
-                items=[self._facet_item_or_refuse()],
-                options=kwargs,
-            )
+            item = self._facet_item_or_refuse()
+            if overlay is not None:
+                from ocean_skill._overlay import map_contour
+
+                # built the way the map's own item was just built (same refusals,
+                # same facet axes), then paired and checked against it
+                overlay_map = (
+                    item["field"]
+                    if overlay is self
+                    else overlay._facet_item_or_refuse()["field"]
+                )
+                item = {**item, **map_contour(contour_keys, overlay_map, item["field"])}
+            spec = PlotSpec(family="field_facet", items=[item], options=kwargs)
         return render(spec, renderer=renderer)
 
     @graft_plot_options()
@@ -2049,6 +2090,17 @@ class FieldSet:
             items.append({**f.as_item(), "label": f.label or f.source})
         return items
 
+    def _map_items_by_member(self) -> list[list[dict[str, Any]]]:
+        """Every member's own map items, a list per member (see :meth:`_map_items`)."""
+        per_member = [f._map_items_of(levels=True) for f in self.fields]
+        if len({len(items) for items in per_member}) > 1:
+            # levels standing on some members and not others is not a fan over levels
+            # but a member that is not one map: refused as it always was
+            for f, items in zip(self.fields, per_member, strict=True):
+                if len(items) > 1:
+                    f._map_items_of(levels=False)
+        return per_member
+
     def _map_items(self) -> list[dict[str, Any]]:
         """Every member's own single map item, one panel each.
 
@@ -2057,14 +2109,59 @@ class FieldSet:
         levels and statistics is a set of maps like any other -- but only when every
         member has the same levels standing; one beside members with none is refused.
         """
-        per_member = [f._map_items_of(levels=True) for f in self.fields]
-        if len({len(items) for items in per_member}) > 1:
-            # levels standing on some members and not others is not a fan over levels
-            # but a member that is not one map: refused as it always was
-            for f, items in zip(self.fields, per_member, strict=True):
-                if len(items) > 1:
-                    f._map_items_of(levels=False)
-        return [item for items in per_member for item in items]
+        return [item for items in self._map_items_by_member() for item in items]
+
+    def _with_map_contours(
+        self,
+        per_member: list[list[dict[str, Any]]],
+        overlays: list[Field],
+        keys: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Flatten ``per_member`` map items, each carrying its overlay's own map.
+
+        Each overlay member is split into its levels exactly as the member it is
+        drawn over was (:meth:`Field._map_items_of`) and paired with it item by
+        item, so a set fanned over levels draws each level's lines over that level's
+        fill. A member and its overlay that split into different numbers of panels
+        have no pairing and are refused by name.
+        """
+        from ocean_skill._overlay import map_contour
+        from ocean_skill.comparison import _short_variable_label
+
+        out = []
+        for f, items, overlay, key in zip(
+            self.fields, per_member, overlays, keys, strict=True
+        ):
+            # a member over itself (contours=True) reuses the maps just built
+            overlay_items = (
+                items if overlay is f else overlay._map_items_of(levels=True)
+            )
+            if len(overlay_items) != len(items):
+                raise ValueError(
+                    f"contours= pairs each map panel with its overlay's own map, but "
+                    f"{f.source!r} {_short_variable_label(f.variable)} draws "
+                    f"{len(items)} panel(s) and its overlay {len(overlay_items)} -- "
+                    "narrow or collapse the overlay with the same select=/aggregate= "
+                    "as the map."
+                )
+            for item, overlay_item in zip(items, overlay_items, strict=True):
+                out.append(
+                    {
+                        **item,
+                        **map_contour(key, overlay_item["field"], item["field"]),
+                    }
+                )
+        return out
+
+    def _lone_overlay(self, overlays: list[Field] | None) -> Any:
+        """Return the ``contours=`` a lone member's own :meth:`Field.plot` takes.
+
+        ``True`` when the member is its own overlay (``contours=True`` on the set), so
+        that call reuses the map it builds rather than preparing it a second time.
+        """
+        if overlays is not None and overlays[0] is self.fields[0]:
+            return True
+        return overlays
 
     @graft_plot_options()
     def plot(
@@ -2092,9 +2189,11 @@ class FieldSet:
             styling dicts. See ``docs/plot_styling_reference.md`` for the full
             list.
         contours
-            Sections only. A :class:`FieldSet` (or a list of fields) of the same
+            Sections and maps. A :class:`FieldSet` (or a list of fields) of the same
             length, paired with this set's members by position, drawn as contour
-            lines over each member's fill -- see :meth:`Field.plot`.
+            lines over each member's fill -- see :meth:`Field.plot`. A member
+            fanned into one map per level pairs with its overlay level by level.
+            ``contours=True`` draws this set's own lines.
         family
             ``"time_depth"`` or ``"series"``: asks every member for that layout
             -- see :meth:`Field.plot`. ``"time_depth"`` draws one panel per member
@@ -2135,6 +2234,11 @@ class FieldSet:
         # own renderer -- draws the set's title; a caller's own title= still wins.
         if self.title is not None:
             kwargs.setdefault("title", self.title)
+
+        if contours is True:
+            contours = self
+        elif contours is False:
+            contours = None
 
         overlays = None
         if contours is not None:
@@ -2190,8 +2294,16 @@ class FieldSet:
         if overlays is not None:
             from ocean_skill._overlay import field_contour
 
-            # every member must be a section for an overlay to mean anything; this
-            # refuses the first that is not, by name, before any figure is built
+            # every member must be a section (or every one a map) for an overlay to
+            # mean anything; this refuses the first that is not, by name, before any
+            # figure is built. A map's overlay gets the grid defaults its own member
+            # gets, so its family is read from the surfaced field, not a whole 3-D one.
+            overlays = [
+                o
+                if f.family != "field_facet" or o is f
+                else o._with_grid_defaults()
+                for f, o in zip(self.fields, overlays, strict=True)
+            ]
             contour_keys = [
                 field_contour(o, plotted=f)
                 for f, o in zip(self.fields, overlays, strict=True)
@@ -2246,7 +2358,7 @@ class FieldSet:
             # -- the same single-panel path, with nothing to stack against.
             if len(self.fields) == 1:
                 return self.fields[0].plot(
-                    renderer=renderer, contours=overlays, **kwargs
+                    renderer=renderer, contours=self._lone_overlay(overlays), **kwargs
                 )
             items = self._section_items()
             if overlays is not None:
@@ -2268,8 +2380,14 @@ class FieldSet:
             # refusal exists only for a *set* of several maps side by side --
             # a lone one has no such neighbour to keep level with.
             if len(self.fields) == 1:
-                return self.fields[0].plot(renderer=renderer, **kwargs)
-            items = self._map_items()
+                return self.fields[0].plot(
+                    renderer=renderer, contours=self._lone_overlay(overlays), **kwargs
+                )
+            per_member = self._map_items_by_member()
+            if overlays is not None:
+                items = self._with_map_contours(per_member, overlays, contour_keys)
+            else:
+                items = [item for member in per_member for item in member]
             spec = PlotSpec(
                 family="field_map_grid",
                 items=items,

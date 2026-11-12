@@ -60,6 +60,7 @@ __all__ = [
     "ContourLevel",
     "SectionGeometry",
     "cast_marks",
+    "check_contour_options",
     "check_section_options",
     "check_section_x",
     "contour_label",
@@ -1150,6 +1151,26 @@ def contour_label(level: float, fmt: str = "%g") -> str:
     return (fmt % level).replace("-", "\N{MINUS SIGN}")
 
 
+def check_contour_options(
+    *, has_contours: bool, contour_levels=None, contour_kwargs=None
+) -> None:
+    """Refuse ``contour_levels=``/``contour_kwargs=`` with no overlay to style.
+
+    Both style the lines ``contours=`` draws, so either one on a figure where no panel
+    has an overlay would be silently ignored; it is refused by name instead, in one
+    wording for every family that draws lines -- sections (through
+    :func:`check_section_options`) and maps alike.
+    """
+    if not has_contours and (contour_levels is not None or contour_kwargs is not None):
+        given = "contour_levels=" if contour_levels is not None else "contour_kwargs="
+        raise ValueError(
+            f"{given} styles the lines contours= draws, but no panel here has an "
+            "overlay -- pass contours= as well (another field or comparison of the "
+            "variable to draw as lines, built the same way, or contours=True for "
+            "the plotted one's own)."
+        )
+
+
 def check_section_options(
     *,
     has_contours: bool,
@@ -1175,13 +1196,11 @@ def check_section_options(
             "(Line marks -- 'line', 'step' -- belong to a series, not a vertical "
             "section.)"
         )
-    if not has_contours and (contour_levels is not None or contour_kwargs is not None):
-        given = "contour_levels=" if contour_levels is not None else "contour_kwargs="
-        raise ValueError(
-            f"{given} styles the lines contours= draws, but no panel here has an "
-            "overlay -- pass contours= as well (another field or comparison of the "
-            "variable to draw as lines, built the same way)."
-        )
+    check_contour_options(
+        has_contours=has_contours,
+        contour_levels=contour_levels,
+        contour_kwargs=contour_kwargs,
+    )
     if fill_levels is not None and mark != "contourf":
         raise ValueError(
             f"fill_levels= sets the bands of a filled-contour fill, but mark={mark!r} "

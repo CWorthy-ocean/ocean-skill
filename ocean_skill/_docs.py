@@ -121,8 +121,9 @@ and the difference panel keeps its own; not ``skill_map``),
 ``figsize``/``size``/``zoom``/``font_scale`` (sizing), ``save``, ``ncols``/
 ``nrows`` (grid layout; ``rows``/``cols`` facet a stacked ``section``/``time_depth``
 grid), ``shared_limits``/``shared_axes``, ``row_label_kwargs`` (a stacked
-``section_row``/``field_grid``), the section options ``contours`` (a second
-variable's object drawn as contour lines over the fill), ``contour_levels``,
+``section_row``/``field_grid``), the contour options ``contours`` (a second
+variable's object -- or ``True`` for the plotted one's own -- drawn as contour lines
+over a section's or a map's fill), ``contour_levels``,
 ``contour_kwargs`` and ``fill_levels`` (band count/edges for ``mark="contourf"``),
 ``casts``/``cast_kwargs``, ``bathymetry``/``seafloor_kwargs`` and ``cast_fill``
 (a section built from casts: a labelled line per cast, the test model's seafloor
